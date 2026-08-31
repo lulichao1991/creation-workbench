@@ -1,6 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { FeatureFlags } from "./features/featureFlags";
 import type {
+  AgentDispatch,
+  AgentSession,
+  AgentTask,
+  CreateSessionInput,
+  ExpertDefinition,
+  ResolveIntentInput,
+  ResolvedIntent,
+  SendAgentMessageInput,
+} from "./features/agent";
+import type {
   RuntimeTaskHandle,
   RuntimeTaskInput,
   RuntimeTaskState,
@@ -30,6 +40,15 @@ import type {
 
 export const api = {
   getFeatureFlags: () => invoke<FeatureFlags>("get_feature_flags"),
+  agentListExperts: () => invoke<ExpertDefinition[]>("agent_list_experts"),
+  agentResolveIntent: (input: ResolveIntentInput) =>
+    invoke<ResolvedIntent>("agent_resolve_intent", { input }),
+  agentCreateSession: (projectPath: string, input: CreateSessionInput) =>
+    invoke<AgentSession>("agent_create_session", { projectPath, input }),
+  agentSendMessage: (projectPath: string, input: SendAgentMessageInput) =>
+    invoke<AgentDispatch>("agent_send_message", { projectPath, input }),
+  agentGetTask: (projectPath: string, taskId: string) =>
+    invoke<AgentTask>("agent_get_task", { projectPath, taskId }),
   agentStartReadonlyTask: (input: RuntimeTaskInput) =>
     invoke<RuntimeTaskHandle>("agent_runtime_start_readonly", { input }),
   agentSendRuntimeInput: (taskId: string, input: string) =>

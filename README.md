@@ -1,6 +1,6 @@
 # 创作工作台 V2 开发线
 
-本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.4` 权限与修改提案阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI 或真实生图服务，V1 工作流保持完整可用：
+本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.5` 主 Agent 与单专业 Agent 阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI 或真实生图服务，V1 工作流保持完整可用：
 
 `作品结构 → 剧本 → 分镜 → 资产 → 关键帧 → 生成任务 / 提示词 → 历史与快照`
 
@@ -88,3 +88,12 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 用户批准项、拒绝项、权限卡解决、Agent 来源 ChangeSet、批量业务修改与提案状态在同一个 SQLite 事务完成，成功修改仍可由 V1 历史系统撤销；
 - 权限卡不能经普通 `card_resolve` 绕过应用事务；未确认的字段级越权、多选未选对象、保护字段、已删除对象、变更后旧值和写入范围变化都有拒绝回归测试；
 - 主 Agent、专业 Agent 路由和右侧 Agent UI 仍属于 Goal17–18。
+
+## V2 Goal17 主 Agent 与单专业 Agent（0.2.0-alpha.5）
+
+- 新增 MainAgent 应用服务，负责幂等创建会话/消息/任务、解析意图、建立 ContextPackage、调度单一专业 Agent、持久化状态和归一化结果；
+- ExpertRegistry 固定注册编剧、导演/分镜、摄影、美术、关键帧和提示词六类专家，分别声明职责、默认读取、默认写入、禁止项与系统指令，并支持项目级 Provider/模型覆盖和禁用；
+- IntentResolver 综合当前对象、字段、工作区和用户关键词；文档规定的六条路由样例均有固定测试，信号不足或并列时返回澄清问题，不启动多个专家；
+- 专家只接收有预算和 checksum 的 ContextPackage 与当前 WriteScope，Pi 仍以无工具模式运行；输出统一收敛为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks；
+- 有修改的结构化结果会再次经过 Goal16 的 old-value 与权限检查并持久化为 PatchProposal，Agent 不获得 SQL、文件系统、MutationService、视频生成或正式图片选择入口；
+- 流式会话、选区与写入范围展示、卡片和差异交互属于 Goal18。

@@ -10,8 +10,9 @@ use tauri::{Emitter, Manager};
 use crate::app_database::load_feature_flags;
 use crate::database::AppResult;
 use pi::PiRuntimeAdapter;
-use runtime::{AgentRuntime, RuntimeEventSink};
+use runtime::AgentRuntime;
 
+pub(crate) use runtime::{RuntimeEvent, RuntimeEventSink};
 pub use runtime::{RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState};
 
 pub const RUNTIME_EVENT_NAME: &str = "agent-runtime-event";
@@ -28,6 +29,19 @@ impl Default for RuntimeState {
     }
 }
 
+impl RuntimeState {
+    pub(crate) fn start_task(
+        &self,
+        input: RuntimeTaskInput,
+        event_sink: RuntimeEventSink,
+    ) -> AppResult<RuntimeTaskHandle> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .start_task(input, event_sink)
+    }
+}
+
 #[tauri::command]
 pub fn agent_runtime_start_readonly(
     app: tauri::AppHandle,
@@ -39,11 +53,7 @@ pub fn agent_runtime_start_readonly(
     let event_sink: RuntimeEventSink = Arc::new(move |event| {
         let _ = event_app.emit(RUNTIME_EVENT_NAME, event);
     });
-    state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime 状态锁损坏".to_string())?
-        .start_task(input, event_sink)
+    state.start_task(input, event_sink)
 }
 
 #[tauri::command]

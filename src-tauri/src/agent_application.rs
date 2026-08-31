@@ -1,0 +1,1016 @@
+use crate::agent_runtime::{
+    ensure_agent_core_enabled, RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput,
+    RUNTIME_EVENT_NAME,
+};
+use crate::app_database::load_feature_flags;
+use crate::context::{build_context, BuildContextInput, SelectionSnapshot};
+use crate::database::{now, open_database, AppResult};
+use crate::permission::{propose_patch, PatchItemInput, ProposePatchInput, WriteScope};
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpertDefinition {
+    pub expert_type: &'static str,
+    pub display_name: &'static str,
+    pub responsibilities: &'static [&'static str],
+    pub default_read: &'static [&'static str],
+    pub default_write: &'static [&'static str],
+    pub prohibited: &'static [&'static str],
+    pub system_instruction: &'static str,
+}
+
+const EXPERTS: &[ExpertDefinition] = &[
+    ExpertDefinition {
+        expert_type: "writer",
+        display_name: "编剧 Agent",
+        responsibilities: &["情节", "人物动机", "对白", "冲突", "结构", "伏笔", "节奏"],
+        default_read: &["当前剧本或场", "相邻场", "角色资产", "项目结构"],
+        default_write: &["选中的剧本文本、对白或场字段"],
+        prohibited: &["未经申请修改分镜、资产或关键帧"],
+        system_instruction: "从人物动机、冲突、对白和叙事结构判断，保持既有项目事实。",
+    },
+    ExpertDefinition {
+        expert_type: "director",
+        display_name: "导演 / 分镜 Agent",
+        responsibilities: &[
+            "剧本拆镜",
+            "镜头顺序",
+            "揭示顺序",
+            "动作拆分",
+            "连续性",
+            "镜头节奏",
+        ],
+        default_read: &["当前场剧本", "当前场镜头", "前后场状态", "资产需求"],
+        default_write: &["选中镜头或镜头组的导演与分镜字段"],
+        prohibited: &["未经申请改写资产或关键帧事实"],
+        system_instruction: "从镜头存在价值、信息揭示、主体切换、动作拆分和连续性判断。",
+    },
+    ExpertDefinition {
+        expert_type: "cinematography",
+        display_name: "摄影 Agent",
+        responsibilities: &["景别", "机位", "拍摄方向", "构图", "运镜", "空间层次"],
+        default_read: &["当前镜头", "前后镜头", "场景空间", "正式资产", "叙事目的"],
+        default_write: &["选中镜头的摄影字段"],
+        prohibited: &["改变剧情、对白或动作结果"],
+        system_instruction: "只从摄影语言和空间关系提出建议，不改变剧情、对白与动作结果。",
+    },
+    ExpertDefinition {
+        expert_type: "art",
+        display_name: "美术 Agent",
+        responsibilities: &["视觉定义", "色彩", "材质", "形态", "资产需求", "资产提示词"],
+        default_read: &[
+            "资产定义",
+            "需求来源镜头",
+            "正式资产图片",
+            "视觉规则",
+            "相关关键帧",
+        ],
+        default_write: &["选中资产或资产需求字段"],
+        prohibited: &["自动把候选图设为正式资产"],
+        system_instruction: "从角色、场景、道具的视觉一致性和可生成性判断，不选择正式图片。",
+    },
+    ExpertDefinition {
+        expert_type: "keyframe",
+        display_name: "关键帧 Agent",
+        responsibilities: &[
+            "静态画面",
+            "资产组合",
+            "人物比例",
+            "场景空间",
+            "关键帧提示词",
+        ],
+        default_read: &["当前镜头", "正式资产", "现有关键帧", "场景空间"],
+        default_write: &["选中关键帧的描述与提示词字段"],
+        prohibited: &["在提示词中改变镜头事实", "自动选择正式关键帧"],
+        system_instruction: "把镜头事实落实为静态画面；发现矛盾时提出问题，不在提示词中偷改事实。",
+    },
+    ExpertDefinition {
+        expert_type: "prompt",
+        display_name: "提示词 Agent",
+        responsibilities: &["视频提示词编译", "模型适配", "复杂度风险", "任务拆分建议"],
+        default_read: &["生成任务", "关联镜头", "资产", "关键帧", "目标模型"],
+        default_write: &["选中生成任务的提示词字段"],
+        prohibited: &["调用视频生成"],
+        system_instruction: "编译目标模型提示词并标明来源与风险；绝不调用视频生成。",
+    },
+];
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveIntentInput {
+    pub message: String,
+    pub workspace: Option<String>,
+    pub selection: SelectionSnapshot,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedIntent {
+    pub task_type: String,
+    pub expert_type: Option<String>,
+    pub confidence: f32,
+    pub reason: String,
+    pub clarification_question: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSessionInput {
+    pub request_id: String,
+    pub project_id: String,
+    pub scope_type: String,
+    pub scope_id: Option<String>,
+    pub title: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub id: String,
+    pub project_id: String,
+    pub scope_type: String,
+    pub scope_id: Option<String>,
+    pub title: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendMessageInput {
+    pub request_id: String,
+    pub session_id: String,
+    pub message: String,
+    pub workspace: Option<String>,
+    pub selection: SelectionSnapshot,
+    pub write_scope: WriteScope,
+    #[serde(default = "default_token_budget")]
+    pub token_budget: usize,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+fn default_token_budget() -> usize {
+    8_000
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTask {
+    pub id: String,
+    pub session_id: String,
+    pub task_type: String,
+    pub agent_type: String,
+    pub selection: Value,
+    pub read_scope: Value,
+    pub write_scope: Value,
+    pub context_revision: i64,
+    pub status: String,
+    pub model_provider: Option<String>,
+    pub model_name: Option<String>,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDispatch {
+    pub session_id: String,
+    pub task_id: String,
+    pub route: ResolvedIntent,
+    pub runtime_started: bool,
+    pub status: String,
+}
+
+struct PreparedTask {
+    dispatch: AgentDispatch,
+    runtime_input: Option<RuntimeTaskInput>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExpertResultDraft {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    findings: Vec<Value>,
+    patch_proposal: Option<PatchDraft>,
+    #[serde(default)]
+    related_impacts: Vec<Value>,
+    #[serde(default)]
+    permission_requests: Vec<Value>,
+    #[serde(default)]
+    questions: Vec<String>,
+    #[serde(default)]
+    risks: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchDraft {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    items: Vec<PatchItemInput>,
+}
+
+#[tauri::command]
+pub fn agent_list_experts(app: tauri::AppHandle) -> AppResult<Vec<ExpertDefinition>> {
+    ensure_expert_agents_enabled(&app)?;
+    Ok(EXPERTS.to_vec())
+}
+
+#[tauri::command]
+pub fn agent_resolve_intent(
+    app: tauri::AppHandle,
+    input: ResolveIntentInput,
+) -> AppResult<ResolvedIntent> {
+    ensure_expert_agents_enabled(&app)?;
+    Ok(resolve_intent(&input))
+}
+
+#[tauri::command]
+pub fn agent_create_session(
+    app: tauri::AppHandle,
+    project_path: String,
+    input: CreateSessionInput,
+) -> AppResult<AgentSession> {
+    ensure_expert_agents_enabled(&app)?;
+    create_session(Path::new(&project_path), input)
+}
+
+#[tauri::command]
+pub fn agent_send_message(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, RuntimeState>,
+    project_path: String,
+    input: SendMessageInput,
+) -> AppResult<AgentDispatch> {
+    ensure_expert_agents_enabled(&app)?;
+    let prepared = prepare_task(Path::new(&project_path), input)?;
+    let Some(runtime_input) = prepared.runtime_input else {
+        return Ok(prepared.dispatch);
+    };
+    let task_id = prepared.dispatch.task_id.clone();
+    let buffer = Arc::new(Mutex::new(String::new()));
+    let sink_buffer = Arc::clone(&buffer);
+    let sink_path = PathBuf::from(&project_path);
+    let sink_app = app.clone();
+    let sink: RuntimeEventSink = Arc::new(move |event| {
+        handle_runtime_event(&sink_path, &sink_buffer, &event);
+        let _ = sink_app.emit(RUNTIME_EVENT_NAME, event);
+    });
+    if let Err(error) = runtime.start_task(runtime_input, sink) {
+        mark_task_failed(Path::new(&project_path), &task_id, &error)?;
+        return Err(error);
+    }
+    Ok(AgentDispatch {
+        runtime_started: true,
+        status: "queued".into(),
+        ..prepared.dispatch
+    })
+}
+
+#[tauri::command]
+pub fn agent_get_task(
+    app: tauri::AppHandle,
+    project_path: String,
+    task_id: String,
+) -> AppResult<AgentTask> {
+    ensure_expert_agents_enabled(&app)?;
+    let conn = open_database(Path::new(&project_path))?;
+    load_task(&conn, &task_id)
+}
+
+fn ensure_expert_agents_enabled(app: &tauri::AppHandle) -> AppResult<()> {
+    ensure_agent_core_enabled(app)?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    if load_feature_flags(&app_data_dir)?.get("expert_agents") != Some(&true) {
+        return Err("专业 Agent 特性尚未启用".into());
+    }
+    Ok(())
+}
+
+fn expert(expert_type: &str) -> Option<&'static ExpertDefinition> {
+    EXPERTS
+        .iter()
+        .find(|expert| expert.expert_type == expert_type)
+}
+
+fn resolve_intent(input: &ResolveIntentInput) -> ResolvedIntent {
+    let message = input.message.to_lowercase();
+    let mut scores = [0_i32; 6];
+    score_keywords(
+        &message,
+        &[
+            "这句", "对白", "台词", "动机", "冲突", "剧情", "伏笔", "反转", "编剧",
+        ],
+        &mut scores[0],
+    );
+    score_keywords(
+        &message,
+        &[
+            "镜头顺序",
+            "信息重复",
+            "拆镜",
+            "分镜",
+            "揭示顺序",
+            "连续性",
+            "节奏",
+            "导演",
+        ],
+        &mut scores[1],
+    );
+    score_keywords(
+        &message,
+        &[
+            "构图",
+            "景别",
+            "机位",
+            "拍摄方向",
+            "运镜",
+            "空间层次",
+            "摄影",
+        ],
+        &mut scores[2],
+    );
+    score_keywords(
+        &message,
+        &[
+            "背面", "外观", "色彩", "材质", "造型", "资产", "美术", "道具",
+        ],
+        &mut scores[3],
+    );
+    score_keywords(
+        &message,
+        &["关键帧", "人物比例", "起始帧", "中间帧", "结束帧"],
+        &mut scores[4],
+    );
+    score_keywords(
+        &message,
+        &["seedance", "编译", "目标模型", "视频提示词", "模型适配"],
+        &mut scores[5],
+    );
+
+    if let Some(center) = input.selection.center.as_ref() {
+        match center.object_type.as_str() {
+            "asset" | "assetRequirement" => scores[3] += 2,
+            "keyframe" => scores[4] += 3,
+            "generationTask" => scores[5] += 2,
+            "scene" | "script" | "contentUnit" => scores[0] += 1,
+            "shot" => {
+                if let Some(field) = center.field.as_deref() {
+                    match field {
+                        "dialogue" | "narrative_purpose" | "new_information" => scores[0] += 3,
+                        "sort_order" | "action" | "start_state" | "end_state" => scores[1] += 3,
+                        "shot_size" | "camera_height" | "camera_direction" | "composition"
+                        | "camera_movement" => scores[2] += 3,
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(workspace) = input.workspace.as_deref() {
+        match workspace {
+            "script" => scores[0] += 1,
+            "shots" => scores[1] += 1,
+            "assets" => scores[3] += 1,
+            "keyframes" => scores[4] += 1,
+            "generation" => scores[5] += 1,
+            _ => {}
+        }
+    }
+    let max = scores.iter().copied().max().unwrap_or(0);
+    let winners = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, score)| **score == max && max >= 2)
+        .map(|(index, _)| EXPERTS[index].expert_type)
+        .collect::<Vec<_>>();
+    let task_type = if message.contains("修改")
+        || message.contains("重写")
+        || message.contains("设计")
+        || message.contains("编译")
+        || message.contains("增强")
+    {
+        "edit"
+    } else {
+        "analyze"
+    };
+    if winners.len() != 1 {
+        return ResolvedIntent {
+            task_type: "clarify".into(),
+            expert_type: None,
+            confidence: 0.0,
+            reason: "请求缺少唯一的专业信号".into(),
+            clarification_question: Some(
+                "你希望我优先从剧情/分镜、摄影画面，还是美术与提示词方向处理？".into(),
+            ),
+        };
+    }
+    ResolvedIntent {
+        task_type: task_type.into(),
+        expert_type: Some(winners[0].into()),
+        confidence: (max as f32 / 6.0).clamp(0.35, 1.0),
+        reason: format!(
+            "根据当前对象、字段、工作区和请求关键词路由到 {}",
+            expert(winners[0]).unwrap().display_name
+        ),
+        clarification_question: None,
+    }
+}
+
+fn score_keywords(message: &str, keywords: &[&str], score: &mut i32) {
+    *score += keywords
+        .iter()
+        .filter(|keyword| message.contains(**keyword))
+        .count() as i32
+        * 2;
+}
+
+fn create_session(project_path: &Path, input: CreateSessionInput) -> AppResult<AgentSession> {
+    if input.request_id.trim().is_empty() || input.project_id.trim().is_empty() {
+        return Err("TOOL_ARGUMENT_INVALID: requestId 和 projectId 不能为空".into());
+    }
+    let conn = open_database(project_path)?;
+    if let Ok(existing) = load_session(&conn, &input.request_id) {
+        if existing.project_id != input.project_id {
+            return Err("TOOL_ARGUMENT_INVALID: requestId 已被其他项目使用".into());
+        }
+        return Ok(existing);
+    }
+    let actual_project_id: String = conn
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if actual_project_id != input.project_id {
+        return Err("TOOL_ARGUMENT_INVALID: projectId 不属于当前项目".into());
+    }
+    let timestamp = now();
+    conn.execute(
+        "INSERT INTO agent_sessions (id, project_id, scope_type, scope_id, title, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+        params![input.request_id, input.project_id, input.scope_type, input.scope_id, input.title, timestamp],
+    )
+    .map_err(|e| e.to_string())?;
+    load_session(&conn, &input.request_id)
+}
+
+fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<PreparedTask> {
+    if input.request_id.trim().is_empty() || input.message.trim().is_empty() {
+        return Err("TOOL_ARGUMENT_INVALID: requestId 和 message 不能为空".into());
+    }
+    let mut conn = open_database(project_path)?;
+    let task_id = format!("{}:task", input.request_id);
+    if let Ok(existing) = load_task(&conn, &task_id) {
+        let route = route_from_task(&existing);
+        return Ok(PreparedTask {
+            dispatch: AgentDispatch {
+                session_id: existing.session_id,
+                task_id: existing.id,
+                route,
+                runtime_started: false,
+                status: existing.status,
+            },
+            runtime_input: None,
+        });
+    }
+    let route = resolve_intent(&ResolveIntentInput {
+        message: input.message.clone(),
+        workspace: input.workspace.clone(),
+        selection: input.selection.clone(),
+    });
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let (project_id, revision): (String, i64) = tx
+        .query_row("SELECT id, revision FROM projects LIMIT 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    if input.selection.project_id != project_id || input.selection.project_revision != revision {
+        return Err("REVISION_STALE: 当前选区不属于项目或已过期".into());
+    }
+    let session_project: String = tx
+        .query_row(
+            "SELECT project_id FROM agent_sessions WHERE id=?1 AND status='active'",
+            [&input.session_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在或已关闭".to_string())?;
+    if session_project != project_id {
+        return Err("TOOL_ARGUMENT_INVALID: AgentSession 不属于当前项目".into());
+    }
+    let timestamp = now();
+    tx.execute(
+        "INSERT INTO agent_messages (id, session_id, role, agent_type, content, created_at) VALUES (?1, ?2, 'user', 'main', ?3, ?4)",
+        params![input.request_id, input.session_id, input.message, timestamp],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'context_building', ?9, ?10, ?11)",
+        params![task_id, input.session_id, route.task_type, route.expert_type.as_deref().unwrap_or("main"), serde_json::to_string(&input.selection).map_err(|e| e.to_string())?, serde_json::to_string(&input.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&input.write_scope).map_err(|e| e.to_string())?, revision, input.provider, input.model, timestamp],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET updated_at=?1 WHERE id=?2",
+        params![timestamp, input.session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+
+    if route.expert_type.is_none() {
+        let result = json!({
+            "summary": "需要先明确处理方向",
+            "findings": [],
+            "patchProposal": null,
+            "relatedImpacts": [],
+            "permissionRequests": [],
+            "questions": [route.clarification_question.clone().unwrap_or_default()],
+            "risks": []
+        });
+        finish_without_runtime(
+            project_path,
+            &task_id,
+            &input.session_id,
+            &result,
+            "waiting_for_user",
+        )?;
+        return Ok(PreparedTask {
+            dispatch: AgentDispatch {
+                session_id: input.session_id,
+                task_id,
+                route,
+                runtime_started: false,
+                status: "waiting_for_user".into(),
+            },
+            runtime_input: None,
+        });
+    }
+
+    let expert_type = route.expert_type.as_deref().unwrap();
+    let package = match build_context(
+        &mut conn,
+        BuildContextInput {
+            task_id: task_id.clone(),
+            selection: input.selection,
+            task_intent: route.task_type.clone(),
+            expert_type: expert_type.into(),
+            token_budget: input.token_budget,
+        },
+    ) {
+        Ok(package) => package,
+        Err(error) => {
+            mark_task_failed(project_path, &task_id, &error)?;
+            return Err(error);
+        }
+    };
+    let (provider, model) =
+        expert_model_override(&conn, &project_id, expert_type, input.provider, input.model)?;
+    conn.execute(
+        "UPDATE agent_tasks SET status='queued', model_provider=?1, model_name=?2 WHERE id=?3",
+        params![provider, model, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let prompt = build_expert_prompt(expert_type, &input.message, &input.write_scope, &package)?;
+    Ok(PreparedTask {
+        dispatch: AgentDispatch {
+            session_id: input.session_id,
+            task_id: task_id.clone(),
+            route,
+            runtime_started: false,
+            status: "queued".into(),
+        },
+        runtime_input: Some(RuntimeTaskInput {
+            task_id: Some(task_id),
+            prompt,
+            provider,
+            model,
+        }),
+    })
+}
+
+fn build_expert_prompt(
+    expert_type: &str,
+    user_message: &str,
+    write_scope: &WriteScope,
+    package: &crate::context::ContextPackage,
+) -> AppResult<String> {
+    let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
+    Ok(format!(
+        "你是{}。{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage 中的事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
+        definition.display_name,
+        definition.system_instruction,
+        definition.prohibited.join("；"),
+        user_message,
+        serde_json::to_string(write_scope).map_err(|e| e.to_string())?,
+        serde_json::to_string(package).map_err(|e| e.to_string())?,
+    ))
+}
+
+fn expert_model_override(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    expert_type: &str,
+    provider: Option<String>,
+    model: Option<String>,
+) -> AppResult<(Option<String>, Option<String>)> {
+    let override_row: Option<(i64, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT enabled, model_provider, model_name FROM project_expert_overrides WHERE project_id=?1 AND expert_type=?2",
+            params![project_id, expert_type],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some((enabled, override_provider, override_model)) = override_row {
+        if enabled == 0 {
+            return Err(format!(
+                "{} 已在当前项目禁用",
+                expert(expert_type).unwrap().display_name
+            ));
+        }
+        Ok((override_provider.or(provider), override_model.or(model)))
+    } else {
+        Ok((provider, model))
+    }
+}
+
+fn handle_runtime_event(project_path: &Path, buffer: &Mutex<String>, event: &RuntimeEvent) {
+    match event {
+        RuntimeEvent::TaskStarted { task_id } => {
+            if let Ok(conn) = open_database(project_path) {
+                let _ = conn.execute(
+                    "UPDATE agent_tasks SET status='running', started_at=?1 WHERE id=?2",
+                    params![now(), task_id],
+                );
+            }
+        }
+        RuntimeEvent::TextDelta { delta, .. } => {
+            if let Ok(mut text) = buffer.lock() {
+                text.push_str(delta);
+            }
+        }
+        RuntimeEvent::UsageUpdated { task_id, usage } => {
+            if let Ok(conn) = open_database(project_path) {
+                let _ = conn.execute(
+                    "UPDATE agent_tasks SET usage_json=?1 WHERE id=?2",
+                    params![usage.to_string(), task_id],
+                );
+            }
+        }
+        RuntimeEvent::TaskCompleted { task_id } => {
+            let text = buffer.lock().map(|value| value.clone()).unwrap_or_default();
+            if let Err(error) = complete_agent_task(project_path, task_id, &text) {
+                let _ = mark_task_failed(project_path, task_id, &error);
+            }
+        }
+        RuntimeEvent::TaskFailed { task_id, error } => {
+            let _ = mark_task_failed(project_path, task_id, error);
+        }
+        RuntimeEvent::TaskCancelled { task_id } => {
+            if let Ok(conn) = open_database(project_path) {
+                let _ = conn.execute(
+                    "UPDATE agent_tasks SET status='cancelled', completed_at=?1 WHERE id=?2",
+                    params![now(), task_id],
+                );
+            }
+        }
+        RuntimeEvent::ToolCallRequested { .. } | RuntimeEvent::ToolCallCompleted { .. } => {}
+    }
+}
+
+fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResult<Value> {
+    let conn = open_database(project_path)?;
+    let (session_id, revision): (String, i64) = conn
+        .query_row(
+            "SELECT session_id, context_revision FROM agent_tasks WHERE id=?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string())?;
+    drop(conn);
+    let mut draft =
+        serde_json::from_str::<ExpertResultDraft>(raw).unwrap_or_else(|_| ExpertResultDraft {
+            summary: raw.trim().to_string(),
+            ..ExpertResultDraft::default()
+        });
+    if draft.summary.trim().is_empty() {
+        draft.summary = "专业 Agent 已完成分析".into();
+    }
+    let patch_value = if let Some(patch) = draft
+        .patch_proposal
+        .take()
+        .filter(|patch| !patch.items.is_empty())
+    {
+        let proposal = propose_patch(
+            project_path,
+            ProposePatchInput {
+                request_id: format!("{task_id}:proposal"),
+                task_id: task_id.into(),
+                base_revision: revision,
+                title: if patch.title.trim().is_empty() {
+                    "专业 Agent 修改提案".into()
+                } else {
+                    patch.title
+                },
+                items: patch.items,
+            },
+        )?;
+        Some(serde_json::to_value(proposal).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let status = if patch_value.is_some() || !draft.questions.is_empty() {
+        "waiting_for_user"
+    } else {
+        "completed"
+    };
+    let result = json!({
+        "summary": draft.summary,
+        "findings": draft.findings,
+        "patchProposal": patch_value,
+        "relatedImpacts": draft.related_impacts,
+        "permissionRequests": draft.permission_requests,
+        "questions": draft.questions,
+        "risks": draft.risks,
+    });
+    finish_without_runtime(project_path, task_id, &session_id, &result, status)?;
+    Ok(result)
+}
+
+fn finish_without_runtime(
+    project_path: &Path,
+    task_id: &str,
+    session_id: &str,
+    result: &Value,
+    status: &str,
+) -> AppResult<()> {
+    let mut conn = open_database(project_path)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let timestamp = now();
+    tx.execute(
+        "UPDATE agent_tasks SET status=?1, result_json=?2, completed_at=?3 WHERE id=?4",
+        params![status, result.to_string(), timestamp, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT OR REPLACE INTO agent_messages (id, session_id, role, agent_type, content, structured_json, created_at) VALUES (?1, ?2, 'assistant', 'main', ?3, ?4, ?5)",
+        params![format!("{task_id}:assistant"), session_id, result["summary"].as_str().unwrap_or_default(), result.to_string(), timestamp],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET updated_at=?1 WHERE id=?2",
+        params![timestamp, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn mark_task_failed(project_path: &Path, task_id: &str, error: &str) -> AppResult<()> {
+    let conn = open_database(project_path)?;
+    conn.execute(
+        "UPDATE agent_tasks SET status='failed', error_json=?1, completed_at=?2 WHERE id=?3",
+        params![
+            json!({"message": error, "retryable": true, "projectFactsChanged": false}).to_string(),
+            now(),
+            task_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn load_session(conn: &rusqlite::Connection, session_id: &str) -> AppResult<AgentSession> {
+    conn.query_row(
+        "SELECT id, project_id, scope_type, scope_id, title, status, created_at, updated_at FROM agent_sessions WHERE id=?1",
+        [session_id],
+        |row| Ok(AgentSession { id: row.get(0)?, project_id: row.get(1)?, scope_type: row.get(2)?, scope_id: row.get(3)?, title: row.get(4)?, status: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)? }),
+    ).map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在".into())
+}
+
+fn load_task(conn: &rusqlite::Connection, task_id: &str) -> AppResult<AgentTask> {
+    conn.query_row(
+        "SELECT id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, result_json, error_json, created_at, started_at, completed_at FROM agent_tasks WHERE id=?1",
+        [task_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, i64>(7)?, row.get::<_, String>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, String>(13)?, row.get::<_, Option<String>>(14)?, row.get::<_, Option<String>>(15)?)),
+    ).map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string()).and_then(|row| Ok(AgentTask {
+        id: row.0, session_id: row.1, task_type: row.2, agent_type: row.3,
+        selection: serde_json::from_str(&row.4).map_err(|e| e.to_string())?,
+        read_scope: serde_json::from_str(&row.5).map_err(|e| e.to_string())?,
+        write_scope: serde_json::from_str(&row.6).map_err(|e| e.to_string())?,
+        context_revision: row.7, status: row.8, model_provider: row.9, model_name: row.10,
+        result: row.11.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
+        error: row.12.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
+        created_at: row.13, started_at: row.14, completed_at: row.15,
+    }))
+}
+
+fn route_from_task(task: &AgentTask) -> ResolvedIntent {
+    ResolvedIntent {
+        task_type: task.task_type.clone(),
+        expert_type: (task.agent_type != "main").then(|| task.agent_type.clone()),
+        confidence: 1.0,
+        reason: "幂等请求返回已存在任务".into(),
+        clarification_question: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::ObjectRef;
+    use crate::database::init_database;
+
+    fn selection(
+        project_id: &str,
+        object_type: &str,
+        object_id: &str,
+        field: Option<&str>,
+    ) -> SelectionSnapshot {
+        let center = ObjectRef {
+            project_id: project_id.into(),
+            object_type: object_type.into(),
+            object_id: object_id.into(),
+            field: field.map(str::to_string),
+        };
+        SelectionSnapshot {
+            project_id: project_id.into(),
+            center: Some(center.clone()),
+            selected: vec![center],
+            project_revision: 0,
+        }
+    }
+
+    #[test]
+    fn registry_contains_six_bounded_experts() {
+        assert_eq!(EXPERTS.len(), 6);
+        assert_eq!(
+            EXPERTS
+                .iter()
+                .map(|expert| expert.expert_type)
+                .collect::<Vec<_>>(),
+            vec![
+                "writer",
+                "director",
+                "cinematography",
+                "art",
+                "keyframe",
+                "prompt"
+            ]
+        );
+        assert!(EXPERTS.iter().all(|expert| !expert.prohibited.is_empty()));
+    }
+
+    #[test]
+    fn routes_acceptance_examples_and_clarifies_ambiguous_request() {
+        let cases = [
+            ("这句不像她", "shot", "dialogue", "writer"),
+            ("这三个镜头信息重复", "shot", "title", "director"),
+            ("构图太平", "shot", "composition", "cinematography"),
+            ("奶牛猫背面怎么设计", "asset", "description", "art"),
+            (
+                "这个镜头关键帧人物比例不对",
+                "keyframe",
+                "description",
+                "keyframe",
+            ),
+            (
+                "编译成 Seedance 提示词",
+                "generationTask",
+                "prompt",
+                "prompt",
+            ),
+        ];
+        for (message, object_type, field, expected) in cases {
+            let route = resolve_intent(&ResolveIntentInput {
+                message: message.into(),
+                workspace: None,
+                selection: selection("project", object_type, "object", Some(field)),
+            });
+            assert_eq!(route.expert_type.as_deref(), Some(expected), "{message}");
+        }
+        let ambiguous = resolve_intent(&ResolveIntentInput {
+            message: "这个镜头整体不好".into(),
+            workspace: Some("shots".into()),
+            selection: selection("project", "shot", "shot", None),
+        });
+        assert_eq!(ambiguous.task_type, "clarify");
+        assert!(ambiguous.clarification_question.is_some());
+    }
+
+    #[test]
+    fn prepares_single_expert_context_and_materializes_patch_proposal() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Agent 测试", "short").unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let timestamp = now();
+        conn.execute("INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES ('unit', ?1, 'short', '正片', 0, ?2, ?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'unit', '正片', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, composition, created_at, updated_at) VALUES ('shot', 'scene', 0, '镜头04', '旧构图', ?1, ?1)", [&timestamp]).unwrap();
+        drop(conn);
+        let session = create_session(
+            temp.path(),
+            CreateSessionInput {
+                request_id: "session".into(),
+                project_id: project.id.clone(),
+                scope_type: "shot".into(),
+                scope_id: Some("shot".into()),
+                title: "镜头协作".into(),
+            },
+        )
+        .unwrap();
+        let selected = selection(&project.id, "shot", "shot", Some("composition"));
+        let scope = WriteScope {
+            refs: selected
+                .selected
+                .clone()
+                .into_iter()
+                .map(|reference| crate::permission::ObjectRef {
+                    project_id: reference.project_id,
+                    object_type: reference.object_type,
+                    object_id: reference.object_id,
+                    field: reference.field,
+                })
+                .collect(),
+            protected_refs: vec![],
+        };
+        let prepared = prepare_task(
+            temp.path(),
+            SendMessageInput {
+                request_id: "message".into(),
+                session_id: session.id,
+                message: "构图太平，请增强空间层次".into(),
+                workspace: Some("shots".into()),
+                selection: selected,
+                write_scope: scope,
+                token_budget: 800,
+                provider: None,
+                model: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.dispatch.route.expert_type.as_deref(),
+            Some("cinematography")
+        );
+        let runtime_input = prepared.runtime_input.unwrap();
+        assert!(runtime_input.prompt.contains("ContextPackage"));
+        assert!(runtime_input.prompt.contains("patchProposal"));
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM context_packages WHERE task_id=?1",
+                [&prepared.dispatch.task_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        let result = complete_agent_task(temp.path(), &prepared.dispatch.task_id, r#"{"summary":"增强前中后景层次","findings":[],"patchProposal":{"title":"构图优化","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"前景遮挡、中景主体、后景纵深","reason":"增强空间层次"}]},"relatedImpacts":[],"permissionRequests":[],"questions":[],"risks":[]}"#).unwrap();
+        assert_eq!(result["patchProposal"]["status"], "pending");
+        assert_eq!(
+            result["patchProposal"]["items"][0]["permissionState"],
+            "allowed"
+        );
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM agent_tasks WHERE id=?1",
+                [&prepared.dispatch.task_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "waiting_for_user"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM patch_proposals WHERE task_id=?1",
+                [&prepared.dispatch.task_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_messages WHERE session_id='session'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+    }
+}

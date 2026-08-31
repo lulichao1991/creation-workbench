@@ -1,3 +1,4 @@
+mod agent_application;
 mod agent_runtime;
 mod app_database;
 mod commands;
@@ -6,6 +7,10 @@ mod database;
 mod mutation;
 mod permission;
 
+use agent_application::{
+    agent_create_session, agent_get_task, agent_list_experts, agent_resolve_intent,
+    agent_send_message,
+};
 use agent_runtime::{
     agent_cancel_task, agent_get_task_state, agent_runtime_send_input,
     agent_runtime_start_readonly, RuntimeState,
@@ -40,6 +45,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_feature_flags,
+            agent_list_experts,
+            agent_resolve_intent,
+            agent_create_session,
+            agent_send_message,
+            agent_get_task,
             agent_runtime_start_readonly,
             agent_runtime_send_input,
             agent_cancel_task,

@@ -1,6 +1,6 @@
-# Goal 01–16 实施状态
+# Goal 01–17 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.4，V2 Goal16 权限、修改提案与 AI 卡片）
+验证日期：2026-08-31（0.2.0-alpha.5，V2 Goal17 主 Agent 与单专业 Agent）
 
 ## Goal 对照
 
@@ -22,6 +22,7 @@
 | 14 Pi Runtime 接入 | 完成 | Rust `AgentRuntime` 与 `PiRuntimeAdapter`；TypeScript Runtime 契约；Pi 官方 RPC JSONL；流式文本和工具事件；追加输入、状态与取消；MockRuntime；Windows `.cmd`、中文空格路径和子进程回收验证 |
 | 15 上下文系统 | 完成 | SelectionSnapshot / ContextPolicy / ContextPackage；字段级中心事实；父链、邻居、Relation 与镜头资产结构查询；FTS5；token budget；稳定 checksum；revision 校验和事务快照；V4 持久化 |
 | 16 权限、修改提案与 AI 卡片 | 完成 | WriteScope / ProtectedScope 权限判断；Patch old/new 差异；权限卡；revision、旧值、对象与权限变化 stale 校验；一次性批准；同事务批量 Mutation 与 Agent ChangeSet；9 个权限安全测试 |
+| 17 主 Agent 与单专业 Agent | 完成 | MainAgent 应用服务；IntentResolver；ExpertRegistry / ExpertRouter；六类专家配置；会话/任务持久化；Context/Pi/Patch 串联；统一结构化输出；固定路由测试与含糊澄清 |
 
 ## 自动化验收
 
@@ -94,3 +95,9 @@ FTS5 只在用户或上层服务显式调用搜索接口时建立临时索引，
 PermissionService 从 `agent_tasks.write_scope_json` 读取当前写入范围，按“保护范围优先、明确对象/字段授权、其余需要确认”分类 PatchItem。Agent 只能创建提案和卡片，没有直接写入工具；`patch_apply` 是唯一将提案转为项目事实的入口，调用已有 MutationService 生成 `source_type=agent` 的单一 ChangeSet。
 
 应用提案会在同一 SQLite 事务中校验 base revision、每个字段 old value、对象存在性和最新权限状态，再处理一次性批准/拒绝、批量写入、权限卡 resolution 与提案状态。任何 revision、旧值、对象或相关写入范围变化都会将提案和待处理项持久化为 stale；保护字段即使被列入批准项也会拒绝。权限卡不能通过普通 `card_resolve` 绕过该事务。自动化现为前端 6 项、Rust 31 项。
+
+## V2 Goal17 说明
+
+MainAgent 通过 `agent_create_session`、`agent_send_message` 和 `agent_get_task` 管理持久化会话与任务。IntentResolver 使用当前对象、字段、工作区和请求关键词确定唯一专家；信号不足或并列时创建结构化澄清结果并停留在 `waiting_for_user`，不会同时调用全部专家。ExpertRegistry 固定六类专家的职责、上下文、写入边界和禁止项，项目覆盖表可替换 Provider/模型或禁用某专家。
+
+专业任务先写入 `context_building`，ContextPackage 成功后进入 `queued`，Runtime 事件持久化 `running/completed/waiting_for_user/cancelled/failed`。专家提示只包含有预算的 ContextPackage、WriteScope 和统一 JSON 输出契约；结果被归一化后写入 assistant message 与 task result。含修改项的结果调用 Goal16 服务生成 PatchProposal，不直接调用 MutationService。路由验收逐条覆盖编剧、导演/分镜、摄影、美术、关键帧和提示词六个固定案例，并验证含糊请求先澄清。自动化现为前端 6 项、Rust 34 项。

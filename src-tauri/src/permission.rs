@@ -213,7 +213,10 @@ pub fn card_resolve(
     resolve_card(Path::new(&project_path), input)
 }
 
-fn propose_patch(project_path: &Path, input: ProposePatchInput) -> AppResult<PatchProposal> {
+pub(crate) fn propose_patch(
+    project_path: &Path,
+    input: ProposePatchInput,
+) -> AppResult<PatchProposal> {
     if input.request_id.trim().is_empty() || input.task_id.trim().is_empty() {
         return Err("TOOL_ARGUMENT_INVALID: requestId 和 taskId 不能为空".into());
     }
