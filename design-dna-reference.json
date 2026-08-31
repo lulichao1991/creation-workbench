@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "name": "Video Workbench — Dark Acid Studio",
+    "description": "从本地 Video Workbench 参考项目提取的深色创意生产工具视觉体系，并适配到创作工作台。",
+    "source_references": ["C:\\Users\\LU\\Documents\\Codex\\2026-08-29\\wo\\outputs\\video-workbench"],
+    "created_at": "2026-08-31T00:00:00+08:00"
+  },
+  "design_system": {
+    "color": {
+      "palette_type": "complementary",
+      "primary": { "hex": "#D2FF45", "role": "Primary actions, active navigation, focus, selected state" },
+      "secondary": { "hex": "#26241F", "role": "Secondary controls and raised charcoal surfaces" },
+      "accent": { "hex": "#D2FF45", "role": "Acid-lime brand signature and attention cue" },
+      "neutral": {
+        "scale": ["#11100F", "#181715", "#1E1D1A", "#26241F", "#302E29", "#444038", "#706C65", "#99948B", "#EEEAE4"],
+        "usage": "Near-black canvas, stepped charcoal surfaces, warm gray dividers, warm white text"
+      },
+      "semantic": { "success": "#80D7A7", "warning": "#E7B968", "error": "#F07D68", "info": "#81B7E8" },
+      "surface": { "background": "#11100F", "card": "#181715", "elevated": "#26241F" },
+      "contrast_strategy": "High-contrast warm white on charcoal with subtle layered surfaces and one vivid accent"
+    },
+    "typography": {
+      "type_scale": {
+        "display": { "size": "clamp(42px, 6vw, 72px)", "weight": "650", "line_height": "1.02", "tracking": "-0.055em" },
+        "heading_1": { "size": "27px", "weight": "600", "line_height": "1.15", "tracking": "-0.035em" },
+        "heading_2": { "size": "20px", "weight": "600", "line_height": "1.25", "tracking": "-0.02em" },
+        "heading_3": { "size": "15px", "weight": "600", "line_height": "1.35", "tracking": "-0.01em" },
+        "body": { "size": "13px", "weight": "400", "line_height": "1.6", "tracking": "0" },
+        "body_small": { "size": "11px", "weight": "400", "line_height": "1.5", "tracking": "0" },
+        "caption": { "size": "10px", "weight": "500", "line_height": "1.4", "tracking": "0.01em" },
+        "overline": { "size": "10px", "weight": "750", "line_height": "1.3", "tracking": "0.12em" }
+      },
+      "font_families": { "heading": "Inter, Segoe UI, Microsoft YaHei, system-ui, sans-serif", "body": "Inter, Segoe UI, Microsoft YaHei, system-ui, sans-serif", "mono": "Cascadia Code, Consolas, monospace" },
+      "font_style_notes": "Neutral neo-grotesk sans, compact UI labels, tight display tracking, no editorial serif"
+    },
+    "spacing": { "base_unit": "4px", "scale": ["4px", "8px", "12px", "16px", "24px", "32px", "48px", "64px"], "content_density": "compact", "section_rhythm": "Tight 8–16px component rhythm with 24–48px separation between major sections" },
+    "layout": { "grid_system": "Three-column application shell with collapsible side rails", "max_content_width": "1200px on project home; fluid in workbench", "columns": "210px / minmax(480px, 1fr) / 330px; collapsed rails 48px", "gutter": "12–30px depending on level", "breakpoints": ["800px", "1180px"], "alignment_tendency": "strict grid" },
+    "shape": { "border_radius": { "small": "6px", "medium": "9px", "large": "12px", "pill": "999px" }, "border_usage": "subtle 1px", "divider_style": "Warm charcoal 1px dividers used to define every persistent region" },
+    "elevation": { "shadow_style": "soft diffused", "levels": { "low": "0 8px 24px rgba(0,0,0,.18)", "medium": "0 16px 42px rgba(0,0,0,.28)", "high": "0 26px 70px rgba(0,0,0,.4)" }, "depth_cues": "Surface color intensity, borders, restrained shadows, occasional backdrop blur" },
+    "iconography": { "style": "outline", "stroke_weight": "1.8–2px", "size_scale": ["14px", "16px", "18px", "21px"], "preferred_set": "Lucide React" },
+    "motion": { "easing": "ease / ease-in-out", "duration_scale": { "micro": "160ms", "normal": "200ms", "macro": "320ms" }, "entrance_pattern": "Subtle opacity and short upward reveal only where necessary", "exit_pattern": "Fast fade or rail collapse", "philosophy": "minimal functional" },
+    "components": {
+      "button_style": "38–42px compact controls; acid-lime filled primary, charcoal secondary, bordered ghost",
+      "input_style": "Near-black fill, warm gray 1px border, 7–8px radius, lime focus ring",
+      "card_style": "Charcoal surface, 1px divider border, 9–12px radius, hover lift limited to 2px",
+      "navigation_pattern": "Compact top tabs with line icons and lime bottom indicator; collapsible left and right rails",
+      "modal_style": "Elevated charcoal panel, strong border, soft deep shadow, blurred backdrop",
+      "list_style": "Dense rows, low-contrast hover fill, lime edge/outline for selection",
+      "component_notes": "Use borders and stepped surfaces before shadows; preserve information density and visible state hierarchy"
+    }
+  },
+  "design_style": {
+    "aesthetic": { "mood": ["focused", "cinematic", "technical", "confident"], "visual_metaphor": "A professional post-production control room", "era_influence": "Contemporary desktop creative tooling", "genre": "dark creative SaaS / native studio tool", "personality_traits": ["precise", "quiet", "capable", "opinionated"], "adjectives": ["charcoal", "acidic", "compact", "structured", "cinematic"] },
+    "visual_language": { "complexity": "moderate", "ornamentation": "subtle accents", "whitespace_usage": "Controlled and compact with larger breathing room only on the home hero", "visual_weight_distribution": "Persistent rails frame a dominant central work surface", "focal_strategy": "Color weight and active-state highlighting", "contrast_level": "high", "texture_usage": "Subtle 32px drafting grid and checkerboard media placeholders" },
+    "composition": { "hierarchy_method": "Color weight, typographic scale, borders, and spatial isolation", "balance_type": "asymmetric", "flow_direction": "Left-to-right from structure to canvas to context", "grouping_strategy": "Persistent panels, bordered cards, segmented tabs, nested lists", "negative_space_role": "Separates production stages and prevents dense data from becoming noisy" },
+    "imagery": { "photo_treatment": "Media shown edge-to-edge on dark cards with neutral contain/cover behavior", "illustration_style": "No decorative illustration; functional outline iconography", "graphic_elements": "Acid-lime marks, progress line, grid background, compact status pills", "pattern_usage": "Low-opacity drafting grid and diagonal placeholder hatch", "image_shape": "Mostly rectangular media with 9px radius" },
+    "interaction_feel": { "feedback_style": "Immediate border/color state changes", "hover_behavior": "One-step surface lift, brighter border, lime icon or label", "transition_personality": "snappy", "loading_style": "Thin luminous progress bar and compact status indicator", "microinteraction_density": "low-to-moderate" },
+    "brand_voice_in_ui": { "tone": "Direct, production-minded, calm", "formality": "professional", "cta_style": "direct imperative", "empty_state_approach": "Brief guidance with a single next action", "error_tone": "Concise, specific, recoverable" }
+  },
+  "visual_effects": {
+    "overview": { "effect_intensity": "subtle-accent", "performance_tier": "lightweight", "fallback_strategy": "reduce to static CSS surfaces and disable motion under prefers-reduced-motion", "primary_technology": "CSS only" },
+    "background_effects": { "type": "generative-art", "description": "Static low-opacity 32px drafting grid over near-black", "technology": "CSS linear-gradients", "params": { "color_palette": ["rgba(255,255,255,.018)", "transparent"], "speed": "0", "density": "32px grid", "opacity": "0.018", "blend_mode": "normal" } },
+    "particle_systems": { "enabled": false, "type": "none", "description": "No particles", "technology": "none", "params": { "count": 0, "shape": "none", "size_range": "none", "movement_pattern": "none", "color_behavior": "none", "interaction": "none", "spawn_area": "none" } },
+    "3d_elements": { "enabled": false, "type": "none", "description": "No 3D elements", "technology": "none", "params": { "renderer": "none", "lighting": "none", "camera": "none", "materials": "none", "geometry": "none", "post_processing": [], "interaction_model": "none" } },
+    "shader_effects": { "enabled": false, "type": "none", "description": "No shaders", "technology": "none", "params": { "uniforms": {}, "vertex_manipulation": "none", "fragment_output": "none", "noise_type": "none", "distortion": "none" } },
+    "scroll_effects": { "parallax": { "enabled": false, "layers": 0, "depth_range": "0", "speed_curve": "none" }, "scroll_triggered_animations": { "enabled": false, "trigger_points": [], "animation_type": "none", "scrub_behavior": "none" }, "scroll_morphing": { "enabled": false, "description": "No scroll morphing" } },
+    "text_effects": { "type": "none", "description": "Typography remains stable for editing accuracy", "technology": "CSS", "params": { "split_strategy": "none", "animation_per_unit": "none", "stagger": "0", "effect_style": "none" } },
+    "cursor_effects": { "enabled": false, "type": "none", "description": "Native cursor semantics", "params": { "shape": "native", "size": "native", "blend_mode": "normal", "trail": "none", "interaction_zone": "none" } },
+    "image_effects": { "type": "none", "description": "Functional media presentation without distortion", "technology": "CSS", "params": { "filter_pipeline": [], "hover_transform": "none", "reveal_animation": "none", "distortion_type": "none" } },
+    "glassmorphism_neumorphism": { "enabled": false, "style": "none", "params": { "blur_radius": "0", "transparency": "0", "border_treatment": "solid 1px warm charcoal", "shadow_type": "soft diffused on floating overlays only", "light_source_angle": "none" } },
+    "canvas_drawings": { "enabled": false, "type": "none", "description": "No Canvas drawing", "technology": "none", "params": { "draw_method": "none", "animation_loop": "none", "color_scheme": [], "responsiveness": "none", "interaction": "none" } },
+    "svg_animations": { "enabled": false, "type": "none", "description": "Static Lucide SVG icons only", "params": { "animation_method": "none", "path_morphing": false, "stroke_animation": false, "filter_effects": [] } },
+    "composite_notes": "The visual signature comes from layout density, stepped charcoal surfaces, thin dividers, acid-lime state cues, and restrained CSS transitions—not GPU-heavy decoration."
+  }
+}

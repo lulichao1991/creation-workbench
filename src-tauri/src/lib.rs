@@ -1,0 +1,34 @@
+mod commands;
+mod database;
+mod mutation;
+
+use commands::{
+    copy_project, create_project, delete_project, get_default_workspace, import_project_file,
+    list_projects, load_project_state, open_project, read_project_media,
+};
+use mutation::{apply_mutation, create_snapshot, list_history, restore_snapshot, undo_change_set};
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            get_default_workspace,
+            list_projects,
+            create_project,
+            open_project,
+            copy_project,
+            delete_project,
+            load_project_state,
+            import_project_file,
+            read_project_media,
+            apply_mutation,
+            list_history,
+            undo_change_set,
+            create_snapshot,
+            restore_snapshot,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
