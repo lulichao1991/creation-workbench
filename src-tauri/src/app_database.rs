@@ -7,7 +7,7 @@ use tauri::Manager;
 
 use crate::database::AppResult;
 
-pub const APP_SCHEMA_VERSION: i64 = 2;
+pub const APP_SCHEMA_VERSION: i64 = 3;
 pub const FEATURE_FLAG_KEYS: &[&str] = &[
     "agent_core",
     "expert_agents",
@@ -137,6 +137,10 @@ fn migrate_app_database(
         tx.execute_batch(MIGRATION_V2)
             .map_err(|e| format!("迁移 app.db 到版本 2 失败：{e}"))?;
     }
+    if version < 3 {
+        tx.execute_batch(MIGRATION_V3)
+            .map_err(|e| format!("迁移 app.db 到版本 3 失败：{e}"))?;
+    }
     verify_app_database(&tx)?;
     tx.pragma_update(None, "user_version", APP_SCHEMA_VERSION)
         .map_err(|e| format!("更新 app.db 版本失败：{e}"))?;
@@ -210,6 +214,27 @@ CREATE INDEX IF NOT EXISTS idx_long_term_memory_sources_memory
 ON long_term_memory_sources(memory_id, created_at);
 "#;
 
+const MIGRATION_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS provider_configs (
+  id TEXT PRIMARY KEY,
+  provider_type TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  secret_ref TEXT NOT NULL,
+  default_model TEXT NOT NULL,
+  capabilities_json TEXT NOT NULL DEFAULT '{}',
+  timeout_seconds INTEGER NOT NULL DEFAULT 120,
+  max_concurrency INTEGER NOT NULL DEFAULT 1,
+  allow_image_upload INTEGER NOT NULL DEFAULT 0 CHECK(allow_image_upload IN (0, 1)),
+  status TEXT NOT NULL DEFAULT 'configured',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_configs_status
+ON provider_configs(status, provider_type, updated_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,14 +247,14 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, APP_SCHEMA_VERSION);
-        let memory_table_count: i64 = conn
+        let service_table_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('long_term_memories', 'long_term_memory_sources')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('long_term_memories', 'long_term_memory_sources', 'provider_configs')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(memory_table_count, 2);
+        assert_eq!(service_table_count, 3);
         drop(conn);
 
         let flags = load_feature_flags(temp.path()).unwrap();

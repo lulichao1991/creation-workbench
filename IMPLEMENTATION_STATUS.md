@@ -1,6 +1,6 @@
-# Goal 01–21 实施状态
+# Goal 01–22 实施状态
 
-验证日期：2026-09-01（0.2.0-alpha.9，V2 Goal21 记忆系统）
+验证日期：2026-09-01（0.2.0-alpha.10，V2 Goal22 真实静态生图）
 
 ## Goal 对照
 
@@ -27,6 +27,7 @@
 | 19 分析本轮修改 | 完成 | 用户显式触发的 ChangeSet 只读任务；old/new 差异、受影响对象、父级、相邻对象与直接关系上下文；问题/建议卡；影响与复查范围；跨剧集确认边界；revision stale 保护 |
 | 20 高级作品结构与关系图 | 完成 | V5 StoryElement / Occurrence / GraphLayout；时间轴、关系图、剧集表；故事语义与聚焦模式；计划/事实问题提示；布局不改变 revision；30 集与 1000 关系测试 |
 | 21 记忆系统 | 完成 | project.db V6 与 app.db V2；项目/内容单元/长期记忆；来源、状态与使用任务审计；FTS 搜索；显式冲突替代；事实优先的 Context v2；500 条容量测试；右侧记忆面板 |
+| 22 真实静态生图 | 完成 | project.db V7 Job/Result 与候选目录；app.db V3 Provider 配置；Windows Credential Manager 密钥；OpenAI Compatible/Mock Adapter；成本二次确认；资产/关键帧生图；显式转正与 stale 保护；Windows 实机闭环 |
 
 ## 自动化验收
 
@@ -62,7 +63,7 @@ npm run tauri build
 
 ## V1 发布基线边界
 
-V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–21，但专家团和真实生图仍未实现；真实生成按钮保持禁用。
+V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–22；专家团和提示词编译器仍按后续 Goal 保持关闭，且静态生图不会自动调用或自动转正。
 
 ## Pro 审查问题修复
 
@@ -135,3 +136,11 @@ ContextPackage 以 ChangeSet 为中心，结构化解析每条 Change 的 old/ne
 候选记忆只供人工复核；只有 active 记录会进入 Context。激活同范围同分类记忆时，如果已有 active 记录，服务会返回 `MEMORY_CONFLICT`，必须携带明确的 `supersedesId` 才能在同一事务中替代旧记录。长期记忆 active 状态还需要显式 `confirmed=true`，因此单次对话或后台流程不能自动形成跨项目长期记忆。
 
 ContextService `context-v2` 先装载并裁剪项目事实，再按当前内容单元、祖先、项目范围和优先级加入最多 8 条项目记忆以及少量已确认长期记忆；预算不足时记忆先被舍弃。Agent 提示再次强制事实优先，并要求在冲突时明确指出而不是用记忆覆盖事实。右侧面板支持搜索、创建、范围设置、来源/使用任务查看、编辑、激活、显式替代和失效；中文 FTS 无词元命中时使用参数化子串检索回退。自动化现为前端 14 项、Rust 46 项。
+
+## V2 Goal22 说明
+
+ImageGenerationService 只接受资产需求或关键帧目标，先校验目标、提示词、候选数量、参考图来源和项目 revision，再持久化 Job。真实 Adapter 使用配置的 HTTPS Base URL、超时与默认模型调用 OpenAI Compatible 图片生成接口；API Key 通过 Windows Credential Manager 读取，数据库只保存 `secret_ref`，前端只显示是否已配置，不回显任何密钥。
+
+Provider 配置、模型、尺寸、质量、数量和成本提示在生成前可见，生成需要界面内二次确认。Job 结果只写入 `candidates/images/<job-id>/`；失败、取消和未选择候选不会生成 AssetMedia、Keyframe 事实或项目 ChangeSet。候选拒绝、归档和删除由独立状态管理，媒体清理会保护仍存在的候选。
+
+转正时重新核对当前提示词，stale 候选直接拒绝。通过校验后才把候选复制到正式目录，并在同一个 SQLite 事务中写入 AssetMedia/Requirement 关联或 Keyframe、`source_type=image_generation` ChangeSet、结果 selected 状态和项目 revision；事务失败会补偿删除已复制文件。自动化现为前端 14 项、Rust 52 项；真实 Windows Tauri 窗口已用 Mock Provider 验证默认关闭、显式启用、费用提示、候选隔离、二次确认和正式图片落库。

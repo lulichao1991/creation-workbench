@@ -4,9 +4,11 @@ mod app_database;
 mod commands;
 mod context;
 mod database;
+mod image_generation;
 mod memory;
 mod mutation;
 mod permission;
+mod provider;
 mod story_structure;
 
 use agent_application::{
@@ -23,6 +25,10 @@ use commands::{
     import_project_file, list_projects, load_project_state, open_project, read_project_media,
 };
 use context::{context_build, context_search};
+use image_generation::{
+    image_cancel, image_generate, image_get_job, image_list_jobs, image_select_result,
+    image_update_result_state, ImageGenerationState,
+};
 use memory::{memory_create, memory_invalidate, memory_list, memory_update};
 use mutation::{
     apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
@@ -32,6 +38,7 @@ use permission::{
     card_create, card_get, card_list, card_resolve, patch_apply, patch_get, patch_propose,
     patch_reject,
 };
+use provider::{provider_delete, provider_list, provider_save};
 use story_structure::{graph_layout_reset, graph_layout_save};
 use tauri::Manager;
 
@@ -46,6 +53,7 @@ pub fn run() {
                 .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
             app_database::initialize_app_database(&app_data_dir)?;
             app.manage(RuntimeState::default());
+            app.manage(ImageGenerationState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -67,6 +75,15 @@ pub fn run() {
             memory_create,
             memory_update,
             memory_invalidate,
+            provider_list,
+            provider_save,
+            provider_delete,
+            image_generate,
+            image_get_job,
+            image_list_jobs,
+            image_cancel,
+            image_select_result,
+            image_update_result_state,
             patch_propose,
             patch_get,
             patch_apply,

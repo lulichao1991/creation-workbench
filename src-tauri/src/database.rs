@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 pub const AGENT_TABLES: &[&str] = &[
     "ai_cards",
@@ -60,6 +60,8 @@ pub const STATE_TABLES: &[&str] = &[
     "graph_layouts",
     "project_memories",
     "memory_sources",
+    "image_generation_jobs",
+    "image_generation_results",
     "change_sets",
     "changes",
     "snapshots",
@@ -118,6 +120,8 @@ pub fn init_database(
         .map_err(|e| format!("初始化高级作品结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V6)
         .map_err(|e| format!("初始化项目记忆结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V7)
+        .map_err(|e| format!("初始化静态生图结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -180,6 +184,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 6 {
         tx.execute_batch(MIGRATION_V6)
             .map_err(|e| format!("迁移到数据库版本 6 失败：{e}"))?;
+    }
+    if version < 7 {
+        tx.execute_batch(MIGRATION_V7)
+            .map_err(|e| format!("迁移到数据库版本 7 失败：{e}"))?;
     }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
@@ -848,6 +856,44 @@ ON project_memories(scope_type, scope_id, status, priority, updated_at);
 CREATE INDEX IF NOT EXISTS idx_memory_sources_memory ON memory_sources(memory_id, created_at);
 "#;
 
+const MIGRATION_V7: &str = r#"
+CREATE TABLE IF NOT EXISTS image_generation_jobs (
+  id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL CHECK(target_type IN ('assetRequirement', 'keyframe')),
+  target_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  prompt_revision INTEGER NOT NULL,
+  reference_images_json TEXT NOT NULL DEFAULT '[]',
+  options_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'created' CHECK(status IN ('created', 'queued', 'running', 'completed', 'partial', 'cancelled', 'failed', 'interrupted')),
+  request_json TEXT NOT NULL DEFAULT '{}',
+  usage_json TEXT NOT NULL DEFAULT '{}',
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS image_generation_results (
+  id TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  preview_path TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  selection_state TEXT NOT NULL DEFAULT 'available' CHECK(selection_state IN ('available', 'rejected', 'selected', 'archived', 'deleted')),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(job_id) REFERENCES image_generation_jobs(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_target
+ON image_generation_jobs(target_type, target_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_image_generation_results_job
+ON image_generation_results(job_id, sort_order);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,6 +931,7 @@ mod tests {
             "idx_story_occurrences_unit",
             "idx_graph_layouts_scope",
             "idx_project_memories_scope_status",
+            "idx_image_generation_jobs_target",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -927,6 +974,8 @@ mod tests {
                  DROP TABLE graph_layouts;
                  DROP TABLE memory_sources;
                  DROP TABLE project_memories;
+                 DROP TABLE image_generation_results;
+                 DROP TABLE image_generation_jobs;
                  PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -946,6 +995,8 @@ mod tests {
             "graph_layouts",
             "project_memories",
             "memory_sources",
+            "image_generation_jobs",
+            "image_generation_results",
         ] {
             let exists: i64 = conn
                 .query_row(

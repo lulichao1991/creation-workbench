@@ -1,16 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { ImageGenerationSystem } from "./imageGeneration";
+import { generationCostNotice, type ProviderConfig } from "./imageGeneration";
 
-describe("ImageGenerationSystem phase-one stub", () => {
-  it("keeps the provider boundary without generating images", async () => {
-    const system = new ImageGenerationSystem();
-    await expect(
-      system.generate({
-        targetType: "asset",
-        targetId: "asset-1",
-        prompt: "测试",
-        referenceImages: [],
-      }),
-    ).rejects.toThrow("尚未配置图像生成服务");
+const provider = (providerType: ProviderConfig["providerType"]): ProviderConfig => ({
+  id: "provider",
+  providerType,
+  displayName: providerType === "mock" ? "Mock Provider" : "OpenAI",
+  baseUrl: "https://api.openai.com/v1",
+  defaultModel: "gpt-image-1",
+  capabilities: {},
+  timeoutSeconds: 120,
+  maxConcurrency: 1,
+  allowImageUpload: false,
+  status: "configured",
+  hasSecret: providerType !== "mock",
+  createdAt: "",
+  updatedAt: "",
+});
+
+describe("image generation cost confirmation", () => {
+  it("distinguishes free mock validation from billable providers", () => {
+    expect(generationCostNotice(provider("mock"), { count: 2 })).toContain("不产生服务商费用");
+    expect(generationCostNotice(provider("openai_compatible"), { count: 2, size: "1024x1536" })).toContain("费用由 OpenAI");
   });
 });

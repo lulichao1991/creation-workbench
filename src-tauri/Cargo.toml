@@ -1,6 +1,6 @@
 [package]
 name = "workbench"
-version = "0.2.0-alpha.9"
+version = "0.2.0-alpha.10"
 description = "本地优先的 AI 视频创作工作台"
 authors = ["LC"]
 edition = "2021"
@@ -28,6 +28,8 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 base64 = "0.22"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+keyring = { version = "4.2.0", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 
 [dev-dependencies]
 tempfile = "3"

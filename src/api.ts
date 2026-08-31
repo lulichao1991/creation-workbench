@@ -23,6 +23,15 @@ import type {
 } from "./features/context";
 import type { CreateMemoryInput, MemoryRecord, UpdateMemoryInput } from "./features/memory";
 import type {
+  GenerateImageInput,
+  ImageJob,
+  ImageResult,
+  ImageSelectionState,
+  ProviderConfig,
+  SaveProviderInput,
+  SelectImageResult,
+} from "./services/imageGeneration";
+import type {
   AICard,
   ApplyPatchInput,
   ApplyPatchResponse,
@@ -76,6 +85,21 @@ export const api = {
     invoke<MemoryRecord>("memory_update", { projectPath, input }),
   memoryInvalidate: (projectPath: string, storage: MemoryRecord["storage"], memoryId: string) =>
     invoke<MemoryRecord>("memory_invalidate", { projectPath, storage, memoryId }),
+  providerList: () => invoke<ProviderConfig[]>("provider_list"),
+  providerSave: (input: SaveProviderInput) => invoke<ProviderConfig>("provider_save", { input }),
+  providerDelete: (providerId: string) => invoke<void>("provider_delete", { providerId }),
+  imageGenerate: (projectPath: string, input: GenerateImageInput) =>
+    invoke<ImageJob>("image_generate", { projectPath, input }),
+  imageGetJob: (projectPath: string, jobId: string) =>
+    invoke<ImageJob>("image_get_job", { projectPath, jobId }),
+  imageListJobs: (projectPath: string, targetType: GenerateImageInput["targetType"], targetId: string) =>
+    invoke<ImageJob[]>("image_list_jobs", { projectPath, targetType, targetId }),
+  imageCancel: (projectPath: string, jobId: string) =>
+    invoke<ImageJob>("image_cancel", { projectPath, jobId }),
+  imageSelectResult: (projectPath: string, resultId: string) =>
+    invoke<SelectImageResult>("image_select_result", { projectPath, resultId }),
+  imageUpdateResultState: (projectPath: string, resultId: string, selectionState: Exclude<ImageSelectionState, "available" | "selected">) =>
+    invoke<ImageResult>("image_update_result_state", { projectPath, resultId, selectionState }),
   patchPropose: (projectPath: string, input: ProposePatchInput) =>
     invoke<PatchProposal>("patch_propose", { projectPath, input }),
   patchGet: (projectPath: string, proposalId: string) =>

@@ -249,6 +249,7 @@ pub fn cleanup_project_media(project_path: String) -> AppResult<usize> {
     for sql in [
         "SELECT file_path FROM asset_media WHERE file_path IS NOT NULL AND file_path <> ''",
         "SELECT file_path FROM keyframes WHERE file_path IS NOT NULL AND file_path <> ''",
+        "SELECT file_path FROM image_generation_results WHERE selection_state <> 'deleted'",
     ] {
         let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
         let paths = stmt
@@ -300,6 +301,7 @@ pub fn cleanup_project_media(project_path: String) -> AppResult<usize> {
         "assets/locations",
         "assets/props",
         "keyframes",
+        "candidates/images",
     ] {
         removed += remove_unreferenced_files(&project, &project.join(directory), &referenced)?;
     }
