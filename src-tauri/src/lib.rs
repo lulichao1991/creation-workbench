@@ -8,6 +8,7 @@ mod image_generation;
 mod memory;
 mod mutation;
 mod permission;
+mod prompt_compiler;
 mod provider;
 mod story_structure;
 
@@ -37,6 +38,10 @@ use mutation::{
 use permission::{
     card_create, card_get, card_list, card_resolve, patch_apply, patch_get, patch_propose,
     patch_reject,
+};
+use prompt_compiler::{
+    prompt_compile, prompt_list_compilations, prompt_list_profiles, prompt_list_templates,
+    prompt_save_profile, prompt_save_template, prompt_set_current,
 };
 use provider::{provider_delete, provider_list, provider_save};
 use story_structure::{graph_layout_reset, graph_layout_save};
@@ -78,6 +83,13 @@ pub fn run() {
             provider_list,
             provider_save,
             provider_delete,
+            prompt_list_profiles,
+            prompt_save_profile,
+            prompt_list_templates,
+            prompt_save_template,
+            prompt_compile,
+            prompt_list_compilations,
+            prompt_set_current,
             image_generate,
             image_get_job,
             image_list_jobs,

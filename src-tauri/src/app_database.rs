@@ -7,7 +7,7 @@ use tauri::Manager;
 
 use crate::database::AppResult;
 
-pub const APP_SCHEMA_VERSION: i64 = 3;
+pub const APP_SCHEMA_VERSION: i64 = 4;
 pub const FEATURE_FLAG_KEYS: &[&str] = &[
     "agent_core",
     "expert_agents",
@@ -141,6 +141,10 @@ fn migrate_app_database(
         tx.execute_batch(MIGRATION_V3)
             .map_err(|e| format!("迁移 app.db 到版本 3 失败：{e}"))?;
     }
+    if version < 4 {
+        tx.execute_batch(MIGRATION_V4)
+            .map_err(|e| format!("迁移 app.db 到版本 4 失败：{e}"))?;
+    }
     verify_app_database(&tx)?;
     tx.pragma_update(None, "user_version", APP_SCHEMA_VERSION)
         .map_err(|e| format!("更新 app.db 版本失败：{e}"))?;
@@ -235,6 +239,42 @@ CREATE INDEX IF NOT EXISTS idx_provider_configs_status
 ON provider_configs(status, provider_type, updated_at);
 "#;
 
+const MIGRATION_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS model_profiles (
+  key TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT '',
+  prompt_format TEXT NOT NULL DEFAULT 'plain_text',
+  max_duration_hint REAL,
+  max_shots_hint INTEGER,
+  image_reference_rules TEXT NOT NULL DEFAULT '',
+  supports_start_end_frame INTEGER NOT NULL DEFAULT 0 CHECK(supports_start_end_frame IN (0, 1)),
+  recommended_constraints_json TEXT NOT NULL DEFAULT '[]',
+  prohibited_patterns_json TEXT NOT NULL DEFAULT '[]',
+  version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS prompt_templates (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL DEFAULT 'global' CHECK(scope IN ('global', 'project')),
+  project_id TEXT,
+  model_profile_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  template_body TEXT NOT NULL,
+  conditional_rules_json TEXT NOT NULL DEFAULT '{}',
+  active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(model_profile_key) REFERENCES model_profiles(key) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_templates_profile
+ON prompt_templates(model_profile_key, active, scope, updated_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,12 +289,12 @@ mod tests {
         assert_eq!(version, APP_SCHEMA_VERSION);
         let service_table_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('long_term_memories', 'long_term_memory_sources', 'provider_configs')",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('long_term_memories', 'long_term_memory_sources', 'provider_configs', 'model_profiles', 'prompt_templates')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(service_table_count, 3);
+        assert_eq!(service_table_count, 5);
         drop(conn);
 
         let flags = load_feature_flags(temp.path()).unwrap();

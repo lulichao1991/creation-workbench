@@ -425,6 +425,29 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .linked-shots { display: grid; gap: 6px; margin-top: 19px; }
 .linked-shot { display: grid; grid-template-columns: 26px 1fr 55px auto auto auto; align-items: center; gap: 6px; padding: 8px; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
 .linked-shot .ghost { padding: 5px 8px; }
+.prompt-compiler-panel { display: grid; gap: 12px; padding: 15px; margin-top: 18px; background: #171915; border: 1px solid rgba(210,255,69,.22); border-radius: 9px; }
+.prompt-compiler-disabled { grid-template-columns: 1fr auto; align-items: center; }
+.prompt-compiler-disabled > div, .prompt-compiler-heading > div { display: grid; gap: 4px; }
+.prompt-compiler-panel small { color: var(--muted); }
+.prompt-compiler-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.prompt-compiler-controls { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.prompt-compiler-controls label, .prompt-output { display: grid; gap: 5px; color: var(--muted); font-size: 9px; }
+.prompt-compiler-controls select { width: 100%; padding: 7px 8px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.prompt-version-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.prompt-version-strip span { padding: 4px 7px; color: var(--accent); background: rgba(210,255,69,.05); border: 1px solid rgba(210,255,69,.13); border-radius: 99px; font-size: 9px; }
+.prompt-warning-list { display: grid; gap: 5px; }
+.prompt-warning { display: grid; grid-template-columns: 150px 1fr; gap: 8px; padding: 7px 9px; color: var(--muted); background: var(--surface-2); border-left: 2px solid var(--line-strong); border-radius: 5px; font-size: 10px; }
+.prompt-warning.warning { border-left-color: var(--accent); }
+.prompt-warning.error { border-left-color: var(--danger); }
+.prompt-output textarea { min-height: 240px; resize: vertical; }
+.prompt-compiler-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.prompt-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.prompt-compare > div { min-width: 0; padding: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
+.prompt-compare pre { max-height: 260px; overflow: auto; margin: 7px 0 0; color: var(--muted); white-space: pre-wrap; font: 10px/1.6 inherit; }
+.prompt-source-map { padding: 9px 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; }
+.prompt-source-map summary { color: var(--muted); cursor: pointer; font-size: 10px; }
+.prompt-source-map > div { display: grid; grid-template-columns: 150px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 9px; }
+.prompt-source-map > div span { overflow: hidden; color: var(--quiet); text-overflow: ellipsis; }
 .snapshot-create { display: flex; gap: 10px; padding: 14px; background: rgba(210,255,69,.04); border: 1px solid rgba(210,255,69,.15); border-radius: 9px; }
 .snapshot-create input { flex: 1; }
 .history-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }

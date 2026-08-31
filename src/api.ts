@@ -41,6 +41,13 @@ import type {
   ResolveCardInput,
 } from "./features/permission";
 import type {
+  ModelProfile,
+  PromptCompilation,
+  PromptTemplate,
+  SaveModelProfileInput,
+  SavePromptTemplateInput,
+} from "./services/promptCompiler";
+import type {
   MutationRequest,
   MutationResponse,
   BatchMutationRequest,
@@ -100,6 +107,16 @@ export const api = {
     invoke<SelectImageResult>("image_select_result", { projectPath, resultId }),
   imageUpdateResultState: (projectPath: string, resultId: string, selectionState: Exclude<ImageSelectionState, "available" | "selected">) =>
     invoke<ImageResult>("image_update_result_state", { projectPath, resultId, selectionState }),
+  promptListProfiles: () => invoke<ModelProfile[]>("prompt_list_profiles"),
+  promptSaveProfile: (input: SaveModelProfileInput) => invoke<ModelProfile>("prompt_save_profile", { input }),
+  promptListTemplates: (projectId?: string) => invoke<PromptTemplate[]>("prompt_list_templates", { projectId }),
+  promptSaveTemplate: (input: SavePromptTemplateInput) => invoke<PromptTemplate>("prompt_save_template", { input }),
+  promptCompile: (projectPath: string, input: { requestId: string; generationTaskId: string; modelProfileKey: string; templateId: string }) =>
+    invoke<PromptCompilation>("prompt_compile", { projectPath, input }),
+  promptListCompilations: (projectPath: string, generationTaskId: string) =>
+    invoke<PromptCompilation[]>("prompt_list_compilations", { projectPath, generationTaskId }),
+  promptSetCurrent: (projectPath: string, input: { compilationId: string; prompt: string; expectedRevision: number }) =>
+    invoke<PromptCompilation>("prompt_set_current", { projectPath, input }),
   patchPropose: (projectPath: string, input: ProposePatchInput) =>
     invoke<PatchProposal>("patch_propose", { projectPath, input }),
   patchGet: (projectPath: string, proposalId: string) =>

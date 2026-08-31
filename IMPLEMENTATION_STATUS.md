@@ -28,6 +28,7 @@
 | 20 高级作品结构与关系图 | 完成 | V5 StoryElement / Occurrence / GraphLayout；时间轴、关系图、剧集表；故事语义与聚焦模式；计划/事实问题提示；布局不改变 revision；30 集与 1000 关系测试 |
 | 21 记忆系统 | 完成 | project.db V6 与 app.db V2；项目/内容单元/长期记忆；来源、状态与使用任务审计；FTS 搜索；显式冲突替代；事实优先的 Context v2；500 条容量测试；右侧记忆面板 |
 | 22 真实静态生图 | 完成 | project.db V7 Job/Result 与候选目录；app.db V3 Provider 配置；Windows Credential Manager 密钥；OpenAI Compatible/Mock Adapter；成本二次确认；资产/关键帧生图；显式转正与 stale 保护；Windows 实机闭环 |
+| 23 提示词编译器 | 完成 | project.db V8 编译历史；app.db V4 模型档案/模板；稳定结构化编译；能力警告与来源映射；人工 override 保留；显式原子设为正式稿；无视频调用 |
 
 ## 自动化验收
 
@@ -63,7 +64,7 @@ npm run tauri build
 
 ## V1 发布基线边界
 
-V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–22；专家团和提示词编译器仍按后续 Goal 保持关闭，且静态生图不会自动调用或自动转正。
+V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–23；专家团仍按后续 Goal 保持关闭，提示词编译器默认关闭且不含任何视频生成调用，静态生图不会自动调用或自动转正。
 
 ## Pro 审查问题修复
 
@@ -144,3 +145,11 @@ ImageGenerationService 只接受资产需求或关键帧目标，先校验目标
 Provider 配置、模型、尺寸、质量、数量和成本提示在生成前可见，生成需要界面内二次确认。Job 结果只写入 `candidates/images/<job-id>/`；失败、取消和未选择候选不会生成 AssetMedia、Keyframe 事实或项目 ChangeSet。候选拒绝、归档和删除由独立状态管理，媒体清理会保护仍存在的候选。
 
 转正时重新核对当前提示词，stale 候选直接拒绝。通过校验后才把候选复制到正式目录，并在同一个 SQLite 事务中写入 AssetMedia/Requirement 关联或 Keyframe、`source_type=image_generation` ChangeSet、结果 selected 状态和项目 revision；事务失败会补偿删除已复制文件。自动化现为前端 14 项、Rust 52 项；真实 Windows Tauri 窗口已用 Mock Provider 验证默认关闭、显式启用、费用提示、候选隔离、二次确认和正式图片落库。
+
+## V2 Goal23 说明
+
+PromptCompiler 以 GenerationTask 为编译中心，严格按 `generation_task_shots.sort_order` 读取镜头，并只引用已有的正式 AssetMedia、ready Keyframe 与 active 项目视觉记忆。ModelProfile 记录能力上限、参考图规则、建议约束和禁止模式，PromptTemplate 使用 `header / visual_rules / shots / constraints` 四类结构化 token；编译输出绑定模型档案版本、模板版本和来源 revision。
+
+每次编译只新增 PromptCompilation，不修改 `generation_tasks.prompt`。用户可以保留编译稿、编辑独立 override、查看 warnings/source map 和对比当前正式稿；只有界面内二次确认后，后端才校验 expected revision，并在同一事务中通过 Mutation 写入当前正式提示词、目标模型、ChangeSet、编译记录 current 状态和项目 revision。重新编译不会覆盖已保存的人工 override。
+
+本阶段没有视频 Provider、视频 Job、视频 HTTP Adapter 或视频生成命令。自动化现为前端 15 项、Rust 55 项，覆盖同一任务的多模型差异、稳定编译、版本与来源追踪、能力警告、编译/正式隔离及人工覆盖保留。

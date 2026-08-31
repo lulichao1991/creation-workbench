@@ -197,6 +197,24 @@ export interface GenerationTaskShotRow {
   sort_order: number;
 }
 
+export interface PromptCompilationRow {
+  id: string;
+  generation_task_id: string;
+  model_profile_key: string;
+  model_profile_version: string;
+  template_id: string;
+  template_version: string;
+  source_revision: number;
+  compiled_prompt: string;
+  user_override: string | null;
+  current_prompt: string | null;
+  source_map_json: string;
+  warnings_json: string;
+  status: "compiled" | "current" | "stale";
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RelationRow {
   id: string;
   project_id: string;
@@ -324,6 +342,7 @@ export interface ProjectState {
   keyframes: KeyframeRow[];
   generationTasks: GenerationTaskRow[];
   generationTaskShots: GenerationTaskShotRow[];
+  promptCompilations: PromptCompilationRow[];
   relations: RelationRow[];
   storyElements: StoryElementRow[];
   storyElementOccurrences: StoryElementOccurrenceRow[];

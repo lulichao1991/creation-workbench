@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 8;
 
 pub const AGENT_TABLES: &[&str] = &[
     "ai_cards",
@@ -62,6 +62,7 @@ pub const STATE_TABLES: &[&str] = &[
     "memory_sources",
     "image_generation_jobs",
     "image_generation_results",
+    "prompt_compilations",
     "change_sets",
     "changes",
     "snapshots",
@@ -122,6 +123,8 @@ pub fn init_database(
         .map_err(|e| format!("初始化项目记忆结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V7)
         .map_err(|e| format!("初始化静态生图结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V8)
+        .map_err(|e| format!("初始化提示词编译结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -188,6 +191,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 7 {
         tx.execute_batch(MIGRATION_V7)
             .map_err(|e| format!("迁移到数据库版本 7 失败：{e}"))?;
+    }
+    if version < 8 {
+        tx.execute_batch(MIGRATION_V8)
+            .map_err(|e| format!("迁移到数据库版本 8 失败：{e}"))?;
     }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
@@ -892,6 +899,30 @@ CREATE INDEX IF NOT EXISTS idx_image_generation_jobs_target
 ON image_generation_jobs(target_type, target_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_image_generation_results_job
 ON image_generation_results(job_id, sort_order);
+"#;
+
+const MIGRATION_V8: &str = r#"
+CREATE TABLE IF NOT EXISTS prompt_compilations (
+  id TEXT PRIMARY KEY,
+  generation_task_id TEXT NOT NULL,
+  model_profile_key TEXT NOT NULL,
+  model_profile_version TEXT NOT NULL,
+  template_id TEXT NOT NULL,
+  template_version TEXT NOT NULL,
+  source_revision INTEGER NOT NULL,
+  compiled_prompt TEXT NOT NULL,
+  user_override TEXT,
+  current_prompt TEXT,
+  source_map_json TEXT NOT NULL DEFAULT '[]',
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'compiled' CHECK(status IN ('compiled', 'current', 'stale')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(generation_task_id) REFERENCES generation_tasks(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_prompt_compilations_task
+ON prompt_compilations(generation_task_id, created_at);
 "#;
 
 #[cfg(test)]
