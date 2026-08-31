@@ -1135,4 +1135,83 @@ mod tests {
         let backups = fs::read_dir(temp.path().join("backups")).unwrap().count();
         assert_eq!(backups, 1);
     }
+
+    #[test]
+    fn release_scale_project_loads_with_bounded_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "智斗游戏 RC 性能", "series").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        let tx = conn.transaction().unwrap();
+        let timestamp = now();
+        for index in 0..30 {
+            tx.execute(
+                "INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES (?1, ?2, 'episode', ?3, ?4, ?5, ?5)",
+                params![format!("ep-{index}"), project.id, format!("EP{:02}", index + 1), index, timestamp],
+            ).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'ep-0', 'EP01', ?1, ?1)",
+            [&timestamp],
+        ).unwrap();
+        tx.execute(
+            "INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)",
+            [&timestamp],
+        ).unwrap();
+        for index in 0..500 {
+            tx.execute(
+                "INSERT INTO shots (id, scene_id, sort_order, title, duration, created_at, updated_at) VALUES (?1, 'scene', ?2, ?3, 2.0, ?4, ?4)",
+                params![format!("shot-{index}"), index, format!("镜头{:03}", index + 1), timestamp],
+            ).unwrap();
+        }
+        for index in 0..100 {
+            tx.execute(
+                "INSERT INTO assets (id, project_id, type, name, created_at, updated_at) VALUES (?1, ?2, 'character', ?3, ?4, ?4)",
+                params![format!("asset-{index}"), project.id, format!("资产{:03}", index + 1), timestamp],
+            ).unwrap();
+        }
+        for index in 0..300 {
+            tx.execute(
+                "INSERT INTO asset_media (id, asset_id, file_path, sort_order, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![format!("media-{index}"), format!("asset-{}", index % 100), format!("assets/characters/{index}.png"), index, timestamp],
+            ).unwrap();
+        }
+        for index in 0..1000 {
+            tx.execute(
+                "INSERT INTO relations (id, project_id, source_type, source_id, relation_type, target_type, target_id, created_at, updated_at) VALUES (?1, ?2, 'contentUnit', 'ep-0', '推进', 'contentUnit', ?3, ?4, ?4)",
+                params![format!("relation-{index}"), project.id, format!("ep-{}", (index + 1) % 30), timestamp],
+            ).unwrap();
+        }
+        for index in 0..500 {
+            tx.execute(
+                "INSERT INTO project_memories (id, category, content, status, priority, source_type, created_at, updated_at) VALUES (?1, 'decision', ?2, 'active', ?3, 'user', ?4, ?4)",
+                params![format!("memory-{index}"), format!("项目记忆 {index}"), index % 10, timestamp],
+            ).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO agent_sessions (id, project_id, scope_type, title, status, created_at, updated_at) VALUES ('session', ?1, 'project', '性能验收', 'active', ?2, ?2)",
+            params![project.id, timestamp],
+        ).unwrap();
+        for index in 0..100 {
+            tx.execute(
+                "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, status, created_at) VALUES (?1, 'session', 'analyze', 'writer', 'completed', ?2)",
+                params![format!("task-{index}"), timestamp],
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+
+        let started = std::time::Instant::now();
+        let state = project_state(&conn).unwrap();
+        assert_eq!(state["contentUnits"].as_array().unwrap().len(), 30);
+        assert_eq!(state["shots"].as_array().unwrap().len(), 500);
+        assert_eq!(state["assets"].as_array().unwrap().len(), 100);
+        assert_eq!(state["assetMedia"].as_array().unwrap().len(), 300);
+        assert_eq!(state["relations"].as_array().unwrap().len(), 1000);
+        assert_eq!(state["projectMemories"].as_array().unwrap().len(), 500);
+        let tasks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_tasks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tasks, 100);
+        assert!(started.elapsed().as_secs_f32() < 5.0);
+        verify_database(&conn).unwrap();
+    }
 }

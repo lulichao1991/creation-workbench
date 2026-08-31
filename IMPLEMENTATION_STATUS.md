@@ -161,3 +161,9 @@ PromptCompiler 以 GenerationTask 为编译中心，严格按 `generation_task_s
 确认后每位成员使用不同 task ID 构建独立 ContextPackage，任务类型固定为 `expert_team_member`，WriteScope 强制为空，提示要求专家互不查看意见且只读分析。模型返回的 PatchProposal 或 permissionRequests 会被丢弃并记录风险。成员全部终止后，主 Agent 才以 `expert_team_synthesis` 任务整合共识、分歧、建议、问题和风险；综合结果仍为只读，若项目 revision 变化则持久化为 stale，修改只能另行走 Goal16 Patch 流程。
 
 右侧 Agent 面板现可选择 2–6 位专家、生成申请卡、确认高成本、查看成员状态、取消任务并阅读结构化综合结果。自动化现为前端 16 项、Rust 58 项；Windows Tauri 实机使用三位专家验证了确认前零成员任务、确认后 3 个独立上下文、主 Agent 综合、零写入范围、零 PatchProposal 和 revision 不变。全程没有视频生成命令或入口。
+
+## V2 Goal25 说明
+
+`0.2.0-rc.1` 按发布门槛完成逐项复查。V1 的 30 集《智斗游戏》手工工作流、快照恢复和关闭重开仍由端到端测试覆盖；app.db 和 project.db 从旧版本顺序迁移时继续执行 WAL checkpoint、备份、事务、外键和完整性检查。权限、oldValue、revision、WriteScope、对象删除、记忆替代、生图候选转正、提示词正式稿和专家团均有后端不可绕过的确认或 stale 测试。
+
+新增发布规模回归同时装载 30 集、500 镜头、100 项资产、300 张正式图片、1000 条关系、500 条项目记忆和 100 个 Agent 任务，ProjectState 在 5 秒门槛内完成并通过完整性检查。自动化现为前端 16 项、Rust 59 项；tracked 文件扫描未发现常见明文密钥或凭据文件，源代码没有视频生成命令、视频 Job、视频 Adapter 或对应 UI。完整证据矩阵与《智斗游戏》15 项验收映射记录在 `V2_RELEASE_REVIEW.md`。

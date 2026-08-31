@@ -1,6 +1,6 @@
 [package]
 name = "workbench"
-version = "0.2.0-alpha.12"
+version = "0.2.0-rc.1"
 description = "本地优先的 AI 视频创作工作台"
 authors = ["LC"]
 edition = "2021"
