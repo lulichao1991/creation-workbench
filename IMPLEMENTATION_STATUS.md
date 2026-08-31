@@ -1,6 +1,6 @@
-# Goal 01–18 实施状态
+# Goal 01–19 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.6，V2 Goal18 Agent 右侧工作区）
+验证日期：2026-08-31（0.2.0-alpha.7，V2 Goal19 分析本轮修改）
 
 ## Goal 对照
 
@@ -24,6 +24,7 @@
 | 16 权限、修改提案与 AI 卡片 | 完成 | WriteScope / ProtectedScope 权限判断；Patch old/new 差异；权限卡；revision、旧值、对象与权限变化 stale 校验；一次性批准；同事务批量 Mutation 与 Agent ChangeSet；9 个权限安全测试 |
 | 17 主 Agent 与单专业 Agent | 完成 | MainAgent 应用服务；IntentResolver；ExpertRegistry / ExpertRouter；六类专家配置；会话/任务持久化；Context/Pi/Patch 串联；统一结构化输出；固定路由测试与含糊澄清 |
 | 18 Agent 右侧工作区 | 完成 | 全工作区共用会话 UI；当前选区、revision 与写入/保护范围；流式输出、专家状态和停止；讨论/建议/编辑模式；AI Card 与 Patch 差异；应用/拒绝/讨论；只读模式后端兜底；Windows 实机验收 |
+| 19 分析本轮修改 | 完成 | 用户显式触发的 ChangeSet 只读任务；old/new 差异、受影响对象、父级、相邻对象与直接关系上下文；问题/建议卡；影响与复查范围；跨剧集确认边界；revision stale 保护 |
 
 ## 自动化验收
 
@@ -59,7 +60,7 @@ npm run tauri build
 
 ## V1 发布基线边界
 
-V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–18，但专家团、记忆和真实生图仍未实现；真实生成按钮保持禁用。
+V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–19，但专家团、记忆和真实生图仍未实现；真实生成按钮保持禁用。
 
 ## Pro 审查问题修复
 
@@ -108,3 +109,11 @@ MainAgent 通过 `agent_create_session`、`agent_send_message` 和 `agent_get_ta
 AgentPanel 嵌入现有三栏 Workbench 的右侧区域，不新增独立 AI 页面。面板从 SelectionStore 构建 SelectionSnapshot；无显式对象时回退到当前内容单元或项目，因此作品结构、剧本、分镜、资产、关键帧、生成任务和历史工作区都能围绕当前上下文使用 Agent。多镜头编辑只授权摄影字段并显式保护叙事字段；讨论和建议模式写入范围为空。
 
 会话启动后加载持久化消息，并从数据库刷新最新 Patch 状态；Runtime 事件按任务 ID 绑定，避免快速完成任务在 React 状态切换期间丢失终态。任务结果中的 AI Card、权限卡和 Patch 差异可在面板内处理，应用仍调用 Goal16 的原子 `patch_apply`。后端完成入口按 task type 强制执行只读模式，模型在讨论/建议模式违规返回的 Patch 会被丢弃并记录风险。自动化现为前端 8 项、Rust 35 项；Windows 实机验证了禁用/启用、模式切换、写入范围、折叠和跨工作区保留。
+
+## V2 Goal19 说明
+
+右侧面板只在存在活动 ChangeSet 时显示“分析本轮修改”，普通手工编辑仍只记录 ChangeSet，不启动 Agent。用户点击后启用 `change_analysis` 开关并创建强制空 WriteScope 的 `change_analysis` 任务；后端拒绝非用户 ChangeSet、空变更集、错误中心对象或任何写入授权。
+
+ContextPackage 以 ChangeSet 为中心，结构化解析每条 Change 的 old/new 值，并在预算内加入仍存在的受影响对象、父链、相邻对象和直接 Relation；删除对象仍由 ChangeSet 中的旧值保留证据。提示明确限定默认传播深度为直接关系和同剧集，跨剧集深挖必须返回确认要求，且禁止自动更新 `sync_status`。
+
+结构化结果落地为问题卡、建议卡、受影响对象列表和建议复查范围；用户可以讨论、忽略、标记受影响或发起专业 Agent 复查，标记动作只解决 Card，不修改项目事实。任务完成时会比较 base/current revision；分析期间或后续读取发现项目事实变化时，任务持久化为 stale。自动化现为前端 9 项、Rust 37 项。

@@ -82,7 +82,7 @@ export interface SendAgentMessageInput {
   sessionId: string;
   message: string;
   workspace?: string | null;
-  mode?: AgentMode;
+  mode?: AgentMode | "change_analysis";
   selection: SelectionSnapshot;
   writeScope: WriteScope;
   tokenBudget?: number;

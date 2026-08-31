@@ -13,6 +13,7 @@ const objectTypes = new Set<ContextObjectType>([
   "keyframe",
   "generationTask",
   "relation",
+  "changeSet",
 ]);
 
 const photographyFields = [
@@ -74,6 +75,19 @@ export function buildWriteScope(selection: SelectionSnapshot, mode: AgentMode): 
     };
   }
   return { refs: selected, protectedRefs: [] };
+}
+
+export function buildChangeAnalysisSelection(
+  projectId: string,
+  changeSetId: string,
+  revision: number,
+): SelectionSnapshot {
+  return {
+    projectId,
+    center: { projectId, objectType: "changeSet", objectId: changeSetId },
+    selected: [],
+    projectRevision: revision,
+  };
 }
 
 export function displayRef(reference: ObjectRef | null): string {

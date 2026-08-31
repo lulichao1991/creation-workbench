@@ -22,6 +22,7 @@ import type {
 import { runtimeEventName } from "../features/agent/runtime";
 import {
   buildAgentSelection,
+  buildChangeAnalysisSelection,
   buildWriteScope,
   displayRef,
 } from "../features/agent/panelState";
@@ -36,6 +37,7 @@ interface Props {
   workspace: Workspace;
   currentUnitId: string | null;
   activeChangeCount: number;
+  activeChangeSetId: string | null;
   hasActiveChangeSet: boolean;
   onCloseChangeSet: () => void;
   onRefresh: () => Promise<void>;
@@ -48,6 +50,12 @@ interface AgentResult {
   patchProposal?: PatchProposal | null;
   questions?: string[];
   risks?: string[];
+  affectedObjects?: Array<{ objectType?: string; objectId?: string; field?: string }>;
+  recommendedReviewScope?: string[];
+  deepAnalysisRequiresConfirmation?: boolean;
+  stale?: boolean;
+  baseRevision?: number;
+  currentRevision?: number;
 }
 
 const expertLabels: Record<ExpertType | "main", string> = {
@@ -66,7 +74,7 @@ const modeLabels: Record<AgentMode, string> = {
   edit: "编辑",
 };
 
-export function AgentPanel({ project, revision, workspace, currentUnitId, activeChangeCount, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
+export function AgentPanel({ project, revision, workspace, currentUnitId, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
   const selection = useSelectionStore();
   const [flags, setFlags] = useState<FeatureFlags | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -197,7 +205,44 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
       setActiveExpert(dispatch.route.expertType ?? "main");
       activeTaskIdRef.current = dispatch.taskId;
       const task = await api.agentGetTask(project.path, dispatch.taskId);
-      if (["completed", "failed", "cancelled", "waiting_for_user"].includes(task.status)) {
+      if (["completed", "failed", "cancelled", "waiting_for_user", "stale"].includes(task.status)) {
+        await refreshTask(dispatch.taskId);
+      } else {
+        setActiveTask(task);
+        setMessages(await api.agentListMessages(project.path, sessionId));
+        if (!dispatch.runtimeStarted) await refreshTask(dispatch.taskId);
+      }
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const analyzeChangeSet = async () => {
+    if (!activeChangeSetId || activeChangeCount === 0 || !sessionId || taskRunning) return;
+    setWorking(true);
+    setProposal(null);
+    setCards([]);
+    setStreamingText("");
+    try {
+      if (!flags?.change_analysis) {
+        setFlags(await api.setFeatureFlag("change_analysis", true));
+      }
+      const dispatch = await api.agentSendMessage(project.path, {
+        requestId: crypto.randomUUID(),
+        sessionId,
+        message: `分析本轮修改（${activeChangeCount} 项）`,
+        workspace,
+        mode: "change_analysis",
+        selection: buildChangeAnalysisSelection(project.id, activeChangeSetId, revision),
+        writeScope: { refs: [], protectedRefs: [] },
+        tokenBudget: 12_000,
+      });
+      setActiveExpert("main");
+      activeTaskIdRef.current = dispatch.taskId;
+      const task = await api.agentGetTask(project.path, dispatch.taskId);
+      if (["completed", "failed", "cancelled", "waiting_for_user", "stale"].includes(task.status)) {
         await refreshTask(dispatch.taskId);
       } else {
         setActiveTask(task);
@@ -269,9 +314,9 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     window.setTimeout(() => inputRef.current?.focus(), 0);
   };
 
-  const resolveCard = async (card: AICard, status: "resolved" | "dismissed") => {
+  const resolveCard = async (card: AICard, status: "resolved" | "dismissed", action: string) => {
     try {
-      await api.cardResolve(project.path, { cardId: card.id, status, resolution: { action: status } });
+      await api.cardResolve(project.path, { cardId: card.id, status, resolution: { action } });
       if (activeTask) setCards(await api.cardList(project.path, activeTask.id));
     } catch (error) {
       onError(error);
@@ -310,6 +355,15 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
 
       <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>
+        {hasActiveChangeSet && (
+          <button
+            className="secondary"
+            disabled={activeChangeCount === 0 || Boolean(taskRunning) || working}
+            onClick={() => void analyzeChangeSet()}
+          >
+            <Sparkles size={11} />{taskRunning ? "分析中…" : "分析本轮修改"}
+          </button>
+        )}
         {hasActiveChangeSet && <button className="ghost" onClick={onCloseChangeSet}>结束本轮</button>}
         <button className="ghost" onClick={() => selection.select({ workspace: "history" })}>历史 / 快照</button>
       </section>
@@ -334,16 +388,21 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
             <AlertTriangle size={13} />{taskErrorMessage(activeTask?.error)} 请检查本机 Pi 或 PI_AGENT_CLI 配置后重试。
           </p>
         )}
+        {activeTask?.status === "stale" && (
+          <p className="stale-warning"><AlertTriangle size={13} />项目事实已变化，这份分析基于 r{activeTask.contextRevision}，请重新分析。</p>
+        )}
         {cards.map((card) => (
           <article className={`ai-card ${card.cardType}`} key={card.id}>
             <header><ShieldCheck size={14} /><strong>{card.title}</strong><span>{card.status}</span></header>
             <p>{card.body}</p>
             {card.cardType === "permission" && <PermissionCardDetails card={card} />}
-            {card.status === "open" && card.cardType !== "permission" && (
+            {(card.cardType === "problem" || card.cardType === "suggestion" || card.cardType === "stale") && <AnalysisCardDetails card={card} />}
+            {card.status === "open" && card.cardType !== "permission" && activeTask?.status !== "stale" && (
               <div className="agent-card-actions">
                 <button className="ghost" onClick={() => discuss(`继续讨论：${card.title}`)}><MessageCircle size={12} />讨论</button>
-                <button className="ghost" onClick={() => void resolveCard(card, "dismissed")}><X size={12} />忽略</button>
-                <button className="secondary" onClick={() => void resolveCard(card, "resolved")}><Check size={12} />已处理</button>
+                {(card.cardType === "problem" || card.cardType === "suggestion") && <button className="ghost" onClick={() => discuss(`请申请相应专业 Agent 复查：${card.title}`)}><Bot size={12} />专家复查</button>}
+                <button className="ghost" onClick={() => void resolveCard(card, "dismissed", "ignore")}><X size={12} />忽略</button>
+                <button className="secondary" onClick={() => void resolveCard(card, "resolved", "mark_affected")}><Check size={12} />标记受影响</button>
               </div>
             )}
           </article>
@@ -402,6 +461,10 @@ function AgentMessageView({ message }: { message: AgentMessage }) {
       <header>{message.role === "user" ? <span>你</span> : <Bot size={13} />}<strong>{message.role === "user" ? "用户" : "主 Agent"}</strong></header>
       <p>{message.content}</p>
       {structured?.findings?.length ? <ul>{structured.findings.map((finding, index) => <li key={index}>{displayValue(finding)}</li>)}</ul> : null}
+      {structured?.affectedObjects?.length ? <p className="agent-impact-list">受影响对象：{structured.affectedObjects.map((reference) => `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`).join("、")}</p> : null}
+      {structured?.recommendedReviewScope?.length ? <p className="agent-impact-list">建议复查：{structured.recommendedReviewScope.join("、")}</p> : null}
+      {structured?.deepAnalysisRequiresConfirmation && <p className="agent-question">跨剧集深度分析需要你确认后才能继续。</p>}
+      {structured?.stale && <p className="agent-risk"><AlertTriangle size={12} />分析结果已过期（r{structured.baseRevision} → r{structured.currentRevision}）。</p>}
       {structured?.questions?.map((question) => <p className="agent-question" key={question}>{question}</p>)}
       {structured?.risks?.map((risk) => <p className="agent-risk" key={risk}><AlertTriangle size={12} />{risk}</p>)}
     </article>
@@ -456,6 +519,29 @@ function PermissionCardDetails({ card }: { card: AICard }) {
       <small>当前授权：{options.currentWriteScope?.refs?.length ?? 0} 项</small>
       {options.requestedScope?.map((request, index) => <code key={index}>{request.objectType}:{request.objectId}.{request.field} · {request.reason}</code>)}
       <small>{options.oneTimeOnly ? "仅限本次" : "持续授权"} · {options.impact}</small>
+    </div>
+  );
+}
+
+function AnalysisCardDetails({ card }: { card: AICard }) {
+  const options = card.options as {
+    evidence?: unknown[];
+    affectedObjects?: Array<{ objectType?: string; objectId?: string; field?: string }>;
+    recommendedReviewScope?: string[];
+    deepAnalysisRequiresConfirmation?: boolean;
+    baseRevision?: number;
+    currentRevision?: number;
+  };
+  return (
+    <div className="analysis-card-details">
+      {card.relatedRef && <code>{displayRef(card.relatedRef)}</code>}
+      {options.evidence?.map((evidence, index) => <small key={index}>依据：{displayValue(evidence)}</small>)}
+      {options.affectedObjects?.length ? (
+        <small>影响：{options.affectedObjects.map((reference) => `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`).join("、")}</small>
+      ) : null}
+      {options.recommendedReviewScope?.length ? <small>建议复查：{options.recommendedReviewScope.join("、")}</small> : null}
+      {options.deepAnalysisRequiresConfirmation && <small>跨剧集深度分析需要你确认后才能继续。</small>}
+      {card.cardType === "stale" && options.baseRevision !== undefined && <small>r{options.baseRevision} → r{options.currentRevision}</small>}
     </div>
   );
 }

@@ -176,7 +176,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .agent-change-row { min-height: 32px; display: flex; align-items: center; justify-content: flex-end; gap: 5px; padding: 5px 10px; border-bottom: 1px solid var(--line); }
 .agent-change-row span { margin-right: auto; color: var(--quiet); font-size: 9px; }
 .agent-change-row strong { color: var(--muted); }
-.agent-change-row button { padding: 4px 6px; font-size: 8px; }
+.agent-change-row button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 6px; font-size: 8px; }
 .agent-conversation { min-height: 0; display: grid; align-content: start; gap: 8px; padding: 10px; overflow-y: auto; scroll-behavior: smooth; }
 .agent-welcome { display: grid; justify-items: center; gap: 7px; padding: 28px 16px; color: var(--quiet); text-align: center; }
 .agent-welcome strong { color: var(--muted); font-size: 11px; }
@@ -192,12 +192,19 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .agent-message ul { margin: 7px 0 0; padding-left: 17px; color: var(--muted); font-size: 9px; line-height: 1.55; }
 .agent-question { margin-top: 7px !important; padding: 7px; color: var(--text) !important; background: rgba(129,183,232,.07); border-left: 2px solid var(--info); }
 .agent-risk { display: flex; align-items: flex-start; gap: 5px; margin-top: 7px !important; color: var(--warning) !important; }
+.agent-impact-list { margin-top: 7px !important; color: var(--quiet) !important; }
 .agent-runtime-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; padding: 10px; color: var(--danger); background: rgba(255,107,107,.06); border: 1px solid rgba(255,107,107,.22); border-radius: 7px; font-size: 10px; line-height: 1.5; }
 .ai-card { border-left: 2px solid var(--info); }
+.ai-card.problem { border-left-color: var(--danger); }
+.ai-card.suggestion { border-left-color: var(--success); }
+.ai-card.stale { border-left-color: var(--warning); }
 .ai-card.permission { border-left-color: var(--warning); }
 .permission-details { display: grid; gap: 5px; margin-top: 8px; }
 .permission-details small { color: var(--quiet); font-size: 9px; line-height: 1.45; }
 .permission-details code { padding: 5px 6px; color: var(--warning); background: var(--bg); border-radius: 5px; font-size: 8px; overflow-wrap: anywhere; }
+.analysis-card-details { display: grid; gap: 5px; margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--line); }
+.analysis-card-details small { color: var(--quiet); font-size: 9px; line-height: 1.45; }
+.analysis-card-details code { color: var(--info); font-size: 8px; overflow-wrap: anywhere; }
 .agent-card-actions, .patch-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; margin-top: 8px; }
 .agent-card-actions button, .patch-actions button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 7px; font-size: 9px; }
 .patch-diff { padding: 0; overflow: hidden; border-color: rgba(210,255,69,.18); }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentSelection, buildWriteScope } from "./panelState";
+import { buildAgentSelection, buildChangeAnalysisSelection, buildWriteScope } from "./panelState";
 
 describe("Agent panel selection and permission derivation", () => {
   it("uses the exact selected field in edit mode", () => {
@@ -31,5 +31,16 @@ describe("Agent panel selection and permission derivation", () => {
     expect(scope.refs).toContainEqual(expect.objectContaining({ objectId: "shot-05", field: "composition" }));
     expect(scope.protectedRefs).toContainEqual(expect.objectContaining({ objectId: "shot-05", field: "dialogue" }));
     expect(scope.refs.some((reference) => reference.field === "dialogue")).toBe(false);
+  });
+
+  it("centers explicit change analysis on the active ChangeSet", () => {
+    const selection = buildChangeAnalysisSelection("project", "changeset-13", 13);
+    expect(selection).toEqual({
+      projectId: "project",
+      center: { projectId: "project", objectType: "changeSet", objectId: "changeset-13" },
+      selected: [],
+      projectRevision: 13,
+    });
+    expect(buildWriteScope(selection, "suggestion")).toEqual({ refs: [], protectedRefs: [] });
   });
 });

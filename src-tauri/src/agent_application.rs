@@ -5,7 +5,10 @@ use crate::agent_runtime::{
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context, BuildContextInput, SelectionSnapshot};
 use crate::database::{now, open_database, AppResult};
-use crate::permission::{propose_patch, PatchItemInput, ProposePatchInput, WriteScope};
+use crate::permission::{
+    create_card, propose_patch, CreateCardInput, ObjectRef as PermissionObjectRef, PatchItemInput,
+    ProposePatchInput, WriteScope,
+};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -231,6 +234,30 @@ struct ExpertResultDraft {
     questions: Vec<String>,
     #[serde(default)]
     risks: Vec<String>,
+    #[serde(default)]
+    problem_cards: Vec<AnalysisCardDraft>,
+    #[serde(default)]
+    suggestion_cards: Vec<AnalysisCardDraft>,
+    #[serde(default)]
+    affected_objects: Vec<PermissionObjectRef>,
+    #[serde(default)]
+    recommended_review_scope: Vec<String>,
+    #[serde(default)]
+    deep_analysis_requires_confirmation: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisCardDraft {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: String,
+    related_ref: Option<PermissionObjectRef>,
+    #[serde(default)]
+    evidence: Vec<Value>,
+    #[serde(default)]
+    affected_objects: Vec<PermissionObjectRef>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -275,6 +302,9 @@ pub fn agent_send_message(
     input: SendMessageInput,
 ) -> AppResult<AgentDispatch> {
     ensure_expert_agents_enabled(&app)?;
+    if input.mode == "change_analysis" {
+        ensure_change_analysis_enabled(&app)?;
+    }
     let prepared = prepare_task(Path::new(&project_path), input)?;
     let Some(runtime_input) = prepared.runtime_input else {
         return Ok(prepared.dispatch);
@@ -307,6 +337,7 @@ pub fn agent_get_task(
 ) -> AppResult<AgentTask> {
     ensure_expert_agents_enabled(&app)?;
     let conn = open_database(Path::new(&project_path))?;
+    mark_change_analysis_stale(&conn, &task_id)?;
     load_task(&conn, &task_id)
 }
 
@@ -329,6 +360,17 @@ fn ensure_expert_agents_enabled(app: &tauri::AppHandle) -> AppResult<()> {
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
     if load_feature_flags(&app_data_dir)?.get("expert_agents") != Some(&true) {
         return Err("专业 Agent 特性尚未启用".into());
+    }
+    Ok(())
+}
+
+fn ensure_change_analysis_enabled(app: &tauri::AppHandle) -> AppResult<()> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    if load_feature_flags(&app_data_dir)?.get("change_analysis") != Some(&true) {
+        return Err("FEATURE_DISABLED: 本轮修改分析尚未启用".into());
     }
     Ok(())
 }
@@ -517,15 +559,29 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
             runtime_input: None,
         });
     }
-    if !matches!(input.mode.as_str(), "discussion" | "suggestion" | "edit") {
+    if !matches!(
+        input.mode.as_str(),
+        "discussion" | "suggestion" | "edit" | "change_analysis"
+    ) {
         return Err("TOOL_ARGUMENT_INVALID: Agent mode 无效".into());
     }
-    let mut route = resolve_intent(&ResolveIntentInput {
-        message: input.message.clone(),
-        workspace: input.workspace.clone(),
-        selection: input.selection.clone(),
-    });
-    if route.expert_type.is_some() {
+    let is_change_analysis = input.mode == "change_analysis";
+    let mut route = if is_change_analysis {
+        ResolvedIntent {
+            task_type: "change_analysis".into(),
+            expert_type: Some("main".into()),
+            confidence: 1.0,
+            reason: "用户主动触发 ChangeSet 分析".into(),
+            clarification_question: None,
+        }
+    } else {
+        resolve_intent(&ResolveIntentInput {
+            message: input.message.clone(),
+            workspace: input.workspace.clone(),
+            selection: input.selection.clone(),
+        })
+    };
+    if route.expert_type.is_some() && !is_change_analysis {
         route.task_type.clone_from(&input.mode);
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -536,6 +592,33 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
         .map_err(|e| e.to_string())?;
     if input.selection.project_id != project_id || input.selection.project_revision != revision {
         return Err("REVISION_STALE: 当前选区不属于项目或已过期".into());
+    }
+    if is_change_analysis {
+        if !input.write_scope.refs.is_empty() || !input.write_scope.protected_refs.is_empty() {
+            return Err("TOOL_ARGUMENT_INVALID: 本轮修改分析必须保持只读".into());
+        }
+        let center = input
+            .selection
+            .center
+            .as_ref()
+            .filter(|reference| reference.object_type == "changeSet")
+            .ok_or_else(|| {
+                "TOOL_ARGUMENT_INVALID: 本轮修改分析必须以 ChangeSet 为中心".to_string()
+            })?;
+        let valid: bool = tx
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM change_sets
+                   WHERE id=?1 AND project_id=?2 AND source_type='user' AND status<>'undone'
+                     AND EXISTS(SELECT 1 FROM changes WHERE change_set_id=change_sets.id)
+                 )",
+                params![center.object_id, project_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !valid {
+            return Err("OBJECT_NOT_FOUND: 可分析的用户 ChangeSet 不存在或没有修改".into());
+        }
     }
     let session_project: String = tx
         .query_row(
@@ -609,20 +692,27 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
             return Err(error);
         }
     };
-    let (provider, model) =
-        expert_model_override(&conn, &project_id, expert_type, input.provider, input.model)?;
+    let (provider, model) = if is_change_analysis {
+        (input.provider, input.model)
+    } else {
+        expert_model_override(&conn, &project_id, expert_type, input.provider, input.model)?
+    };
     conn.execute(
         "UPDATE agent_tasks SET status='queued', model_provider=?1, model_name=?2 WHERE id=?3",
         params![provider, model, task_id],
     )
     .map_err(|e| e.to_string())?;
-    let prompt = build_expert_prompt(
-        expert_type,
-        &input.mode,
-        &input.message,
-        &input.write_scope,
-        &package,
-    )?;
+    let prompt = if is_change_analysis {
+        build_change_analysis_prompt(&input.message, &package)?
+    } else {
+        build_expert_prompt(
+            expert_type,
+            &input.mode,
+            &input.message,
+            &input.write_scope,
+            &package,
+        )?
+    };
     Ok(PreparedTask {
         dispatch: AgentDispatch {
             session_id: input.session_id,
@@ -661,6 +751,22 @@ fn build_expert_prompt(
         definition.prohibited.join("；"),
         user_message,
         serde_json::to_string(write_scope).map_err(|e| e.to_string())?,
+        serde_json::to_string(package).map_err(|e| e.to_string())?,
+    ))
+}
+
+fn build_change_analysis_prompt(
+    user_message: &str,
+    package: &crate::context::ContextPackage,
+) -> AppResult<String> {
+    Ok(format!(
+        "你是创作工作台主 Agent，正在执行用户主动触发的‘分析本轮修改’。只依据 ContextPackage：中心 ChangeSet 含每个字段的 oldValue/newValue，affected/parent/neighbor/relation 是受影响对象、同场景或同剧集上下文及直接正式关系。\n\
+         分析剧本动机与对白一致性、镜头时长/连续性/关键帧/生成任务、资产引用与跨阶段直接影响。默认只分析直接关系和同一剧集；若必须跨剧集深挖，只设置 deepAnalysisRequiresConfirmation=true，不自行扩大范围。\n\
+         这是只读任务：不得修改 sync_status，不得返回写入建议，patchProposal 必须为 null。问题与建议必须给出具体差异证据；没有证据就不要生成卡片。\n\
+         用户请求：{}\nContextPackage：{}\n\
+         只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、problemCards、suggestionCards、affectedObjects、recommendedReviewScope、deepAnalysisRequiresConfirmation。\n\
+         problemCards/suggestionCards 每项包含 title、body、relatedRef（可为 null）、evidence、affectedObjects；对象引用包含 projectId、objectType、objectId、field（可省略）。affectedObjects 是去重后的直接受影响对象。",
+        user_message,
         serde_json::to_string(package).map_err(|e| e.to_string())?,
     ))
 }
@@ -746,7 +852,14 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string())?;
+    let current_revision: i64 = conn
+        .query_row("SELECT revision FROM projects LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
     drop(conn);
+    let is_change_analysis = task_type == "change_analysis";
+    let stale = is_change_analysis && current_revision != revision;
     let mut draft =
         serde_json::from_str::<ExpertResultDraft>(raw).unwrap_or_else(|_| ExpertResultDraft {
             summary: raw.trim().to_string(),
@@ -761,6 +874,11 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
         .filter(|patch| !patch.items.is_empty());
     if task_type != "edit" && proposed_patch.is_some() {
         draft.risks.push("只读模式已忽略模型返回的修改提案".into());
+    }
+    if stale {
+        draft.risks.push(format!(
+            "分析期间项目已从 revision {revision} 变为 {current_revision}，结果已过期"
+        ));
     }
     let patch_value = if let Some(patch) = proposed_patch.filter(|_| task_type == "edit") {
         let proposal = propose_patch(
@@ -781,7 +899,21 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
     } else {
         None
     };
-    let status = if patch_value.is_some() || !draft.questions.is_empty() {
+    let card_ids = if is_change_analysis {
+        materialize_analysis_cards(
+            project_path,
+            task_id,
+            revision,
+            current_revision,
+            &draft,
+            stale,
+        )?
+    } else {
+        Vec::new()
+    };
+    let status = if stale {
+        "stale"
+    } else if patch_value.is_some() || !draft.questions.is_empty() || !card_ids.is_empty() {
         "waiting_for_user"
     } else {
         "completed"
@@ -794,9 +926,84 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
         "permissionRequests": draft.permission_requests,
         "questions": draft.questions,
         "risks": draft.risks,
+        "problemCards": draft.problem_cards,
+        "suggestionCards": draft.suggestion_cards,
+        "affectedObjects": draft.affected_objects,
+        "recommendedReviewScope": draft.recommended_review_scope,
+        "deepAnalysisRequiresConfirmation": draft.deep_analysis_requires_confirmation,
+        "cardIds": card_ids,
+        "baseRevision": revision,
+        "currentRevision": current_revision,
+        "stale": stale,
     });
     finish_without_runtime(project_path, task_id, &session_id, &result, status)?;
     Ok(result)
+}
+
+fn materialize_analysis_cards(
+    project_path: &Path,
+    task_id: &str,
+    base_revision: i64,
+    current_revision: i64,
+    draft: &ExpertResultDraft,
+    stale: bool,
+) -> AppResult<Vec<String>> {
+    let mut ids = Vec::new();
+    for (card_type, cards) in [
+        ("problem", draft.problem_cards.as_slice()),
+        ("suggestion", draft.suggestion_cards.as_slice()),
+    ] {
+        for (index, card) in cards.iter().enumerate() {
+            let created = create_card(
+                project_path,
+                CreateCardInput {
+                    request_id: format!("{task_id}:{card_type}:{index}"),
+                    task_id: task_id.into(),
+                    card_type: card_type.into(),
+                    related_ref: card.related_ref.clone(),
+                    title: if card.title.trim().is_empty() {
+                        if card_type == "problem" {
+                            "发现潜在问题".into()
+                        } else {
+                            "建议复查".into()
+                        }
+                    } else {
+                        card.title.clone()
+                    },
+                    body: card.body.clone(),
+                    options: json!({
+                        "evidence": card.evidence,
+                        "affectedObjects": card.affected_objects,
+                        "recommendedReviewScope": draft.recommended_review_scope,
+                        "deepAnalysisRequiresConfirmation": draft.deep_analysis_requires_confirmation,
+                        "baseRevision": base_revision,
+                    }),
+                },
+            )?;
+            ids.push(created.id);
+        }
+    }
+    if stale {
+        let created = create_card(
+            project_path,
+            CreateCardInput {
+                request_id: format!("{task_id}:stale"),
+                task_id: task_id.into(),
+                card_type: "stale".into(),
+                related_ref: None,
+                title: "分析结果已过期".into(),
+                body: format!(
+                    "分析基于 revision {base_revision}，当前项目是 revision {current_revision}，请重新分析本轮修改。"
+                ),
+                options: json!({
+                    "baseRevision": base_revision,
+                    "currentRevision": current_revision,
+                }),
+            },
+        )?;
+        ids.push(created.id);
+    }
+    Ok(ids)
 }
 
 fn finish_without_runtime(
@@ -836,6 +1043,57 @@ fn mark_task_failed(project_path: &Path, task_id: &str, error: &str) -> AppResul
             now(),
             task_id
         ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn mark_change_analysis_stale(conn: &rusqlite::Connection, task_id: &str) -> AppResult<()> {
+    let row: Option<(String, i64, String, Option<String>)> = conn
+        .query_row(
+            "SELECT task_type, context_revision, status, result_json FROM agent_tasks WHERE id=?1",
+            [task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let Some((task_type, base_revision, status, result_raw)) = row else {
+        return Ok(());
+    };
+    if task_type != "change_analysis"
+        || status == "stale"
+        || !matches!(status.as_str(), "completed" | "waiting_for_user")
+    {
+        return Ok(());
+    }
+    let current_revision: i64 = conn
+        .query_row("SELECT revision FROM projects LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    if current_revision == base_revision {
+        return Ok(());
+    }
+    let mut result = result_raw
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .unwrap_or_else(|| json!({}));
+    if let Some(object) = result.as_object_mut() {
+        object.insert("stale".into(), Value::Bool(true));
+        object.insert("baseRevision".into(), json!(base_revision));
+        object.insert("currentRevision".into(), json!(current_revision));
+        let risks = object
+            .entry("risks")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(risks) = risks.as_array_mut() {
+            risks.push(json!(format!(
+                "项目已从 revision {base_revision} 变为 {current_revision}，请重新分析"
+            )));
+        }
+    }
+    conn.execute(
+        "UPDATE agent_tasks SET status='stale', result_json=?1 WHERE id=?2",
+        params![result.to_string(), task_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -920,6 +1178,8 @@ mod tests {
     use super::*;
     use crate::context::ObjectRef;
     use crate::database::init_database;
+    use crate::mutation::{execute_mutations_in_transaction, MutationRequest};
+    use serde_json::Map;
 
     fn selection(
         project_id: &str,
@@ -1142,5 +1402,112 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn analyzes_change_set_only_on_explicit_readonly_task_and_marks_stale() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Change Analysis", "short").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        let timestamp = now();
+        conn.execute("INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES ('unit', ?1, 'short', '正片', 0, ?2, ?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'unit', '正片', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, duration, dialogue, camera_movement, created_at, updated_at) VALUES ('shot', 'scene', 0, '镜头04', 3, '较长对白', '', ?1, ?1)", [&timestamp]).unwrap();
+        let tx = conn.transaction().unwrap();
+        let mutation = execute_mutations_in_transaction(
+            &tx,
+            vec![MutationRequest {
+                action: "patch".into(),
+                entity_type: "shot".into(),
+                object_id: Some("shot".into()),
+                values: Map::from_iter([("duration".into(), json!(1.0))]),
+                change_set_id: None,
+                change_set_name: Some("本轮修改".into()),
+                source_type: None,
+                source_id: None,
+            }],
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM agent_tasks", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(conn);
+        let session = create_session(
+            temp.path(),
+            CreateSessionInput {
+                request_id: "session".into(),
+                project_id: project.id.clone(),
+                scope_type: "project".into(),
+                scope_id: Some(project.id.clone()),
+                title: "主 Agent".into(),
+            },
+        )
+        .unwrap();
+        let mut analysis_selection =
+            selection(&project.id, "changeSet", &mutation.change_set_id, None);
+        analysis_selection.project_revision = mutation.revision;
+        let prepared = prepare_task(
+            temp.path(),
+            SendMessageInput {
+                request_id: "analyze".into(),
+                session_id: session.id,
+                message: "分析本轮修改".into(),
+                workspace: Some("shots".into()),
+                mode: "change_analysis".into(),
+                selection: analysis_selection,
+                write_scope: WriteScope::default(),
+                token_budget: 2_000,
+                provider: None,
+                model: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.dispatch.route.task_type, "change_analysis");
+        assert_eq!(prepared.dispatch.route.expert_type.as_deref(), Some("main"));
+        let prompt = prepared.runtime_input.unwrap().prompt;
+        assert!(prompt.contains("oldValue"));
+        assert!(prompt.contains("不得修改 sync_status"));
+
+        let raw = format!(
+            r#"{{"summary":"镜头时长变化需要复查","findings":[],"patchProposal":null,"relatedImpacts":[],"permissionRequests":[],"questions":[],"risks":[],"problemCards":[{{"title":"对白容量不足","body":"1 秒可能无法容纳现有对白","relatedRef":{{"projectId":"{}","objectType":"shot","objectId":"shot","field":"duration"}},"evidence":["duration 3 → 1"],"affectedObjects":[]}}],"suggestionCards":[{{"title":"复查相邻镜头连续性","body":"确认动作衔接","relatedRef":null,"evidence":[],"affectedObjects":[]}}],"affectedObjects":[{{"projectId":"{}","objectType":"shot","objectId":"shot"}}],"recommendedReviewScope":["当前场相邻镜头"],"deepAnalysisRequiresConfirmation":false}}"#,
+            project.id, project.id
+        );
+        let result = complete_agent_task(temp.path(), &prepared.dispatch.task_id, &raw).unwrap();
+        assert_eq!(result["stale"], false);
+        assert_eq!(result["affectedObjects"][0]["objectId"], "shot");
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_cards WHERE task_id=?1 AND card_type IN ('problem', 'suggestion')",
+                [&prepared.dispatch.task_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM patch_proposals WHERE task_id=?1",
+                [&prepared.dispatch.task_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute("UPDATE projects SET revision=revision+1", [])
+            .unwrap();
+        mark_change_analysis_stale(&conn, &prepared.dispatch.task_id).unwrap();
+        let task = load_task(&conn, &prepared.dispatch.task_id).unwrap();
+        assert_eq!(task.status, "stale");
+        assert_eq!(task.result.unwrap()["stale"], true);
     }
 }

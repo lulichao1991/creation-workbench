@@ -186,6 +186,44 @@ fn build_context_in_transaction(
             data,
         });
     }
+    if center.object_type == "changeSet" {
+        for affected in affected_refs(conn, &center)? {
+            let Ok(data) = object_value(conn, &affected, true) else {
+                continue;
+            };
+            candidates.push(Candidate {
+                reference: affected.clone(),
+                source: "affected",
+                data,
+            });
+            let mut parent = affected.clone();
+            for _ in 0..policy.parent_depth {
+                let Some(next) = parent_ref(conn, &parent)? else {
+                    break;
+                };
+                candidates.push(Candidate {
+                    data: object_value(conn, &next, true)?,
+                    reference: next.clone(),
+                    source: "parent",
+                });
+                parent = next;
+            }
+            for reference in neighbor_refs(conn, &affected, policy.neighbor_count)? {
+                candidates.push(Candidate {
+                    data: object_value(conn, &reference, true)?,
+                    reference,
+                    source: "neighbor",
+                });
+            }
+            for (reference, data) in relation_items(conn, &affected, policy.relation_limit)? {
+                candidates.push(Candidate {
+                    reference,
+                    source: "relation",
+                    data,
+                });
+            }
+        }
+    }
 
     let mut seen = HashSet::new();
     let mut included_items = Vec::new();
@@ -361,12 +399,70 @@ fn object_value(conn: &Connection, reference: &ObjectRef, compact: bool) -> AppR
     let Value::Object(object) = value else {
         return Err("对象数据格式无效".into());
     };
-    Ok(Value::Object(filter_object(
+    let mut filtered = filter_object(
         object,
         &reference.object_type,
         reference.field.as_deref(),
         compact,
-    )?))
+    )?;
+    if reference.object_type == "changeSet" && !compact {
+        filtered.insert(
+            "changes".into(),
+            change_set_changes_value(conn, &reference.object_id)?,
+        );
+    }
+    Ok(Value::Object(filtered))
+}
+
+fn change_set_changes_value(conn: &Connection, change_set_id: &str) -> AppResult<Value> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, object_type, object_id, field_name, old_value, new_value, source_type, source_id, created_at
+             FROM changes WHERE change_set_id=?1 ORDER BY created_at, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([change_set_id], |row| {
+            let old_raw: Option<String> = row.get(4)?;
+            let new_raw: Option<String> = row.get(5)?;
+            Ok(json!({
+                "id": row.get::<_, String>(0)?,
+                "objectType": row.get::<_, String>(1)?,
+                "objectId": row.get::<_, String>(2)?,
+                "fieldName": row.get::<_, String>(3)?,
+                "oldValue": old_raw.and_then(|value| serde_json::from_str(&value).ok()).unwrap_or(Value::Null),
+                "newValue": new_raw.and_then(|value| serde_json::from_str(&value).ok()).unwrap_or(Value::Null),
+                "sourceType": row.get::<_, String>(6)?,
+                "sourceId": row.get::<_, Option<String>>(7)?,
+                "createdAt": row.get::<_, String>(8)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+        .map_err(|e| e.to_string())
+}
+
+fn affected_refs(conn: &Connection, change_set: &ObjectRef) -> AppResult<Vec<ObjectRef>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT object_type, object_id FROM changes
+             WHERE change_set_id=?1 GROUP BY object_type, object_id ORDER BY MIN(created_at), object_type, object_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([&change_set.object_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut references = Vec::new();
+    for row in rows {
+        let (object_type, object_id) = row.map_err(|e| e.to_string())?;
+        if table_for_type(&object_type).is_ok() {
+            references.push(make_ref(change_set, &object_type, object_id));
+        }
+    }
+    Ok(references)
 }
 
 fn filter_object(
@@ -490,6 +586,14 @@ fn compact_fields(object_type: &str) -> &'static [&'static str] {
             "importance",
             "status",
         ],
+        "changeSet" => &[
+            "id",
+            "project_id",
+            "name",
+            "source_type",
+            "status",
+            "created_at",
+        ],
         _ => &["id"],
     }
 }
@@ -506,12 +610,19 @@ fn table_for_type(object_type: &str) -> AppResult<&'static str> {
         "keyframe" => Ok("keyframes"),
         "generationTask" => Ok("generation_tasks"),
         "relation" => Ok("relations"),
+        "changeSet" => Ok("change_sets"),
         _ => Err(format!("不支持的上下文对象类型：{object_type}")),
     }
 }
 
 fn parent_ref(conn: &Connection, reference: &ObjectRef) -> AppResult<Option<ObjectRef>> {
     let parent = match reference.object_type.as_str() {
+        "changeSet" => parent_id(
+            conn,
+            "SELECT project_id FROM change_sets WHERE id=?1",
+            reference,
+            "project",
+        )?,
         "shot" => parent_id(
             conn,
             "SELECT scene_id FROM shots WHERE id=?1",
@@ -979,5 +1090,67 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].reference.object_id, "far-20");
         assert!(results[0].snippet.contains("暗号蓝门"));
+    }
+
+    #[test]
+    fn change_set_context_contains_diffs_and_local_affected_objects() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Change Analysis", "series").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        insert_fixture(&conn, &project.id);
+        let timestamp = now();
+        conn.execute(
+            "INSERT INTO change_sets (id, project_id, name, source_type, status, created_at, closed_at) VALUES ('changeset', ?1, '本轮修改', 'user', 'closed', ?2, ?2)",
+            params![project.id, timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO changes (id, change_set_id, object_type, object_id, field_name, old_value, new_value, source_type, created_at) VALUES ('change-duration', 'changeset', 'shot', 'shot-center', 'duration', '3.0', '1.0', 'user', ?1)",
+            [&timestamp],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE agent_tasks SET task_type='change_analysis', agent_type='main' WHERE id='task'",
+            [],
+        )
+        .unwrap();
+
+        let package = build_context(
+            &mut conn,
+            BuildContextInput {
+                task_id: "task".into(),
+                selection: SelectionSnapshot {
+                    project_id: project.id.clone(),
+                    center: Some(ObjectRef {
+                        project_id: project.id,
+                        object_type: "changeSet".into(),
+                        object_id: "changeset".into(),
+                        field: None,
+                    }),
+                    selected: Vec::new(),
+                    project_revision: 0,
+                },
+                task_intent: "change_analysis".into(),
+                expert_type: "main".into(),
+                token_budget: 1_200,
+            },
+        )
+        .unwrap();
+
+        let center = package
+            .included_items
+            .iter()
+            .find(|item| item.source == "center")
+            .unwrap();
+        assert_eq!(center.data["changes"][0]["oldValue"], 3.0);
+        assert_eq!(center.data["changes"][0]["newValue"], 1.0);
+        assert!(package.included_items.iter().any(|item| {
+            item.source == "affected" && item.reference.object_id == "shot-center"
+        }));
+        assert!(package
+            .included_items
+            .iter()
+            .any(|item| item.reference.object_id == "shot-before"));
+        assert!(package.token_estimate <= 1_200);
     }
 }

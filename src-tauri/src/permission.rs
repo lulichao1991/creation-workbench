@@ -499,7 +499,7 @@ fn reject_patch(project_path: &Path, proposal_id: &str) -> AppResult<PatchPropos
     load_proposal(&conn, proposal_id)
 }
 
-fn create_card(project_path: &Path, input: CreateCardInput) -> AppResult<AiCard> {
+pub(crate) fn create_card(project_path: &Path, input: CreateCardInput) -> AppResult<AiCard> {
     if input.request_id.trim().is_empty() || !CARD_TYPES.contains(&input.card_type.as_str()) {
         return Err("TOOL_ARGUMENT_INVALID: AI Card requestId 或 type 无效".into());
     }

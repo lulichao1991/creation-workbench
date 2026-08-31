@@ -8,7 +8,8 @@ export type ContextObjectType =
   | "assetRequirement"
   | "keyframe"
   | "generationTask"
-  | "relation";
+  | "relation"
+  | "changeSet";
 
 export interface ObjectRef {
   projectId: string;
@@ -34,7 +35,7 @@ export interface BuildContextInput {
 
 export interface ContextItem {
   reference: ObjectRef;
-  source: "center" | "selection" | "parent" | "neighbor" | "relation";
+  source: "center" | "selection" | "affected" | "parent" | "neighbor" | "relation";
   data: unknown;
   tokenEstimate: number;
 }

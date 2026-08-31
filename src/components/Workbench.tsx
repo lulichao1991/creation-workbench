@@ -281,6 +281,7 @@ export function Workbench({ project, state, busy, onBack, onMutate, onMutateBatc
               workspace={selection.workspace}
               currentUnitId={currentUnit?.id ?? null}
               activeChangeCount={currentChangeCount}
+              activeChangeSetId={activeChangeSetId}
               hasActiveChangeSet={Boolean(activeChangeSetId)}
               onCloseChangeSet={onCloseChangeSet}
               onRefresh={onRefresh}
