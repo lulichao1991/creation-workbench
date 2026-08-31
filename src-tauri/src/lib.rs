@@ -3,10 +3,13 @@ mod database;
 mod mutation;
 
 use commands::{
-    copy_project, create_project, delete_project, get_default_workspace, import_project_file,
-    list_projects, load_project_state, open_project, read_project_media,
+    cleanup_project_media, copy_project, create_project, delete_project, get_default_workspace,
+    import_project_file, list_projects, load_project_state, open_project, read_project_media,
 };
-use mutation::{apply_mutation, create_snapshot, list_history, restore_snapshot, undo_change_set};
+use mutation::{
+    apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
+    undo_change_set,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -23,7 +26,9 @@ pub fn run() {
             load_project_state,
             import_project_file,
             read_project_media,
+            cleanup_project_media,
             apply_mutation,
+            apply_batch_mutation,
             list_history,
             undo_change_set,
             create_snapshot,

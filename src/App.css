@@ -99,6 +99,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .workspace-tabs button { min-width: max-content; display: inline-flex; align-items: center; gap: 7px; padding: 0 13px; color: var(--muted); background: transparent; border: 0; border-bottom: 2px solid transparent; font-size: 12px; }
 .workspace-tabs button:hover { color: var(--text); background: rgba(255,255,255,.02); }
 .workspace-tabs button.active { color: var(--accent); border-bottom-color: var(--accent); }
+.workspace-tabs button:disabled { color: var(--quiet); opacity: .38; cursor: not-allowed; }
 .workspace-grid { min-height: 0; display: grid; grid-template-columns: 210px minmax(480px,1fr) 330px; transition: grid-template-columns 200ms ease; }
 .workspace-grid.left-collapsed { grid-template-columns: 48px minmax(480px,1fr) 330px; }
 .workspace-grid.right-collapsed { grid-template-columns: 210px minmax(480px,1fr) 48px; }
@@ -213,6 +214,15 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .requirement-card { position: relative; display: grid; grid-template-columns: 1fr 2fr; gap: 12px; padding: 15px; margin-bottom: 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
 .requirement-card .field:nth-child(3) { grid-column: 1/-1; }
 .requirement-card .danger-text { position: absolute; right: 7px; top: 4px; }
+.requirement-sources { grid-column: 1/-1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 9px; color: var(--muted); border-top: 1px solid var(--line); font-size: 10px; }
+.asset-link-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(190px,1fr)); gap: 7px; }
+.asset-link-grid > label { display: grid; grid-template-columns: 18px 22px minmax(0,1fr); grid-template-rows: auto auto; align-items: center; gap: 2px 7px; padding: 9px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.asset-link-grid > label:hover { border-color: var(--line-strong); }
+.asset-link-grid input { grid-row: 1/3; accent-color: var(--accent); }
+.asset-link-grid .unit-icon { grid-row: 1/3; }
+.asset-link-grid small { grid-column: 3; font-size: 9px; }
+.inherited-assets { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-bottom: 12px; color: var(--muted); background: rgba(210,255,69,.04); border: 1px solid rgba(210,255,69,.13); border-radius: 8px; }
+.inherited-assets strong { font-size: 11px; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(205px,1fr)); gap: 11px; }
 .media-card { overflow: hidden; background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
 .media-card.primary-media { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }

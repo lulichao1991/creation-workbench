@@ -140,6 +140,32 @@ export interface AssetRequirementRow {
   updated_at: string;
 }
 
+export interface AssetRequirementSourceRow {
+  id: string;
+  asset_requirement_id: string;
+  source_type: string;
+  source_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AssetMediaRequirementRow {
+  id: string;
+  asset_media_id: string;
+  asset_requirement_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ShotAssetRow {
+  id: string;
+  shot_id: string;
+  asset_id: string;
+  role: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface KeyframeRow {
   id: string;
   shot_id: string;
@@ -231,6 +257,9 @@ export interface ProjectState {
   assets: AssetRow[];
   assetMedia: AssetMediaRow[];
   assetRequirements: AssetRequirementRow[];
+  assetRequirementSources: AssetRequirementSourceRow[];
+  assetMediaRequirements: AssetMediaRequirementRow[];
+  shotAssets: ShotAssetRow[];
   keyframes: KeyframeRow[];
   generationTasks: GenerationTaskRow[];
   generationTaskShots: GenerationTaskShotRow[];
@@ -253,6 +282,20 @@ export interface MutationRequest {
 
 export interface MutationResponse {
   objectId: string;
+  changeSetId: string;
+  revision: number;
+}
+
+export interface BatchMutationRequest {
+  mutations: MutationRequest[];
+  changeSetId?: string;
+  changeSetName?: string;
+  sourceType?: string;
+  sourceId?: string;
+}
+
+export interface BatchMutationResponse {
+  objectIds: string[];
   changeSetId: string;
   revision: number;
 }

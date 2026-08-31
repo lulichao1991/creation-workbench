@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   MutationRequest,
   MutationResponse,
+  BatchMutationRequest,
+  BatchMutationResponse,
   ProjectDescriptor,
   ProjectState,
 } from "./types";
@@ -27,6 +29,8 @@ export const api = {
     invoke<ProjectState>("load_project_state", { projectPath }),
   mutate: (projectPath: string, request: MutationRequest) =>
     invoke<MutationResponse>("apply_mutation", { projectPath, request }),
+  mutateBatch: (projectPath: string, request: BatchMutationRequest) =>
+    invoke<BatchMutationResponse>("apply_batch_mutation", { projectPath, request }),
   listHistory: (projectPath: string) =>
     invoke<Pick<ProjectState, "changeSets" | "changes" | "snapshots">>(
       "list_history",
@@ -57,4 +61,6 @@ export const api = {
       projectPath,
       relativePath,
     }),
+  cleanupProjectMedia: (projectPath: string) =>
+    invoke<number>("cleanup_project_media", { projectPath }),
 };

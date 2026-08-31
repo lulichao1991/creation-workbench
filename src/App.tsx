@@ -5,6 +5,8 @@ import { ProjectHome } from "./components/ProjectHome";
 import { Workbench } from "./components/Workbench";
 import { useSelectionStore } from "./stores/selectionStore";
 import type {
+  BatchMutationRequest,
+  BatchMutationResponse,
   MutationRequest,
   MutationResponse,
   ProjectDescriptor,
@@ -18,6 +20,7 @@ function App() {
   const [state, setState] = useState<ProjectState | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [activeChangeSetId, setActiveChangeSetId] = useState<string | null>(null);
   const clearSelection = useSelectionStore((selection) => selection.clear);
 
   useEffect(() => {
@@ -100,6 +103,7 @@ function App() {
       const next = await api.loadProjectState(project.path);
       setActiveProject(project);
       setState(next);
+      setActiveChangeSetId(null);
       clearSelection();
     } catch (reason) {
       handleError(reason);
@@ -136,7 +140,30 @@ function App() {
     if (!activeProject) throw new Error("没有打开的项目");
     setBusy(true);
     try {
-      const result = await api.mutate(activeProject.path, request);
+      const result = await api.mutate(activeProject.path, {
+        ...request,
+        changeSetId: request.changeSetId ?? activeChangeSetId ?? undefined,
+      });
+      setActiveChangeSetId((current) => current ?? result.changeSetId);
+      await refreshState(activeProject);
+      return result;
+    } catch (reason) {
+      handleError(reason);
+      throw reason;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const mutateBatch = async (request: BatchMutationRequest): Promise<BatchMutationResponse> => {
+    if (!activeProject) throw new Error("没有打开的项目");
+    setBusy(true);
+    try {
+      const result = await api.mutateBatch(activeProject.path, {
+        ...request,
+        changeSetId: request.changeSetId ?? activeChangeSetId ?? undefined,
+      });
+      setActiveChangeSetId((current) => current ?? result.changeSetId);
       await refreshState(activeProject);
       return result;
     } catch (reason) {
@@ -163,12 +190,16 @@ function App() {
           onBack={() => {
             setActiveProject(null);
             setState(null);
+            setActiveChangeSetId(null);
             clearSelection();
             void refreshProjects();
           }}
           onMutate={mutate}
+          onMutateBatch={mutateBatch}
           onRefresh={() => refreshState(activeProject)}
           onError={handleError}
+          activeChangeSetId={activeChangeSetId}
+          onCloseChangeSet={() => setActiveChangeSetId(null)}
         />
       ) : (
         <ProjectHome
@@ -198,35 +229,24 @@ async function seedStructure(project: ProjectDescriptor, structureType: string) 
   if (structureType === "custom") return;
   const type = structureType === "short" || structureType === "feature" ? "short" : "season";
   const name = structureType === "short" || structureType === "feature" ? "正片" : "第一季";
-  const root = await api.mutate(project.path, {
-    action: "create",
-    entityType: "contentUnit",
-    values: {
-      project_id: project.id,
-      parent_id: null,
-      type,
-      name,
-      sort_order: 0,
-    },
+  const rootId = crypto.randomUUID();
+  await api.mutateBatch(project.path, {
     changeSetName: "初始化作品结构",
-  });
-  if (structureType === "feature") {
-    for (const [index, actName] of ["第一幕", "第二幕", "第三幕"].entries()) {
-      await api.mutate(project.path, {
-        action: "create",
+    mutations: [
+      { action: "create", entityType: "contentUnit", objectId: rootId, values: { project_id: project.id, parent_id: null, type, name, sort_order: 0 } },
+      ...(structureType === "feature" ? ["第一幕", "第二幕", "第三幕"].map((actName, index) => ({
+        action: "create" as const,
         entityType: "contentUnit",
         values: {
           project_id: project.id,
-          parent_id: root.objectId,
+          parent_id: rootId,
           type: "act",
           name: actName,
           sort_order: index,
         },
-        changeSetId: root.changeSetId,
-        changeSetName: "初始化作品结构",
-      });
-    }
-  }
+      })) : []),
+    ],
+  });
 }
 
 export default App;

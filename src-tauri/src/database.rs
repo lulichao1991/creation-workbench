@@ -2,10 +2,12 @@ use chrono::Utc;
 use rusqlite::{params, types::ValueRef, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
+pub const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 pub const BUSINESS_TABLES: &[&str] = &[
     "content_units",
@@ -15,6 +17,9 @@ pub const BUSINESS_TABLES: &[&str] = &[
     "assets",
     "asset_media",
     "asset_requirements",
+    "asset_requirement_sources",
+    "asset_media_requirements",
+    "shot_assets",
     "keyframes",
     "generation_tasks",
     "generation_task_shots",
@@ -30,6 +35,9 @@ pub const STATE_TABLES: &[&str] = &[
     "assets",
     "asset_media",
     "asset_requirements",
+    "asset_requirement_sources",
+    "asset_media_requirements",
+    "shot_assets",
     "keyframes",
     "generation_tasks",
     "generation_task_shots",
@@ -70,9 +78,10 @@ pub fn open_database(project_path: &Path) -> AppResult<Connection> {
     if !path.is_file() {
         return Err(format!("项目数据库不存在：{}", path.display()));
     }
-    let conn = Connection::open(&path).map_err(|e| format!("打开数据库失败：{e}"))?;
+    let mut conn = Connection::open(&path).map_err(|e| format!("打开数据库失败：{e}"))?;
     conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;")
         .map_err(|e| format!("初始化数据库连接失败：{e}"))?;
+    migrate_database(&mut conn, project_path)?;
     Ok(conn)
 }
 
@@ -85,6 +94,8 @@ pub fn init_database(
     let conn = Connection::open(&db).map_err(|e| format!("创建数据库失败：{e}"))?;
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("初始化数据库结构失败：{e}"))?;
+    conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+        .map_err(|e| format!("写入数据库版本失败：{e}"))?;
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
@@ -99,6 +110,41 @@ pub fn init_database(
         .map_err(|e| format!("创建项目记录失败：{e}"))?;
     }
     descriptor_from_conn(&conn, project_path)
+}
+
+fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()> {
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| format!("读取数据库版本失败：{e}"))?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "项目数据库版本 {version} 高于当前应用支持的版本 {CURRENT_SCHEMA_VERSION}"
+        ));
+    }
+    if version == CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let backups = project_path.join("backups");
+    fs::create_dir_all(&backups).map_err(|e| format!("创建迁移备份目录失败：{e}"))?;
+    conn.execute_batch("PRAGMA wal_checkpoint(FULL);")
+        .map_err(|e| format!("迁移前同步数据库失败：{e}"))?;
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let backup = backups.join(format!("project-v{version}-{timestamp}.db"));
+    fs::copy(db_path(project_path), &backup).map_err(|e| format!("迁移前备份失败：{e}"))?;
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("开始迁移失败：{e}"))?;
+    if version < 2 {
+        tx.execute_batch(MIGRATION_V2)
+            .map_err(|e| format!("迁移到数据库版本 2 失败：{e}"))?;
+    }
+    tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
+        .map_err(|e| format!("更新数据库版本失败：{e}"))?;
+    tx.commit()
+        .map_err(|e| format!("提交数据库迁移失败：{e}"))?;
+    Ok(())
 }
 
 pub fn descriptor_from_conn(
@@ -334,6 +380,39 @@ CREATE TABLE IF NOT EXISTS asset_requirements (
   FOREIGN KEY(asset_id) REFERENCES assets(id)
 );
 
+CREATE TABLE IF NOT EXISTS asset_requirement_sources (
+  id TEXT PRIMARY KEY,
+  asset_requirement_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS asset_media_requirements (
+  id TEXT PRIMARY KEY,
+  asset_media_id TEXT NOT NULL,
+  asset_requirement_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(asset_media_id) REFERENCES asset_media(id) ON DELETE CASCADE,
+  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE,
+  UNIQUE(asset_media_id, asset_requirement_id)
+);
+
+CREATE TABLE IF NOT EXISTS shot_assets (
+  id TEXT PRIMARY KEY,
+  shot_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'subject',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+  FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+  UNIQUE(shot_id, asset_id, role)
+);
+
 CREATE TABLE IF NOT EXISTS keyframes (
   id TEXT PRIMARY KEY,
   shot_id TEXT NOT NULL,
@@ -429,8 +508,47 @@ CREATE INDEX IF NOT EXISTS idx_content_units_parent ON content_units(parent_id, 
 CREATE INDEX IF NOT EXISTS idx_scenes_script ON scenes(script_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_shots_scene ON shots(scene_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_assets_project ON assets(project_id, type);
+CREATE INDEX IF NOT EXISTS idx_asset_requirement_sources_requirement ON asset_requirement_sources(asset_requirement_id);
+CREATE INDEX IF NOT EXISTS idx_asset_media_requirements_media ON asset_media_requirements(asset_media_id);
+CREATE INDEX IF NOT EXISTS idx_shot_assets_shot ON shot_assets(shot_id);
 CREATE INDEX IF NOT EXISTS idx_changes_set ON changes(change_set_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_type, source_id);
+"#;
+
+const MIGRATION_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS asset_requirement_sources (
+  id TEXT PRIMARY KEY,
+  asset_requirement_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS asset_media_requirements (
+  id TEXT PRIMARY KEY,
+  asset_media_id TEXT NOT NULL,
+  asset_requirement_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(asset_media_id) REFERENCES asset_media(id) ON DELETE CASCADE,
+  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE,
+  UNIQUE(asset_media_id, asset_requirement_id)
+);
+CREATE TABLE IF NOT EXISTS shot_assets (
+  id TEXT PRIMARY KEY,
+  shot_id TEXT NOT NULL,
+  asset_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'subject',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(shot_id) REFERENCES shots(id) ON DELETE CASCADE,
+  FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE,
+  UNIQUE(shot_id, asset_id, role)
+);
+CREATE INDEX IF NOT EXISTS idx_asset_requirement_sources_requirement ON asset_requirement_sources(asset_requirement_id);
+CREATE INDEX IF NOT EXISTS idx_asset_media_requirements_media ON asset_media_requirements(asset_media_id);
+CREATE INDEX IF NOT EXISTS idx_shot_assets_shot ON shot_assets(shot_id);
 "#;
 
 #[cfg(test)]
@@ -453,5 +571,40 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "missing table {table}");
         }
+    }
+
+    #[test]
+    fn migrates_old_projects_with_backup_and_versioning() {
+        let temp = tempfile::tempdir().unwrap();
+        init_database(temp.path(), "旧项目", "short").unwrap();
+        {
+            let conn = Connection::open(db_path(temp.path())).unwrap();
+            conn.execute_batch(
+                "DROP TABLE shot_assets; DROP TABLE asset_media_requirements; DROP TABLE asset_requirement_sources; PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+
+        let conn = open_database(temp.path()).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        for table in [
+            "shot_assets",
+            "asset_media_requirements",
+            "asset_requirement_sources",
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing migrated table {table}");
+        }
+        let backups = fs::read_dir(temp.path().join("backups")).unwrap().count();
+        assert_eq!(backups, 1);
     }
 }

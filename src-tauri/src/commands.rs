@@ -5,6 +5,7 @@ use crate::database::{
 use base64::Engine;
 use rusqlite::params;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -74,6 +75,7 @@ pub fn create_project(
         "imports",
         "exports",
         "cache",
+        "backups",
     ] {
         fs::create_dir_all(project_path.join(directory))
             .map_err(|e| format!("创建项目子目录失败：{e}"))?;
@@ -107,15 +109,48 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
     let target = unique_project_path(parent, &clean_name);
     copy_directory(&source, &target)?;
     let conn = open_database(&target)?;
-    conn.execute(
-        "UPDATE projects SET name=?1, revision=0, updated_at=?2",
-        params![new_name.trim(), now()],
-    )
-    .map_err(|e| format!("更新项目副本失败：{e}"))?;
-    conn.execute("DELETE FROM changes", [])
+    let old_project_id: String = conn
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM change_sets", [])
-        .map_err(|e| e.to_string())?;
+    let new_project_id = new_id();
+    let result = (|| -> AppResult<()> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE;")
+            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE projects SET id=?1, name=?2, revision=0, updated_at=?3 WHERE id=?4",
+            params![new_project_id, new_name.trim(), now(), old_project_id],
+        )
+        .map_err(|e| format!("更新项目副本失败：{e}"))?;
+        for table in ["content_units", "assets", "relations"] {
+            conn.execute(
+                &format!("UPDATE {table} SET project_id=?1 WHERE project_id=?2"),
+                params![new_project_id, old_project_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        conn.execute("DELETE FROM snapshots", [])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM changes", [])
+            .map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM change_sets", [])
+            .map_err(|e| e.to_string())?;
+        conn.execute_batch("COMMIT; PRAGMA foreign_keys=ON;")
+            .map_err(|e| e.to_string())?;
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .map_err(|e| e.to_string())?;
+        if violations != 0 {
+            return Err("复制后的项目存在外键错误".into());
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = conn.execute_batch("ROLLBACK; PRAGMA foreign_keys=ON;");
+        let _ = fs::remove_dir_all(&target);
+        return Err(error);
+    }
     descriptor_from_conn(&conn, &target)
 }
 
@@ -183,6 +218,64 @@ pub fn read_project_media(project_path: String, relative_path: String) -> AppRes
         mime_type,
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
+}
+
+#[tauri::command]
+pub fn cleanup_project_media(project_path: String) -> AppResult<usize> {
+    let project = validate_project_path(&project_path)?;
+    let conn = open_database(&project)?;
+    let mut referenced = HashSet::new();
+    for sql in [
+        "SELECT file_path FROM asset_media WHERE file_path IS NOT NULL AND file_path <> ''",
+        "SELECT file_path FROM keyframes WHERE file_path IS NOT NULL AND file_path <> ''",
+    ] {
+        let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for path in paths {
+            referenced.insert(path.map_err(|e| e.to_string())?.replace('\\', "/"));
+        }
+    }
+    let mut removed = 0;
+    for directory in [
+        "assets/characters",
+        "assets/locations",
+        "assets/props",
+        "keyframes",
+    ] {
+        removed += remove_unreferenced_files(&project, &project.join(directory), &referenced)?;
+    }
+    Ok(removed)
+}
+
+fn remove_unreferenced_files(
+    project: &Path,
+    directory: &Path,
+    referenced: &HashSet<String>,
+) -> AppResult<usize> {
+    if !directory.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.is_dir() {
+            removed += remove_unreferenced_files(project, &path, referenced)?;
+        } else {
+            let relative = path
+                .strip_prefix(project)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !referenced.contains(&relative) {
+                fs::remove_file(&path).map_err(|e| format!("清理孤立媒体失败：{e}"))?;
+                removed += 1;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 fn validate_project_path(value: &str) -> AppResult<PathBuf> {
@@ -269,14 +362,25 @@ mod tests {
         assert!(path.join("project.db").is_file());
         assert!(path.join("assets/characters").is_dir());
         assert!(path.join("keyframes").is_dir());
+        assert!(path.join("backups").is_dir());
         assert_eq!(
             list_projects(temp.path().to_string_lossy().to_string())
                 .unwrap()
                 .len(),
             1
         );
+        crate::mutation::create_snapshot(project.path.clone(), "复制前快照".into(), "".into())
+            .unwrap();
+        let original_id = project.id;
         let copy = copy_project(project.path, "智斗游戏 副本".into()).unwrap();
         assert!(Path::new(&copy.path).join("project.db").is_file());
+        assert_ne!(copy.id, original_id);
+        let copy_conn = open_database(Path::new(&copy.path)).unwrap();
+        let snapshot_count: i64 = copy_conn
+            .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(snapshot_count, 0);
+        drop(copy_conn);
         assert_eq!(
             list_projects(temp.path().to_string_lossy().to_string())
                 .unwrap()
@@ -290,5 +394,25 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn cleanup_removes_only_unreferenced_managed_media() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = create_project(
+            temp.path().to_string_lossy().to_string(),
+            "媒体清理".into(),
+            "short".into(),
+        )
+        .unwrap();
+        let root = PathBuf::from(&project.path);
+        let orphan = root.join("assets/characters/orphan.png");
+        let reference = root.join("references/keep.txt");
+        fs::write(&orphan, b"orphan").unwrap();
+        fs::write(&reference, b"keep").unwrap();
+        let removed = cleanup_project_media(project.path).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!orphan.exists());
+        assert!(reference.exists());
     }
 }

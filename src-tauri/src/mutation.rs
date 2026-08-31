@@ -30,6 +30,24 @@ pub struct MutationResponse {
     pub revision: i64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchMutationRequest {
+    pub mutations: Vec<MutationRequest>,
+    pub change_set_id: Option<String>,
+    pub change_set_name: Option<String>,
+    pub source_type: Option<String>,
+    pub source_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchMutationResponse {
+    pub object_ids: Vec<String>,
+    pub change_set_id: String,
+    pub revision: i64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotResponse {
@@ -123,6 +141,10 @@ const ASSET_REQUIREMENT_FIELDS: &[&str] = &[
     "created_from_type",
     "created_from_id",
 ];
+const ASSET_REQUIREMENT_SOURCE_FIELDS: &[&str] =
+    &["asset_requirement_id", "source_type", "source_id"];
+const ASSET_MEDIA_REQUIREMENT_FIELDS: &[&str] = &["asset_media_id", "asset_requirement_id"];
+const SHOT_ASSET_FIELDS: &[&str] = &["shot_id", "asset_id", "role"];
 const KEYFRAME_FIELDS: &[&str] = &[
     "shot_id",
     "type",
@@ -210,6 +232,24 @@ fn entity_spec(entity_type: &str) -> AppResult<EntitySpec> {
             fields: ASSET_REQUIREMENT_FIELDS,
             composite: false,
         },
+        "assetRequirementSource" => EntitySpec {
+            entity_type: "assetRequirementSource",
+            table: "asset_requirement_sources",
+            fields: ASSET_REQUIREMENT_SOURCE_FIELDS,
+            composite: false,
+        },
+        "assetMediaRequirement" => EntitySpec {
+            entity_type: "assetMediaRequirement",
+            table: "asset_media_requirements",
+            fields: ASSET_MEDIA_REQUIREMENT_FIELDS,
+            composite: false,
+        },
+        "shotAsset" => EntitySpec {
+            entity_type: "shotAsset",
+            table: "shot_assets",
+            fields: SHOT_ASSET_FIELDS,
+            composite: false,
+        },
         "keyframe" => EntitySpec {
             entity_type: "keyframe",
             table: "keyframes",
@@ -244,59 +284,134 @@ pub fn apply_mutation(
     project_path: String,
     request: MutationRequest,
 ) -> AppResult<MutationResponse> {
+    let result = execute_mutations(project_path, vec![request], None, None, None, None)?;
+    Ok(MutationResponse {
+        object_id: result.object_ids.into_iter().next().unwrap_or_default(),
+        change_set_id: result.change_set_id,
+        revision: result.revision,
+    })
+}
+
+#[tauri::command]
+pub fn apply_batch_mutation(
+    project_path: String,
+    request: BatchMutationRequest,
+) -> AppResult<BatchMutationResponse> {
+    execute_mutations(
+        project_path,
+        request.mutations,
+        request.change_set_id,
+        request.change_set_name,
+        request.source_type,
+        request.source_id,
+    )
+}
+
+fn execute_mutations(
+    project_path: String,
+    requests: Vec<MutationRequest>,
+    batch_change_set_id: Option<String>,
+    batch_change_set_name: Option<String>,
+    batch_source_type: Option<String>,
+    batch_source_id: Option<String>,
+) -> AppResult<BatchMutationResponse> {
+    if requests.is_empty() {
+        return Err("批量修改不能为空".into());
+    }
     let mut conn = open_database(Path::new(&project_path))?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let project_id: String = tx
         .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
-    let spec = entity_spec(&request.entity_type)?;
-    validate_fields(&spec, &request.values)?;
-
-    let source_type = request.source_type.as_deref().unwrap_or("user");
-    let change_set_id = match request.change_set_id {
+    let first = requests
+        .first()
+        .ok_or_else(|| "批量修改不能为空".to_string())?;
+    let source_type = batch_source_type
+        .as_deref()
+        .or(first.source_type.as_deref())
+        .unwrap_or("user")
+        .to_string();
+    let source_id = batch_source_id
+        .as_deref()
+        .or(first.source_id.as_deref())
+        .map(str::to_string);
+    let change_set_id = match batch_change_set_id.or_else(|| first.change_set_id.clone()) {
         Some(id) => id,
         None => create_change_set(
             &tx,
             &project_id,
-            request.change_set_name.as_deref().unwrap_or("本轮修改"),
-            source_type,
-            request.source_id.as_deref(),
+            batch_change_set_name
+                .as_deref()
+                .or(first.change_set_name.as_deref())
+                .unwrap_or("本轮修改"),
+            &source_type,
+            source_id.as_deref(),
         )?,
     };
+    let exists: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM change_sets WHERE id=?1 AND project_id=?2 AND status<>'undone'",
+            params![change_set_id, project_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists != 1 {
+        return Err("指定的变更集不存在或不属于当前项目".into());
+    }
 
-    let object_id = match request.action.as_str() {
-        "create" => create_object(
+    let mut object_ids = Vec::with_capacity(requests.len());
+    let mut affected_task_ids = HashSet::new();
+    for request in requests {
+        let spec = entity_spec(&request.entity_type)?;
+        validate_fields(&spec, &request.values)?;
+        collect_affected_tasks(&tx, &request, &mut affected_task_ids)?;
+        let operation_source_type = request.source_type.as_deref().unwrap_or(&source_type);
+        let operation_source_id = request.source_id.as_deref().or(source_id.as_deref());
+        let object_id = match request.action.as_str() {
+            "create" => create_object(
+                &tx,
+                &spec,
+                request.object_id,
+                request.values,
+                &change_set_id,
+                operation_source_type,
+                operation_source_id,
+            )?,
+            "patch" | "move" => patch_object(
+                &tx,
+                &spec,
+                request
+                    .object_id
+                    .ok_or_else(|| "修改对象缺少 objectId".to_string())?,
+                request.values,
+                &change_set_id,
+                operation_source_type,
+                operation_source_id,
+            )?,
+            "delete" => delete_object(
+                &tx,
+                &spec,
+                request
+                    .object_id
+                    .ok_or_else(|| "删除对象缺少 objectId".to_string())?,
+                &change_set_id,
+                operation_source_type,
+                operation_source_id,
+            )?,
+            action => return Err(format!("不支持的修改动作：{action}")),
+        };
+        object_ids.push(object_id);
+    }
+
+    for task_id in affected_task_ids {
+        recalculate_generation_task_duration(
             &tx,
-            &spec,
-            request.object_id,
-            request.values,
+            &task_id,
             &change_set_id,
-            source_type,
-            request.source_id.as_deref(),
-        )?,
-        "patch" | "move" => patch_object(
-            &tx,
-            &spec,
-            request
-                .object_id
-                .ok_or_else(|| "修改对象缺少 objectId".to_string())?,
-            request.values,
-            &change_set_id,
-            source_type,
-            request.source_id.as_deref(),
-        )?,
-        "delete" => delete_object(
-            &tx,
-            &spec,
-            request
-                .object_id
-                .ok_or_else(|| "删除对象缺少 objectId".to_string())?,
-            &change_set_id,
-            source_type,
-            request.source_id.as_deref(),
-        )?,
-        action => return Err(format!("不支持的修改动作：{action}")),
-    };
+            &source_type,
+            source_id.as_deref(),
+        )?;
+    }
 
     let timestamp = now();
     tx.execute(
@@ -312,11 +427,81 @@ pub fn apply_mutation(
         )
         .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok(MutationResponse {
-        object_id,
+    Ok(BatchMutationResponse {
+        object_ids,
         change_set_id,
         revision,
     })
+}
+
+fn collect_affected_tasks(
+    tx: &Transaction<'_>,
+    request: &MutationRequest,
+    affected: &mut HashSet<String>,
+) -> AppResult<()> {
+    if request.entity_type == "generationTaskShot" {
+        if let Some(task_id) = request
+            .values
+            .get("generation_task_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                request
+                    .object_id
+                    .as_deref()
+                    .and_then(|id| id.split_once('|').map(|v| v.0))
+            })
+        {
+            affected.insert(task_id.to_string());
+        }
+    }
+    if request.entity_type == "shot"
+        && (request.action == "delete" || request.values.contains_key("duration"))
+    {
+        if let Some(shot_id) = request.object_id.as_deref() {
+            let mut stmt = tx
+                .prepare("SELECT generation_task_id FROM generation_task_shots WHERE shot_id=?1")
+                .map_err(|e| e.to_string())?;
+            let ids = stmt
+                .query_map([shot_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            for id in ids {
+                affected.insert(id.map_err(|e| e.to_string())?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn recalculate_generation_task_duration(
+    tx: &Transaction<'_>,
+    task_id: &str,
+    change_set_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+) -> AppResult<()> {
+    if row_by_id(tx, "generation_tasks", task_id)?.is_none() {
+        return Ok(());
+    }
+    let total: f64 = tx
+        .query_row(
+            "SELECT COALESCE(SUM(shots.duration), 0) FROM generation_task_shots JOIN shots ON shots.id=generation_task_shots.shot_id WHERE generation_task_shots.generation_task_id=?1",
+            [task_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut values = Map::new();
+    values.insert("duration".into(), Value::from(total));
+    let spec = entity_spec("generationTask")?;
+    patch_object(
+        tx,
+        &spec,
+        task_id.to_string(),
+        values,
+        change_set_id,
+        source_type,
+        source_id,
+    )?;
+    Ok(())
 }
 
 fn create_object(
@@ -867,6 +1052,16 @@ mod tests {
         }
     }
 
+    fn batch(mutations: Vec<MutationRequest>, name: &str) -> BatchMutationRequest {
+        BatchMutationRequest {
+            mutations,
+            change_set_id: None,
+            change_set_name: Some(name.into()),
+            source_type: None,
+            source_id: None,
+        }
+    }
+
     #[test]
     fn mutation_records_history_and_undoes_patch() {
         let temp = tempfile::tempdir().unwrap();
@@ -910,6 +1105,280 @@ mod tests {
             )
             .unwrap();
         assert_eq!(name, "第一季");
+    }
+
+    #[test]
+    fn generation_task_batch_is_atomic_and_duration_stays_derived() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "任务测试", "short").unwrap();
+        let unit = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "contentUnit",
+                None,
+                json!({"project_id": project.id, "type": "short", "name": "正片", "sort_order": 0}),
+            ),
+        )
+        .unwrap();
+        let script = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "script",
+                None,
+                json!({"content_unit_id": unit.object_id, "title": "正片"}),
+            ),
+        )
+        .unwrap();
+        let scene = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "scene",
+                None,
+                json!({"script_id": script.object_id, "title": "场01", "sort_order": 0}),
+            ),
+        )
+        .unwrap();
+        let shot_a = new_id();
+        let shot_b = new_id();
+        let task_id = new_id();
+        apply_batch_mutation(
+            temp.path().to_string_lossy().to_string(),
+            batch(
+                vec![
+                    request("create", "shot", Some(shot_a.clone()), json!({"scene_id": scene.object_id, "title": "A", "sort_order": 0, "duration": 2.0})),
+                    request("create", "shot", Some(shot_b.clone()), json!({"scene_id": scene.object_id, "title": "B", "sort_order": 1, "duration": 3.0})),
+                    request("create", "generationTask", Some(task_id.clone()), json!({"content_unit_id": unit.object_id, "name": "任务", "duration": 0, "status": "draft"})),
+                    request("create", "generationTaskShot", None, json!({"generation_task_id": task_id, "shot_id": shot_a, "sort_order": 0})),
+                    request("create", "generationTaskShot", None, json!({"generation_task_id": task_id, "shot_id": shot_b, "sort_order": 1})),
+                ],
+                "创建任务",
+            ),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let duration: f64 = conn
+            .query_row(
+                "SELECT duration FROM generation_tasks WHERE id=?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duration, 5.0);
+        drop(conn);
+
+        apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "patch",
+                "shot",
+                Some(shot_a.clone()),
+                json!({"duration": 4.0}),
+            ),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let duration: f64 = conn
+            .query_row(
+                "SELECT duration FROM generation_tasks WHERE id=?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duration, 7.0);
+        drop(conn);
+
+        apply_batch_mutation(
+            temp.path().to_string_lossy().to_string(),
+            batch(
+                vec![
+                    request(
+                        "delete",
+                        "generationTaskShot",
+                        Some(format!("{task_id}|{shot_a}")),
+                        json!({}),
+                    ),
+                    request(
+                        "delete",
+                        "generationTaskShot",
+                        Some(format!("{task_id}|{shot_b}")),
+                        json!({}),
+                    ),
+                    request("delete", "generationTask", Some(task_id.clone()), json!({})),
+                ],
+                "删除任务",
+            ),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let tasks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM generation_tasks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let links: i64 = conn
+            .query_row("SELECT COUNT(*) FROM generation_task_shots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!((tasks, links), (0, 0));
+    }
+
+    #[test]
+    fn failed_batch_rolls_back_every_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "原子性", "short").unwrap();
+        let unit = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "contentUnit",
+                None,
+                json!({"project_id": project.id, "type": "short", "name": "正片", "sort_order": 0}),
+            ),
+        )
+        .unwrap();
+        let result = apply_batch_mutation(
+            temp.path().to_string_lossy().to_string(),
+            batch(
+                vec![
+                    request(
+                        "patch",
+                        "contentUnit",
+                        Some(unit.object_id.clone()),
+                        json!({"sort_order": 9}),
+                    ),
+                    request(
+                        "patch",
+                        "contentUnit",
+                        Some("missing".into()),
+                        json!({"sort_order": 10}),
+                    ),
+                ],
+                "应回滚",
+            ),
+        );
+        assert!(result.is_err());
+        let conn = open_database(temp.path()).unwrap();
+        let order: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM content_units WHERE id=?1",
+                [&unit.object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(order, 0);
+    }
+
+    #[test]
+    fn undoing_atomic_reorder_restores_unique_orders() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "排序撤销", "series").unwrap();
+        let a = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "contentUnit",
+                None,
+                json!({"project_id": project.id, "type": "season", "name": "A", "sort_order": 0}),
+            ),
+        )
+        .unwrap();
+        let b = apply_mutation(
+            temp.path().to_string_lossy().to_string(),
+            request(
+                "create",
+                "contentUnit",
+                None,
+                json!({"project_id": project.id, "type": "season", "name": "B", "sort_order": 1}),
+            ),
+        )
+        .unwrap();
+        let reordered = apply_batch_mutation(
+            temp.path().to_string_lossy().to_string(),
+            batch(
+                vec![
+                    request(
+                        "move",
+                        "contentUnit",
+                        Some(a.object_id.clone()),
+                        json!({"sort_order": 1}),
+                    ),
+                    request(
+                        "move",
+                        "contentUnit",
+                        Some(b.object_id.clone()),
+                        json!({"sort_order": 0}),
+                    ),
+                ],
+                "交换顺序",
+            ),
+        )
+        .unwrap();
+        undo_change_set(
+            temp.path().to_string_lossy().to_string(),
+            reordered.change_set_id,
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let order_a: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM content_units WHERE id=?1",
+                [&a.object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let order_b: i64 = conn
+            .query_row(
+                "SELECT sort_order FROM content_units WHERE id=?1",
+                [&b.object_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((order_a, order_b), (0, 1));
+    }
+
+    #[test]
+    fn large_project_with_five_hundred_shots_loads_within_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "规模测试", "series").unwrap();
+        let season_id = new_id();
+        let episode_ids = (0..30).map(|_| new_id()).collect::<Vec<_>>();
+        let script_id = new_id();
+        let scene_ids = (0..10).map(|_| new_id()).collect::<Vec<_>>();
+        let mut mutations = vec![request(
+            "create",
+            "contentUnit",
+            Some(season_id.clone()),
+            json!({"project_id": project.id, "type": "season", "name": "第一季", "sort_order": 0}),
+        )];
+        for (index, id) in episode_ids.iter().enumerate() {
+            mutations.push(request("create", "contentUnit", Some(id.clone()), json!({"project_id": project.id, "parent_id": season_id, "type": "episode", "name": format!("EP{:02}", index + 1), "sort_order": index})));
+        }
+        mutations.push(request(
+            "create",
+            "script",
+            Some(script_id.clone()),
+            json!({"content_unit_id": episode_ids[0], "title": "EP01"}),
+        ));
+        for (index, id) in scene_ids.iter().enumerate() {
+            mutations.push(request("create", "scene", Some(id.clone()), json!({"script_id": script_id, "title": format!("场{:02}", index + 1), "sort_order": index})));
+        }
+        for index in 0..500 {
+            mutations.push(request("create", "shot", None, json!({"scene_id": scene_ids[index / 50], "title": format!("镜头{:03}", index + 1), "sort_order": index % 50, "duration": 2.0})));
+        }
+        let started = std::time::Instant::now();
+        apply_batch_mutation(
+            temp.path().to_string_lossy().to_string(),
+            batch(mutations, "建立规模测试项目"),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let state = crate::database::project_state(&conn).unwrap();
+        assert_eq!(state["shots"].as_array().unwrap().len(), 500);
+        assert!(started.elapsed().as_secs_f32() < 5.0);
     }
 
     #[test]
@@ -1197,8 +1666,9 @@ mod tests {
                 .object_id,
             );
         }
+        let mut requirements = Vec::new();
         for (index, requirement_type) in ["标准主图", "背面"].iter().enumerate() {
-            apply_mutation(
+            let requirement = apply_mutation(
                 project_path.clone(),
                 request(
                     "create",
@@ -1218,6 +1688,17 @@ mod tests {
                 ),
             )
             .unwrap();
+            apply_mutation(
+                project_path.clone(),
+                request(
+                    "create",
+                    "assetRequirementSource",
+                    None,
+                    json!({"asset_requirement_id": requirement.object_id.clone(), "source_type": "shot", "source_id": shots[index + 3]}),
+                ),
+            )
+            .unwrap();
+            requirements.push(requirement.object_id);
         }
 
         let source_image = root.path().join("test.png");
@@ -1228,7 +1709,7 @@ mod tests {
             "character".into(),
         )
         .unwrap();
-        apply_mutation(
+        let asset_media = apply_mutation(
             project_path.clone(),
             request(
                 "create",
@@ -1242,6 +1723,26 @@ mod tests {
                     "is_primary": 1,
                     "source_type": "manual"
                 }),
+            ),
+        )
+        .unwrap();
+        apply_mutation(
+            project_path.clone(),
+            request(
+                "create",
+                "assetMediaRequirement",
+                None,
+                json!({"asset_media_id": asset_media.object_id, "asset_requirement_id": requirements[0]}),
+            ),
+        )
+        .unwrap();
+        apply_mutation(
+            project_path.clone(),
+            request(
+                "create",
+                "shotAsset",
+                None,
+                json!({"shot_id": shot_04_id.clone(), "asset_id": assets[0], "role": "subject"}),
             ),
         )
         .unwrap();
@@ -1375,6 +1876,21 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
+        let shot_asset_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM shot_assets", [], |row| row.get(0))
+            .unwrap();
+        let requirement_source_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM asset_requirement_sources",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let media_requirement_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM asset_media_requirements", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         let restored_composition: String = conn
             .query_row(
                 "SELECT composition FROM shots WHERE id=?1",
@@ -1405,6 +1921,9 @@ mod tests {
         assert_eq!(shot_count, 10);
         assert_eq!(asset_count, 5);
         assert_eq!(task_shot_count, 5);
+        assert_eq!(shot_asset_count, 1);
+        assert_eq!(requirement_source_count, 2);
+        assert_eq!(media_requirement_count, 1);
         assert_eq!(stable_id, shot_04_id);
         assert_eq!(
             restored_composition,
