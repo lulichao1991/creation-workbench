@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { FeatureFlags } from "./features/featureFlags";
 import type {
+  RuntimeTaskHandle,
+  RuntimeTaskInput,
+  RuntimeTaskState,
+} from "./features/agent/runtime";
+import type {
   MutationRequest,
   MutationResponse,
   BatchMutationRequest,
@@ -11,6 +16,14 @@ import type {
 
 export const api = {
   getFeatureFlags: () => invoke<FeatureFlags>("get_feature_flags"),
+  agentStartReadonlyTask: (input: RuntimeTaskInput) =>
+    invoke<RuntimeTaskHandle>("agent_runtime_start_readonly", { input }),
+  agentSendRuntimeInput: (taskId: string, input: string) =>
+    invoke<void>("agent_runtime_send_input", { taskId, input }),
+  agentCancelTask: (taskId: string) =>
+    invoke<void>("agent_cancel_task", { taskId }),
+  agentGetTaskState: (taskId: string) =>
+    invoke<RuntimeTaskState>("agent_get_task_state", { taskId }),
   getDefaultWorkspace: () =>
     invoke<{ defaultPath: string }>("get_default_workspace"),
   listProjects: (rootPath: string) =>

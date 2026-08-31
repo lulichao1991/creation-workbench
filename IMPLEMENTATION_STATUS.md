@@ -1,6 +1,6 @@
-# Goal 01–13 实施状态
+# Goal 01–14 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.1，V2 Goal13 工程基础）
+验证日期：2026-08-31（0.2.0-alpha.2，V2 Goal14 Pi Runtime）
 
 ## Goal 对照
 
@@ -19,6 +19,7 @@
 | 11 快照 | 完成 | JSON 快照创建、内容统计查看和完整恢复；`snapshot_restores_business_state` |
 | 12 整体 Review | 完成 | Rust、TypeScript、Vitest、Clippy、桌面可视化与 NSIS 发布构建全部通过 |
 | 13 V2 工程基础 | 完成 | `app.db` V1 与备份迁移；8 个默认关闭的 feature flags；`project.db` V4 Agent 核心表；项目复制隔离 Agent 数据；Agent / Context / Memory / Permission 契约目录；开始拆分 Workbench；V1 端到端回归通过 |
+| 14 Pi Runtime 接入 | 完成 | Rust `AgentRuntime` 与 `PiRuntimeAdapter`；TypeScript Runtime 契约；Pi 官方 RPC JSONL；流式文本和工具事件；追加输入、状态与取消；MockRuntime；Windows `.cmd`、中文空格路径和子进程回收验证 |
 
 ## 自动化验收
 
@@ -70,4 +71,10 @@ npm run tauri build
 
 `app.db` 与 `project.db` 都使用顺序版本号、迁移前 WAL checkpoint、文件备份、事务、外键检查和完整性检查。新建项目直接创建 V4；旧项目从 V1–V3 打开时自动备份并升级。项目副本保留正式业务事实，但清理 Agent 会话、消息、任务、上下文包、Patch、AI Card 与专家覆盖配置。
 
-本阶段只冻结并实现工程边界，没有提前实现 Goal14 之后的 Agent 服务或占位业务逻辑。8 个 V2 功能开关默认关闭，因此 V1 界面和写入链路保持不变。自动化现为前端 6 项、Rust 16 项。
+本阶段只冻结并实现工程边界，没有提前实现 Goal14 之后的 Agent 服务或占位业务逻辑。8 个 V2 功能开关默认关闭，因此 V1 界面和写入链路保持不变。
+
+## V2 Goal14 说明
+
+Pi Runtime 采用官方 headless RPC 模式，通过 stdin/stdout 严格 JSONL 通信。适配器每个任务使用独立进程，启动参数固定为 `--mode rpc --no-session --no-tools`，因此当前只消费显式传入的只读上下文，不暴露文件写入工具。支持 `prompt`、流式 `message_update/text_delta`、工具事件、`abort` 和 `agent_end`，并将其转换为工作台统一事件。
+
+开发环境从 PATH 查找 `pi`，或读取 `PI_AGENT_CLI`。Windows 会解析 npm 安装产生的 `pi.cmd`，测试固定覆盖中文和空格路径；取消 500ms 后仍未退出会强制回收，Runtime Drop 也会清理全部子进程。当前本机未安装真实 Pi、未配置 Provider/API Key，验收使用遵循同一官方协议的 sidecar fixture 与 MockRuntime，不把任何密钥或未知 Pi API 写入业务层。自动化现为前端 6 项、Rust 19 项。

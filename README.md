@@ -1,6 +1,6 @@
 # 创作工作台 V2 开发线
 
-本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.1` 工程基础阶段；所有 V2 功能开关默认关闭，不调用 AI 或真实生图服务，V1 工作流保持完整可用：
+本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.2` Runtime 接入阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI 或真实生图服务，V1 工作流保持完整可用：
 
 `作品结构 → 剧本 → 分镜 → 资产 → 关键帧 → 生成任务 / 提示词 → 历史与快照`
 
@@ -62,3 +62,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 项目复制会清理 Agent 运行数据，避免把原项目会话和临时结果带入副本；
 - 建立 Agent / Context / Memory / Permission 前端契约目录，并开始拆分 Workbench；
 - 尚未实现 Agent 调度、模型调用、记忆召回或 Patch 应用，这些属于后续 Goal。
+
+## V2 Goal14 Pi Runtime（0.2.0-alpha.2）
+
+- 业务层通过统一 `AgentRuntime` 契约使用 Runtime；Rust 端提供 `PiRuntimeAdapter`，前端冻结对应 TypeScript 类型；
+- Pi 以独立进程运行，使用 `pi --mode rpc --no-session --no-tools` 和严格 LF 分隔 JSONL 通信；
+- 支持文本增量事件、工具事件映射、追加输入、查询状态和 `abort` 取消；应用退出或取消超时会回收子进程；
+- Windows 测试覆盖 npm 常见 `.cmd` 入口、中文与空格路径、流式输出、取消和无孤儿进程；
+- 开发期从 PATH 查找 `pi`，也可通过 `PI_AGENT_CLI` 指定路径。当前 `agent_core` 开关仍默认关闭；模型配置、密钥读取、上下文构建和 Agent UI 属于后续 Goal。
