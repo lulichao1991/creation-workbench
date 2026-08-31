@@ -7,7 +7,18 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+
+pub const AGENT_TABLES: &[&str] = &[
+    "ai_cards",
+    "patch_items",
+    "patch_proposals",
+    "context_packages",
+    "agent_tasks",
+    "agent_messages",
+    "agent_sessions",
+    "project_expert_overrides",
+];
 
 pub const BUSINESS_TABLES: &[&str] = &[
     "content_units",
@@ -94,6 +105,9 @@ pub fn init_database(
     let conn = Connection::open(&db).map_err(|e| format!("创建数据库失败：{e}"))?;
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("初始化数据库结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V4)
+        .map_err(|e| format!("初始化 Agent 数据结构失败：{e}"))?;
+    verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
 
@@ -144,10 +158,33 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
         tx.execute_batch(MIGRATION_V3)
             .map_err(|e| format!("迁移到数据库版本 3 失败：{e}"))?;
     }
+    if version < 4 {
+        tx.execute_batch(MIGRATION_V4)
+            .map_err(|e| format!("迁移到数据库版本 4 失败：{e}"))?;
+    }
+    verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("更新数据库版本失败：{e}"))?;
     tx.commit()
         .map_err(|e| format!("提交数据库迁移失败：{e}"))?;
+    Ok(())
+}
+
+fn verify_database(conn: &Connection) -> AppResult<()> {
+    let foreign_key_violations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| format!("检查数据库外键失败：{e}"))?;
+    if foreign_key_violations != 0 {
+        return Err(format!("数据库存在 {foreign_key_violations} 个外键错误"));
+    }
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| format!("检查数据库完整性失败：{e}"))?;
+    if integrity != "ok" {
+        return Err(format!("数据库完整性检查失败：{integrity}"));
+    }
     Ok(())
 }
 
@@ -587,6 +624,131 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_requirement_sources_unique
 ON asset_requirement_sources(asset_requirement_id, source_type, source_id);
 "#;
 
+const MIGRATION_V4: &str = r#"
+CREATE TABLE IF NOT EXISTS agent_sessions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  scope_type TEXT NOT NULL DEFAULT 'project',
+  scope_id TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agent_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  agent_type TEXT,
+  content TEXT NOT NULL DEFAULT '',
+  structured_json TEXT,
+  model_provider TEXT,
+  model_name TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agent_tasks (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  task_type TEXT NOT NULL,
+  agent_type TEXT NOT NULL,
+  selection_json TEXT NOT NULL DEFAULT '{}',
+  read_scope_json TEXT NOT NULL DEFAULT '{}',
+  write_scope_json TEXT NOT NULL DEFAULT '{}',
+  context_revision INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'created',
+  model_provider TEXT,
+  model_name TEXT,
+  result_json TEXT,
+  usage_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  FOREIGN KEY(session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS context_packages (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL UNIQUE,
+  project_revision INTEGER NOT NULL,
+  center_ref_json TEXT NOT NULL,
+  items_json TEXT NOT NULL DEFAULT '[]',
+  memory_ids_json TEXT NOT NULL DEFAULT '[]',
+  token_estimate INTEGER NOT NULL DEFAULT 0,
+  checksum TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS patch_proposals (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  base_revision INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS patch_items (
+  id TEXT PRIMARY KEY,
+  proposal_id TEXT NOT NULL,
+  object_type TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  field_name TEXT NOT NULL,
+  old_value_json TEXT,
+  new_value_json TEXT,
+  reason TEXT NOT NULL DEFAULT '',
+  permission_state TEXT NOT NULL DEFAULT 'requires_confirmation',
+  apply_state TEXT NOT NULL DEFAULT 'pending',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY(proposal_id) REFERENCES patch_proposals(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ai_cards (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  card_type TEXT NOT NULL,
+  related_ref_json TEXT,
+  title TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  options_json TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  resolution_json TEXT,
+  created_at TEXT NOT NULL,
+  resolved_at TEXT,
+  FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_expert_overrides (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  expert_type TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  model_provider TEXT,
+  model_name TEXT,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  UNIQUE(project_id, expert_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_sessions_project ON agent_sessions(project_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_session ON agent_messages(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_patch_proposals_task ON patch_proposals(task_id);
+CREATE INDEX IF NOT EXISTS idx_patch_items_proposal ON patch_items(proposal_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_ai_cards_task_status ON ai_cards(task_id, status);
+CREATE INDEX IF NOT EXISTS idx_project_expert_overrides_project ON project_expert_overrides(project_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +769,31 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 1, "missing table {table}");
         }
+        for table in AGENT_TABLES {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing Agent table {table}");
+        }
+        for index in [
+            "idx_agent_tasks_session",
+            "idx_patch_items_proposal",
+            "idx_ai_cards_task_status",
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing Agent index {index}");
+        }
+        verify_database(&conn).unwrap();
     }
 
     #[test]
@@ -621,7 +808,19 @@ mod tests {
             )
             .unwrap();
             conn.execute_batch(
-                "DROP TABLE shot_assets; DROP TABLE asset_media_requirements; DROP TABLE asset_requirement_sources; PRAGMA user_version = 1;",
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE ai_cards;
+                 DROP TABLE patch_items;
+                 DROP TABLE patch_proposals;
+                 DROP TABLE context_packages;
+                 DROP TABLE agent_tasks;
+                 DROP TABLE agent_messages;
+                 DROP TABLE agent_sessions;
+                 DROP TABLE project_expert_overrides;
+                 DROP TABLE shot_assets;
+                 DROP TABLE asset_media_requirements;
+                 DROP TABLE asset_requirement_sources;
+                 PRAGMA user_version = 1;",
             )
             .unwrap();
         }
@@ -644,6 +843,16 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(exists, 1, "missing migrated table {table}");
+        }
+        for table in AGENT_TABLES {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing migrated Agent table {table}");
         }
         let migrated_source: (String, String, String) = conn
             .query_row(

@@ -1,6 +1,6 @@
 use crate::database::{
     descriptor_from_conn, init_database, new_id, now, open_database, project_state, AppResult,
-    ProjectDescriptor,
+    ProjectDescriptor, AGENT_TABLES,
 };
 use base64::Engine;
 use rusqlite::params;
@@ -129,6 +129,10 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
             )
             .map_err(|e| e.to_string())?;
         }
+        for table in AGENT_TABLES {
+            conn.execute(&format!("DELETE FROM {table}"), [])
+                .map_err(|e| e.to_string())?;
+        }
         conn.execute("DELETE FROM snapshots", [])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM changes", [])
@@ -144,6 +148,12 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
             .map_err(|e| e.to_string())?;
         if violations != 0 {
             return Err("复制后的项目存在外键错误".into());
+        }
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if integrity != "ok" {
+            return Err(format!("复制后的项目完整性检查失败：{integrity}"));
         }
         Ok(())
     })();
@@ -433,6 +443,50 @@ mod tests {
         );
         crate::mutation::create_snapshot(project.path.clone(), "复制前快照".into(), "".into())
             .unwrap();
+        {
+            let conn = open_database(&path).unwrap();
+            let timestamp = now();
+            conn.execute(
+                "INSERT INTO agent_sessions (id, project_id, title, created_at, updated_at) VALUES ('session', ?1, '原项目会话', ?2, ?2)",
+                params![project.id, timestamp],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agent_messages (id, session_id, role, content, created_at) VALUES ('message', 'session', 'user', '测试', ?1)",
+                [timestamp.clone()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, created_at) VALUES ('task', 'session', 'analyze', 'director', ?1)",
+                [timestamp.clone()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO context_packages (id, task_id, project_revision, center_ref_json, checksum, created_at) VALUES ('context', 'task', 0, '{}', 'checksum', ?1)",
+                [timestamp.clone()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO patch_proposals (id, task_id, base_revision, title, created_at, updated_at) VALUES ('proposal', 'task', 0, '建议', ?1, ?1)",
+                [timestamp.clone()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO patch_items (id, proposal_id, object_type, object_id, field_name) VALUES ('patch', 'proposal', 'scene', 'scene', 'summary')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO ai_cards (id, task_id, card_type, title, created_at) VALUES ('card', 'task', 'decision', '待确认', ?1)",
+                [timestamp.clone()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO project_expert_overrides (id, project_id, expert_type, created_at, updated_at) VALUES ('override', ?1, 'director', ?2, ?2)",
+                params![project.id, timestamp],
+            )
+            .unwrap();
+        }
         let original_id = project.id;
         let copy = copy_project(project.path, "智斗游戏 副本".into()).unwrap();
         assert!(Path::new(&copy.path).join("project.db").is_file());
@@ -442,6 +496,14 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
             .unwrap();
         assert_eq!(snapshot_count, 0);
+        for table in crate::database::AGENT_TABLES {
+            let count: i64 = copy_conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "copied Agent data from {table}");
+        }
         drop(copy_conn);
         assert_eq!(
             list_projects(temp.path().to_string_lossy().to_string())

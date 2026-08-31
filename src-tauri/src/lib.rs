@@ -1,7 +1,9 @@
+mod app_database;
 mod commands;
 mod database;
 mod mutation;
 
+use app_database::get_feature_flags;
 use commands::{
     cleanup_project_media, copy_project, create_project, delete_project, get_default_workspace,
     import_project_file, list_projects, load_project_state, open_project, read_project_media,
@@ -16,7 +18,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let app_data_dir = tauri::Manager::path(app)
+                .app_data_dir()
+                .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+            app_database::initialize_app_database(&app_data_dir)?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            get_feature_flags,
             get_default_workspace,
             list_projects,
             create_project,

@@ -39,6 +39,7 @@ import type {
   Workspace,
 } from "../types";
 import { NumberField, SelectField, TextField } from "./Fields";
+import { WorkspaceEmpty } from "./workspaces/WorkspaceEmpty";
 
 interface Props {
   project: ProjectDescriptor;
@@ -763,10 +764,6 @@ function MediaImage({ projectPath, relativePath, alt }: { projectPath: string; r
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => { let active = true; void api.readProjectMedia(projectPath, relativePath).then((result) => { if (active) setSrc(`data:${result.mimeType};base64,${result.data}`); }).catch(() => { if (active) setSrc(null); }); return () => { active = false; }; }, [projectPath, relativePath]);
   return src ? <img src={src} alt={alt} /> : <div className="image-placeholder">无法预览</div>;
-}
-
-function WorkspaceEmpty({ title, text, action, onAction }: { title: string; text: string; action?: string; onAction?: () => void }) {
-  return <div className="workspace-empty"><span>◇</span><strong>{title}</strong><p>{text}</p>{action && onAction && <button className="primary" onClick={onAction}>{action}</button>}</div>;
 }
 
 function contentPath(units: ContentUnitRow[], id: string | null) {

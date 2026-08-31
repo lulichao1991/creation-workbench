@@ -1,6 +1,6 @@
-# Goal 01–12 实施状态
+# Goal 01–13 实施状态
 
-验证日期：2026-08-31（0.1.2 V1 发布候选收尾）
+验证日期：2026-08-31（0.2.0-alpha.1，V2 Goal13 工程基础）
 
 ## Goal 对照
 
@@ -18,6 +18,7 @@
 | 10 作品结构 | 完成 | 项目树、季剧集列表、基础时间轴、带语义 Relation 清单；高级关系网留待 V2 |
 | 11 快照 | 完成 | JSON 快照创建、内容统计查看和完整恢复；`snapshot_restores_business_state` |
 | 12 整体 Review | 完成 | Rust、TypeScript、Vitest、Clippy、桌面可视化与 NSIS 发布构建全部通过 |
+| 13 V2 工程基础 | 完成 | `app.db` V1 与备份迁移；8 个默认关闭的 feature flags；`project.db` V4 Agent 核心表；项目复制隔离 Agent 数据；Agent / Context / Memory / Permission 契约目录；开始拆分 Workbench；V1 端到端回归通过 |
 
 ## 自动化验收
 
@@ -64,3 +65,9 @@ npm run tauri build
 自动化覆盖增加至前端派生逻辑测试，以及后端迁移、批量回滚、排序撤销、生成任务时长与删除、媒体清理、项目复制和 30 集 / 500 镜头规模测试；仓库加入 Windows GitHub Actions CI。
 
 0.1.2 复查收尾进一步修复：资产需求父资产跳转、关键帧父镜头跳转；媒体清理保护快照及可撤销历史；镜头/资产领域删除完整记录并恢复关联；数据库 V3 回填旧来源并增加唯一约束；新增独立 Windows Tauri 发布构建工作流。
+
+## V2 Goal13 说明
+
+`app.db` 与 `project.db` 都使用顺序版本号、迁移前 WAL checkpoint、文件备份、事务、外键检查和完整性检查。新建项目直接创建 V4；旧项目从 V1–V3 打开时自动备份并升级。项目副本保留正式业务事实，但清理 Agent 会话、消息、任务、上下文包、Patch、AI Card 与专家覆盖配置。
+
+本阶段只冻结并实现工程边界，没有提前实现 Goal14 之后的 Agent 服务或占位业务逻辑。8 个 V2 功能开关默认关闭，因此 V1 界面和写入链路保持不变。自动化现为前端 6 项、Rust 16 项。

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { FeatureFlags } from "./features/featureFlags";
 import type {
   MutationRequest,
   MutationResponse,
@@ -9,6 +10,7 @@ import type {
 } from "./types";
 
 export const api = {
+  getFeatureFlags: () => invoke<FeatureFlags>("get_feature_flags"),
   getDefaultWorkspace: () =>
     invoke<{ defaultPath: string }>("get_default_workspace"),
   listProjects: (rootPath: string) =>
