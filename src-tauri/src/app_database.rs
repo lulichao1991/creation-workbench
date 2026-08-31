@@ -63,6 +63,33 @@ pub fn get_feature_flags(app: tauri::AppHandle) -> AppResult<BTreeMap<String, bo
     load_feature_flags(&app_data_dir)
 }
 
+#[tauri::command]
+pub fn set_feature_flag(
+    app: tauri::AppHandle,
+    key: String,
+    enabled: bool,
+) -> AppResult<BTreeMap<String, bool>> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    set_feature_flag_value(&app_data_dir, &key, enabled)?;
+    load_feature_flags(&app_data_dir)
+}
+
+fn set_feature_flag_value(app_data_dir: &Path, key: &str, enabled: bool) -> AppResult<()> {
+    if !FEATURE_FLAG_KEYS.contains(&key) {
+        return Err(format!("未知功能开关：{key}"));
+    }
+    let conn = open_app_database(app_data_dir)?;
+    conn.execute(
+        "UPDATE feature_flags SET enabled=?1, updated_at=?2 WHERE key=?3",
+        params![i64::from(enabled), Utc::now().to_rfc3339(), key],
+    )
+    .map_err(|e| format!("更新功能开关失败：{e}"))?;
+    Ok(())
+}
+
 fn migrate_app_database(
     conn: &mut Connection,
     app_data_dir: &Path,
@@ -186,5 +213,17 @@ mod tests {
         assert_eq!(flags.len(), FEATURE_FLAG_KEYS.len());
         let backups = fs::read_dir(temp.path().join("backups")).unwrap().count();
         assert_eq!(backups, 1);
+    }
+
+    #[test]
+    fn updates_only_known_feature_flags() {
+        let temp = tempfile::tempdir().unwrap();
+        open_app_database(temp.path()).unwrap();
+        set_feature_flag_value(temp.path(), "agent_core", true).unwrap();
+        assert_eq!(
+            load_feature_flags(temp.path()).unwrap().get("agent_core"),
+            Some(&true)
+        );
+        assert!(set_feature_flag_value(temp.path(), "unknown", true).is_err());
     }
 }

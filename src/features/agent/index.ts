@@ -82,11 +82,24 @@ export interface SendAgentMessageInput {
   sessionId: string;
   message: string;
   workspace?: string | null;
+  mode?: AgentMode;
   selection: SelectionSnapshot;
   writeScope: WriteScope;
   tokenBudget?: number;
   provider?: string | null;
   model?: string | null;
+}
+
+export type AgentMode = "discussion" | "suggestion" | "edit";
+
+export interface AgentMessage {
+  id: string;
+  sessionId: string;
+  role: "user" | "assistant" | "system";
+  agentType: ExpertType | "main" | null;
+  content: string;
+  structured: unknown | null;
+  createdAt: string;
 }
 
 export interface AgentTask {

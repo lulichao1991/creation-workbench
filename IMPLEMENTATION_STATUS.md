@@ -1,6 +1,6 @@
-# Goal 01–17 实施状态
+# Goal 01–18 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.5，V2 Goal17 主 Agent 与单专业 Agent）
+验证日期：2026-08-31（0.2.0-alpha.6，V2 Goal18 Agent 右侧工作区）
 
 ## Goal 对照
 
@@ -23,6 +23,7 @@
 | 15 上下文系统 | 完成 | SelectionSnapshot / ContextPolicy / ContextPackage；字段级中心事实；父链、邻居、Relation 与镜头资产结构查询；FTS5；token budget；稳定 checksum；revision 校验和事务快照；V4 持久化 |
 | 16 权限、修改提案与 AI 卡片 | 完成 | WriteScope / ProtectedScope 权限判断；Patch old/new 差异；权限卡；revision、旧值、对象与权限变化 stale 校验；一次性批准；同事务批量 Mutation 与 Agent ChangeSet；9 个权限安全测试 |
 | 17 主 Agent 与单专业 Agent | 完成 | MainAgent 应用服务；IntentResolver；ExpertRegistry / ExpertRouter；六类专家配置；会话/任务持久化；Context/Pi/Patch 串联；统一结构化输出；固定路由测试与含糊澄清 |
+| 18 Agent 右侧工作区 | 完成 | 全工作区共用会话 UI；当前选区、revision 与写入/保护范围；流式输出、专家状态和停止；讨论/建议/编辑模式；AI Card 与 Patch 差异；应用/拒绝/讨论；只读模式后端兜底；Windows 实机验收 |
 
 ## 自动化验收
 
@@ -56,9 +57,9 @@ npm run tauri build
 
 已在真实 Tauri 窗口中完成首页、三栏工作区与双侧栏折叠的视觉验收，并重新生成 NSIS 安装包和 Windows x64 免安装压缩包。
 
-## 第一阶段边界
+## V1 发布基线边界
 
-未实现第二阶段的 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。界面已保留 Agent 区域，代码已保留 `ImageGenerationProvider` 与 `ImageGenerationSystem` 抽象；真实生成按钮保持禁用。
+V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–18，但专家团、记忆和真实生图仍未实现；真实生成按钮保持禁用。
 
 ## Pro 审查问题修复
 
@@ -101,3 +102,9 @@ PermissionService 从 `agent_tasks.write_scope_json` 读取当前写入范围，
 MainAgent 通过 `agent_create_session`、`agent_send_message` 和 `agent_get_task` 管理持久化会话与任务。IntentResolver 使用当前对象、字段、工作区和请求关键词确定唯一专家；信号不足或并列时创建结构化澄清结果并停留在 `waiting_for_user`，不会同时调用全部专家。ExpertRegistry 固定六类专家的职责、上下文、写入边界和禁止项，项目覆盖表可替换 Provider/模型或禁用某专家。
 
 专业任务先写入 `context_building`，ContextPackage 成功后进入 `queued`，Runtime 事件持久化 `running/completed/waiting_for_user/cancelled/failed`。专家提示只包含有预算的 ContextPackage、WriteScope 和统一 JSON 输出契约；结果被归一化后写入 assistant message 与 task result。含修改项的结果调用 Goal16 服务生成 PatchProposal，不直接调用 MutationService。路由验收逐条覆盖编剧、导演/分镜、摄影、美术、关键帧和提示词六个固定案例，并验证含糊请求先澄清。自动化现为前端 6 项、Rust 34 项。
+
+## V2 Goal18 说明
+
+AgentPanel 嵌入现有三栏 Workbench 的右侧区域，不新增独立 AI 页面。面板从 SelectionStore 构建 SelectionSnapshot；无显式对象时回退到当前内容单元或项目，因此作品结构、剧本、分镜、资产、关键帧、生成任务和历史工作区都能围绕当前上下文使用 Agent。多镜头编辑只授权摄影字段并显式保护叙事字段；讨论和建议模式写入范围为空。
+
+会话启动后加载持久化消息，并从数据库刷新最新 Patch 状态；Runtime 事件按任务 ID 绑定，避免快速完成任务在 React 状态切换期间丢失终态。任务结果中的 AI Card、权限卡和 Patch 差异可在面板内处理，应用仍调用 Goal16 的原子 `patch_apply`。后端完成入口按 task type 强制执行只读模式，模型在讨论/建议模式违规返回的 Patch 会被丢弃并记录风险。自动化现为前端 8 项、Rust 35 项；Windows 实机验证了禁用/启用、模式切换、写入范围、折叠和跨工作区保留。

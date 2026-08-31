@@ -39,6 +39,7 @@ import type {
   Workspace,
 } from "../types";
 import { NumberField, SelectField, TextField } from "./Fields";
+import { AgentPanel } from "./AgentPanel";
 import { WorkspaceEmpty } from "./workspaces/WorkspaceEmpty";
 
 interface Props {
@@ -96,10 +97,9 @@ export function Workbench({ project, state, busy, onBack, onMutate, onMutateBatc
     }
   }, [currentUnit?.id, currentUnit?.type, selection.workspace]);
   const path = contentPath(state.contentUnits, currentUnit?.id ?? null);
-  const currentChanges = activeChangeSetId
-    ? state.changes.filter((change) => change.change_set_id === activeChangeSetId)
-    : [];
-
+  const currentChangeCount = activeChangeSetId
+    ? state.changes.filter((change) => change.change_set_id === activeChangeSetId).length
+    : 0;
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -268,36 +268,24 @@ export function Workbench({ project, state, busy, onBack, onMutate, onMutateBatc
 
         <aside className="right-panel">
           <div className="inspector-header">
-            <span><Bot size={16} />上下文面板</span>
-            <button className="panel-toggle" title={rightCollapsed ? "展开上下文面板" : "收起上下文面板"} onClick={() => setRightCollapsed((value) => !value)}>
+            <span><Bot size={16} />主 Agent</span>
+            <button className="panel-toggle" title={rightCollapsed ? "展开主 Agent" : "收起主 Agent"} onClick={() => setRightCollapsed((value) => !value)}>
               {rightCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
             </button>
           </div>
           {rightCollapsed && <span className="collapsed-rail-icon"><Bot size={17} /></span>}
-          <div className="inspector-body">
-          <div className="inspector-section">
-            <span className="label">当前选区</span>
-            <strong>{selection.objectType ? `${selection.objectType} / ${selection.field ?? "完整对象"}` : "尚未选择对象"}</strong>
-            <small>{selection.selectionScope ?? "点击内容以建立上下文"}</small>
-          </div>
-          <div className="inspector-section write-scope">
-            <span className="label">默认写入范围</span>
-            <code>{selection.writeScope ?? "未设置"}</code>
-          </div>
-          <div className="inspector-section agent-placeholder">
-            <div className="agent-avatar">AI</div>
-            <div>
-              <strong>主 Agent 接入位置</strong>
-              <p>第一阶段不调用 AI。当前选区和写入范围已持续记录，可供第二阶段上下文系统使用。</p>
-            </div>
-            <button disabled>第二阶段启用</button>
-          </div>
-          <div className="inspector-section">
-            <span className="label">本轮修改</span>
-            <strong>{currentChanges.length} 项原子变更</strong>
-            {activeChangeSetId && <button className="ghost full" onClick={onCloseChangeSet}>结束本轮</button>}
-            <button className="secondary full" onClick={() => selection.select({ workspace: "history" })}>查看历史与快照</button>
-          </div>
+          <div className="inspector-body agent-inspector">
+            <AgentPanel
+              project={project}
+              revision={projectRow?.revision ?? project.revision}
+              workspace={selection.workspace}
+              currentUnitId={currentUnit?.id ?? null}
+              activeChangeCount={currentChangeCount}
+              hasActiveChangeSet={Boolean(activeChangeSetId)}
+              onCloseChangeSet={onCloseChangeSet}
+              onRefresh={onRefresh}
+              onError={onError}
+            />
           </div>
         </aside>
       </div>

@@ -204,6 +204,17 @@ pub fn card_get(app: tauri::AppHandle, project_path: String, card_id: String) ->
 }
 
 #[tauri::command]
+pub fn card_list(
+    app: tauri::AppHandle,
+    project_path: String,
+    task_id: String,
+) -> AppResult<Vec<AiCard>> {
+    ensure_agent_core_enabled(&app)?;
+    let conn = open_database(Path::new(&project_path))?;
+    list_cards(&conn, &task_id)
+}
+
+#[tauri::command]
 pub fn card_resolve(
     app: tauri::AppHandle,
     project_path: String,
@@ -824,6 +835,18 @@ fn load_card(conn: &rusqlite::Connection, card_id: &str) -> AppResult<AiCard> {
         created_at: row.9,
         resolved_at: row.10,
     })
+}
+
+fn list_cards(conn: &rusqlite::Connection, task_id: &str) -> AppResult<Vec<AiCard>> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM ai_cards WHERE task_id=?1 ORDER BY created_at, id")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([task_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    ids.iter().map(|id| load_card(conn, id)).collect()
 }
 
 fn permission_card_id(proposal_id: &str) -> String {

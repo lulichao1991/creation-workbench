@@ -149,6 +149,8 @@ pub struct SendMessageInput {
     pub session_id: String,
     pub message: String,
     pub workspace: Option<String>,
+    #[serde(default = "default_agent_mode")]
+    pub mode: String,
     pub selection: SelectionSnapshot,
     pub write_scope: WriteScope,
     #[serde(default = "default_token_budget")]
@@ -159,6 +161,10 @@ pub struct SendMessageInput {
 
 fn default_token_budget() -> usize {
     8_000
+}
+
+fn default_agent_mode() -> String {
+    "edit".into()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -180,6 +186,18 @@ pub struct AgentTask {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMessage {
+    pub id: String,
+    pub session_id: String,
+    pub role: String,
+    pub agent_type: Option<String>,
+    pub content: String,
+    pub structured: Option<Value>,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -290,6 +308,17 @@ pub fn agent_get_task(
     ensure_expert_agents_enabled(&app)?;
     let conn = open_database(Path::new(&project_path))?;
     load_task(&conn, &task_id)
+}
+
+#[tauri::command]
+pub fn agent_list_messages(
+    app: tauri::AppHandle,
+    project_path: String,
+    session_id: String,
+) -> AppResult<Vec<AgentMessage>> {
+    ensure_expert_agents_enabled(&app)?;
+    let conn = open_database(Path::new(&project_path))?;
+    list_messages(&conn, &session_id)
 }
 
 fn ensure_expert_agents_enabled(app: &tauri::AppHandle) -> AppResult<()> {
@@ -488,11 +517,17 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
             runtime_input: None,
         });
     }
-    let route = resolve_intent(&ResolveIntentInput {
+    if !matches!(input.mode.as_str(), "discussion" | "suggestion" | "edit") {
+        return Err("TOOL_ARGUMENT_INVALID: Agent mode 无效".into());
+    }
+    let mut route = resolve_intent(&ResolveIntentInput {
         message: input.message.clone(),
         workspace: input.workspace.clone(),
         selection: input.selection.clone(),
     });
+    if route.expert_type.is_some() {
+        route.task_type.clone_from(&input.mode);
+    }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (project_id, revision): (String, i64) = tx
         .query_row("SELECT id, revision FROM projects LIMIT 1", [], |row| {
@@ -581,7 +616,13 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
         params![provider, model, task_id],
     )
     .map_err(|e| e.to_string())?;
-    let prompt = build_expert_prompt(expert_type, &input.message, &input.write_scope, &package)?;
+    let prompt = build_expert_prompt(
+        expert_type,
+        &input.mode,
+        &input.message,
+        &input.write_scope,
+        &package,
+    )?;
     Ok(PreparedTask {
         dispatch: AgentDispatch {
             session_id: input.session_id,
@@ -601,15 +642,22 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
 
 fn build_expert_prompt(
     expert_type: &str,
+    mode: &str,
     user_message: &str,
     write_scope: &WriteScope,
     package: &crate::context::ContextPackage,
 ) -> AppResult<String> {
     let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
+    let mode_rule = if mode == "edit" {
+        "编辑模式：确有必要时可返回结构化 patchProposal。"
+    } else {
+        "只读模式：patchProposal 必须为 null，不得申请写入。"
+    };
     Ok(format!(
-        "你是{}。{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage 中的事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
+        "你是{}。{}\n{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage 中的事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
         definition.display_name,
         definition.system_instruction,
+        mode_rule,
         definition.prohibited.join("；"),
         user_message,
         serde_json::to_string(write_scope).map_err(|e| e.to_string())?,
@@ -691,11 +739,11 @@ fn handle_runtime_event(project_path: &Path, buffer: &Mutex<String>, event: &Run
 
 fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResult<Value> {
     let conn = open_database(project_path)?;
-    let (session_id, revision): (String, i64) = conn
+    let (session_id, revision, task_type): (String, i64, String) = conn
         .query_row(
-            "SELECT session_id, context_revision FROM agent_tasks WHERE id=?1",
+            "SELECT session_id, context_revision, task_type FROM agent_tasks WHERE id=?1",
             [task_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string())?;
     drop(conn);
@@ -707,11 +755,14 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
     if draft.summary.trim().is_empty() {
         draft.summary = "专业 Agent 已完成分析".into();
     }
-    let patch_value = if let Some(patch) = draft
+    let proposed_patch = draft
         .patch_proposal
         .take()
-        .filter(|patch| !patch.items.is_empty())
-    {
+        .filter(|patch| !patch.items.is_empty());
+    if task_type != "edit" && proposed_patch.is_some() {
+        draft.risks.push("只读模式已忽略模型返回的修改提案".into());
+    }
+    let patch_value = if let Some(patch) = proposed_patch.filter(|_| task_type == "edit") {
         let proposal = propose_patch(
             project_path,
             ProposePatchInput {
@@ -813,6 +864,45 @@ fn load_task(conn: &rusqlite::Connection, task_id: &str) -> AppResult<AgentTask>
         error: row.12.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
         created_at: row.13, started_at: row.14, completed_at: row.15,
     }))
+}
+
+fn list_messages(conn: &rusqlite::Connection, session_id: &str) -> AppResult<Vec<AgentMessage>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, role, agent_type, content, structured_json, created_at FROM agent_messages WHERE session_id=?1 ORDER BY created_at, id",
+        )
+        .map_err(|e| e.to_string())?;
+    let messages = stmt
+        .query_map([session_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .map(|row| {
+            let row = row.map_err(|e| e.to_string())?;
+            Ok(AgentMessage {
+                id: row.0,
+                session_id: row.1,
+                role: row.2,
+                agent_type: row.3,
+                content: row.4,
+                structured: row
+                    .5
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()
+                    .map_err(|e| e.to_string())?,
+                created_at: row.6,
+            })
+        })
+        .collect();
+    messages
 }
 
 fn route_from_task(task: &AgentTask) -> ResolvedIntent {
@@ -949,11 +1039,12 @@ mod tests {
             temp.path(),
             SendMessageInput {
                 request_id: "message".into(),
-                session_id: session.id,
+                session_id: session.id.clone(),
                 message: "构图太平，请增强空间层次".into(),
                 workspace: Some("shots".into()),
-                selection: selected,
-                write_scope: scope,
+                mode: "edit".into(),
+                selection: selected.clone(),
+                write_scope: scope.clone(),
                 token_budget: 800,
                 provider: None,
                 model: None,
@@ -1011,6 +1102,45 @@ mod tests {
             )
             .unwrap(),
             2
+        );
+        drop(conn);
+
+        let readonly = prepare_task(
+            temp.path(),
+            SendMessageInput {
+                request_id: "readonly-message".into(),
+                session_id: session.id,
+                message: "只分析构图问题".into(),
+                workspace: Some("shots".into()),
+                mode: "suggestion".into(),
+                selection: selected,
+                write_scope: scope,
+                token_budget: 800,
+                provider: None,
+                model: None,
+            },
+        )
+        .unwrap();
+        let readonly_result = complete_agent_task(
+            temp.path(),
+            &readonly.dispatch.task_id,
+            r#"{"summary":"构图分析","patchProposal":{"title":"不应落库","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"错误修改","reason":"模型越权"}]},"risks":[]}"#,
+        )
+        .unwrap();
+        assert!(readonly_result["patchProposal"].is_null());
+        assert_eq!(
+            readonly_result["risks"][0],
+            "只读模式已忽略模型返回的修改提案"
+        );
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM patch_proposals WHERE task_id=?1",
+                [&readonly.dispatch.task_id],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
         );
     }
 }

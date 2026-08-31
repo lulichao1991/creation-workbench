@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { FeatureFlags } from "./features/featureFlags";
 import type {
   AgentDispatch,
+  AgentMessage,
   AgentSession,
   AgentTask,
   CreateSessionInput,
@@ -40,6 +41,8 @@ import type {
 
 export const api = {
   getFeatureFlags: () => invoke<FeatureFlags>("get_feature_flags"),
+  setFeatureFlag: (key: keyof FeatureFlags, enabled: boolean) =>
+    invoke<FeatureFlags>("set_feature_flag", { key, enabled }),
   agentListExperts: () => invoke<ExpertDefinition[]>("agent_list_experts"),
   agentResolveIntent: (input: ResolveIntentInput) =>
     invoke<ResolvedIntent>("agent_resolve_intent", { input }),
@@ -49,6 +52,8 @@ export const api = {
     invoke<AgentDispatch>("agent_send_message", { projectPath, input }),
   agentGetTask: (projectPath: string, taskId: string) =>
     invoke<AgentTask>("agent_get_task", { projectPath, taskId }),
+  agentListMessages: (projectPath: string, sessionId: string) =>
+    invoke<AgentMessage[]>("agent_list_messages", { projectPath, sessionId }),
   agentStartReadonlyTask: (input: RuntimeTaskInput) =>
     invoke<RuntimeTaskHandle>("agent_runtime_start_readonly", { input }),
   agentSendRuntimeInput: (taskId: string, input: string) =>
@@ -73,6 +78,8 @@ export const api = {
     invoke<AICard>("card_create", { projectPath, input }),
   cardGet: (projectPath: string, cardId: string) =>
     invoke<AICard>("card_get", { projectPath, cardId }),
+  cardList: (projectPath: string, taskId: string) =>
+    invoke<AICard[]>("card_list", { projectPath, taskId }),
   cardResolve: (projectPath: string, input: ResolveCardInput) =>
     invoke<AICard>("card_resolve", { projectPath, input }),
   getDefaultWorkspace: () =>
