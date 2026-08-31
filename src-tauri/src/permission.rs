@@ -269,6 +269,7 @@ pub(crate) fn propose_patch(
             ));
         }
         let permission_state = permission_for(
+            &tx,
             &write_scope,
             &project_id,
             &item.object_type,
@@ -325,6 +326,7 @@ fn apply_patch(project_path: &Path, input: ApplyPatchInput) -> AppResult<ApplyPa
     let write_scope = task_write_scope(&tx, &proposal.task_id)?;
     for item in &proposal.items {
         let current_permission = permission_for(
+            &tx,
             &write_scope,
             &project_id,
             &item.object_type,
@@ -577,6 +579,7 @@ fn task_write_scope(tx: &Transaction<'_>, task_id: &str) -> AppResult<WriteScope
 }
 
 fn permission_for(
+    tx: &Transaction<'_>,
     scope: &WriteScope,
     project_id: &str,
     object_type: &str,
@@ -593,11 +596,36 @@ fn permission_for(
         .refs
         .iter()
         .any(|reference| reference_matches(reference, project_id, object_type, object_id, field))
+        || (object_type == "storyElementOccurrence"
+            && occurrence_belongs_to_selected_element(tx, scope, project_id, object_id))
     {
         "allowed".into()
     } else {
         "requires_confirmation".into()
     }
+}
+
+fn occurrence_belongs_to_selected_element(
+    tx: &Transaction<'_>,
+    scope: &WriteScope,
+    project_id: &str,
+    occurrence_id: &str,
+) -> bool {
+    let element_id = tx
+        .query_row(
+            "SELECT story_element_id FROM story_element_occurrences WHERE id=?1",
+            [occurrence_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    element_id.is_some_and(|element_id| {
+        scope.refs.iter().any(|reference| {
+            reference.project_id == project_id
+                && reference.object_type == "storyElement"
+                && reference.object_id == element_id
+                && reference.field.is_none()
+        })
+    })
 }
 
 fn reference_matches(
@@ -899,6 +927,48 @@ mod tests {
             new_value: Value::String(new.into()),
             reason: format!("修改 {field}"),
         }
+    }
+
+    #[test]
+    fn selected_story_element_allows_only_its_occurrence_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "故事结构权限", "series").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        conn.execute("INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES ('episode', ?1, 'episode', 'EP01', 0, ?2, ?2)", params![project.id, now()]).unwrap();
+        conn.execute("INSERT INTO story_elements (id, project_id, type, name, created_at, updated_at) VALUES ('selected-line', ?1, 'mainline', '主线', ?2, ?2), ('other-line', ?1, 'foreshadow', '伏笔', ?2, ?2)", params![project.id, now()]).unwrap();
+        conn.execute("INSERT INTO story_element_occurrences (id, story_element_id, content_unit_id, occurrence_type, created_at, updated_at) VALUES ('selected-node', 'selected-line', 'episode', '推进', ?1, ?1), ('other-node', 'other-line', 'episode', '埋下', ?1, ?1)", [now()]).unwrap();
+        let tx = conn.transaction().unwrap();
+        let scope = WriteScope {
+            refs: vec![ObjectRef {
+                project_id: project.id.clone(),
+                object_type: "storyElement".into(),
+                object_id: "selected-line".into(),
+                field: None,
+            }],
+            protected_refs: vec![],
+        };
+        assert_eq!(
+            permission_for(
+                &tx,
+                &scope,
+                &project.id,
+                "storyElementOccurrence",
+                "selected-node",
+                "description"
+            ),
+            "allowed"
+        );
+        assert_eq!(
+            permission_for(
+                &tx,
+                &scope,
+                &project.id,
+                "storyElementOccurrence",
+                "other-node",
+                "description"
+            ),
+            "requires_confirmation"
+        );
     }
 
     #[test]

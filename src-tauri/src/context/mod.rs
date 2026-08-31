@@ -586,6 +586,24 @@ fn compact_fields(object_type: &str) -> &'static [&'static str] {
             "importance",
             "status",
         ],
+        "storyElement" => &[
+            "id",
+            "project_id",
+            "type",
+            "name",
+            "description",
+            "scope_unit_id",
+            "maturity",
+            "status",
+        ],
+        "storyElementOccurrence" => &[
+            "id",
+            "story_element_id",
+            "content_unit_id",
+            "occurrence_type",
+            "description",
+            "sort_order",
+        ],
         "changeSet" => &[
             "id",
             "project_id",
@@ -610,6 +628,8 @@ fn table_for_type(object_type: &str) -> AppResult<&'static str> {
         "keyframe" => Ok("keyframes"),
         "generationTask" => Ok("generation_tasks"),
         "relation" => Ok("relations"),
+        "storyElement" => Ok("story_elements"),
+        "storyElementOccurrence" => Ok("story_element_occurrences"),
         "changeSet" => Ok("change_sets"),
         _ => Err(format!("不支持的上下文对象类型：{object_type}")),
     }
@@ -653,6 +673,26 @@ fn parent_ref(conn: &Connection, reference: &ObjectRef) -> AppResult<Option<Obje
             reference,
             "contentUnit",
         )?,
+        "storyElementOccurrence" => parent_id(
+            conn,
+            "SELECT story_element_id FROM story_element_occurrences WHERE id=?1",
+            reference,
+            "storyElement",
+        )?,
+        "storyElement" => {
+            let ids: (Option<String>, String) = conn
+                .query_row(
+                    "SELECT scope_unit_id, project_id FROM story_elements WHERE id=?1",
+                    [&reference.object_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(|e| e.to_string())?;
+            Some(
+                ids.0
+                    .map(|id| make_ref(reference, "contentUnit", id))
+                    .unwrap_or_else(|| make_ref(reference, "project", ids.1)),
+            )
+        }
         "assetRequirement" => {
             let ids: (Option<String>, Option<String>) = conn
                 .query_row(
@@ -731,6 +771,11 @@ fn neighbor_refs(
         "shot" => Some(("shots", "scene_id", "shot")),
         "scene" => Some(("scenes", "script_id", "scene")),
         "contentUnit" => Some(("content_units", "parent_id", "contentUnit")),
+        "storyElementOccurrence" => Some((
+            "story_element_occurrences",
+            "story_element_id",
+            "storyElementOccurrence",
+        )),
         _ => None,
     };
     let Some((table, parent_column, object_type)) = spec else {

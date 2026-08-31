@@ -37,6 +37,7 @@ import type {
   BatchMutationResponse,
   ProjectDescriptor,
   ProjectState,
+  SaveGraphLayoutInput,
 } from "./types";
 
 export const api = {
@@ -136,4 +137,8 @@ export const api = {
     }),
   cleanupProjectMedia: (projectPath: string) =>
     invoke<number>("cleanup_project_media", { projectPath }),
+  saveGraphLayout: (projectPath: string, input: SaveGraphLayoutInput) =>
+    invoke<string>("graph_layout_save", { projectPath, input }),
+  resetGraphLayout: (projectPath: string, scopeType: SaveGraphLayoutInput["scopeType"], scopeId: string, viewType: SaveGraphLayoutInput["viewType"]) =>
+    invoke<void>("graph_layout_reset", { projectPath, scopeType, scopeId, viewType }),
 };

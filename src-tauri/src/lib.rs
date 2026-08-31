@@ -6,6 +6,7 @@ mod context;
 mod database;
 mod mutation;
 mod permission;
+mod story_structure;
 
 use agent_application::{
     agent_create_session, agent_get_task, agent_list_experts, agent_list_messages,
@@ -29,6 +30,7 @@ use permission::{
     card_create, card_get, card_list, card_resolve, patch_apply, patch_get, patch_propose,
     patch_reject,
 };
+use story_structure::{graph_layout_reset, graph_layout_save};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -83,6 +85,8 @@ pub fn run() {
             undo_change_set,
             create_snapshot,
             restore_snapshot,
+            graph_layout_save,
+            graph_layout_reset,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

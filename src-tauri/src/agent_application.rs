@@ -441,7 +441,9 @@ fn resolve_intent(input: &ResolveIntentInput) -> ResolvedIntent {
             "asset" | "assetRequirement" => scores[3] += 2,
             "keyframe" => scores[4] += 3,
             "generationTask" => scores[5] += 2,
-            "scene" | "script" | "contentUnit" => scores[0] += 1,
+            "scene" | "script" | "contentUnit" | "storyElement" | "storyElementOccurrence" => {
+                scores[0] += 1
+            }
             "shot" => {
                 if let Some(field) = center.field.as_deref() {
                     match field {

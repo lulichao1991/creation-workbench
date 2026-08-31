@@ -1,6 +1,6 @@
-# Goal 01–19 实施状态
+# Goal 01–20 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.7，V2 Goal19 分析本轮修改）
+验证日期：2026-09-01（0.2.0-alpha.8，V2 Goal20 高级作品结构与关系图）
 
 ## Goal 对照
 
@@ -25,6 +25,7 @@
 | 17 主 Agent 与单专业 Agent | 完成 | MainAgent 应用服务；IntentResolver；ExpertRegistry / ExpertRouter；六类专家配置；会话/任务持久化；Context/Pi/Patch 串联；统一结构化输出；固定路由测试与含糊澄清 |
 | 18 Agent 右侧工作区 | 完成 | 全工作区共用会话 UI；当前选区、revision 与写入/保护范围；流式输出、专家状态和停止；讨论/建议/编辑模式；AI Card 与 Patch 差异；应用/拒绝/讨论；只读模式后端兜底；Windows 实机验收 |
 | 19 分析本轮修改 | 完成 | 用户显式触发的 ChangeSet 只读任务；old/new 差异、受影响对象、父级、相邻对象与直接关系上下文；问题/建议卡；影响与复查范围；跨剧集确认边界；revision stale 保护 |
+| 20 高级作品结构与关系图 | 完成 | V5 StoryElement / Occurrence / GraphLayout；时间轴、关系图、剧集表；故事语义与聚焦模式；计划/事实问题提示；布局不改变 revision；30 集与 1000 关系测试 |
 
 ## 自动化验收
 
@@ -60,7 +61,7 @@ npm run tauri build
 
 ## V1 发布基线边界
 
-V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–19，但专家团、记忆和真实生图仍未实现；真实生成按钮保持禁用。
+V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、权限申请或真实生图 Provider。当前 `v2-dev` 已完成 Goal13–20，但专家团、记忆和真实生图仍未实现；真实生成按钮保持禁用。
 
 ## Pro 审查问题修复
 
@@ -117,3 +118,11 @@ AgentPanel 嵌入现有三栏 Workbench 的右侧区域，不新增独立 AI 页
 ContextPackage 以 ChangeSet 为中心，结构化解析每条 Change 的 old/new 值，并在预算内加入仍存在的受影响对象、父链、相邻对象和直接 Relation；删除对象仍由 ChangeSet 中的旧值保留证据。提示明确限定默认传播深度为直接关系和同剧集，跨剧集深挖必须返回确认要求，且禁止自动更新 `sync_status`。
 
 结构化结果落地为问题卡、建议卡、受影响对象列表和建议复查范围；用户可以讨论、忽略、标记受影响或发起专业 Agent 复查，标记动作只解决 Card，不修改项目事实。任务完成时会比较 base/current revision；分析期间或后续读取发现项目事实变化时，任务持久化为 stale。自动化现为前端 9 项、Rust 37 项。
+
+## V2 Goal20 说明
+
+项目库 V5 把 StoryElement 与 StoryElementOccurrence 作为正式创作事实纳入 Mutation、ChangeSet、撤销和快照；GraphLayout 只保存当前范围、视图、筛选与布局偏好，独立命令明确验证不会增加项目 revision。新建故事元素和首个节点可由同一个批量 Mutation 原子提交。
+
+作品结构工作区在现有 Overview 内增加时间轴矩阵、轻量 SVG 关系图和可编辑剧集表，不引入图数据库或第三方图库。所有视图限定到当前项目/季/剧集层级；关系模型最多装载 1000 条，画布最多绘制 200 条，并支持人物线、伏笔、未回收伏笔、受影响内容和计划/事实不一致聚焦。
+
+计划层与事实层检查只产生问题提示：检测已有计划但未落剧本、已有事实但缺一句话剧情、文字明显偏离，以及已埋下但未回收的伏笔，绝不自动改写。StoryElement 与 Occurrence 已进入 ContextService；选中故事元素时，Agent 只能修改属于该元素的已有节点，其他元素仍需用户确认扩权。自动化现为前端 14 项、Rust 40 项。

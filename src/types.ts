@@ -212,6 +212,42 @@ export interface RelationRow {
   updated_at: string;
 }
 
+export type StoryElementType = "mainline" | "character_arc" | "foreshadow" | "event" | "theme" | "custom";
+
+export interface StoryElementRow {
+  id: string;
+  project_id: string;
+  type: StoryElementType;
+  name: string;
+  description: string;
+  scope_unit_id: string | null;
+  maturity: Maturity;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryElementOccurrenceRow {
+  id: string;
+  story_element_id: string;
+  content_unit_id: string;
+  occurrence_type: string;
+  description: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GraphLayoutRow {
+  id: string;
+  scope_type: string;
+  scope_id: string;
+  view_type: string;
+  filter_json: string;
+  layout_json: string;
+  updated_at: string;
+}
+
 export interface ChangeSetRow {
   id: string;
   project_id: string;
@@ -264,6 +300,9 @@ export interface ProjectState {
   generationTasks: GenerationTaskRow[];
   generationTaskShots: GenerationTaskShotRow[];
   relations: RelationRow[];
+  storyElements: StoryElementRow[];
+  storyElementOccurrences: StoryElementOccurrenceRow[];
+  graphLayouts: GraphLayoutRow[];
   changeSets: ChangeSetRow[];
   changes: ChangeRow[];
   snapshots: SnapshotRow[];
@@ -298,4 +337,12 @@ export interface BatchMutationResponse {
   objectIds: string[];
   changeSetId: string;
   revision: number;
+}
+
+export interface SaveGraphLayoutInput {
+  scopeType: "project" | "contentUnit";
+  scopeId: string;
+  viewType: "timeline" | "graph" | "episodes";
+  filterJson: string;
+  layoutJson: string;
 }

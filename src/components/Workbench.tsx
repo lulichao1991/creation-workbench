@@ -40,6 +40,7 @@ import type {
 } from "../types";
 import { NumberField, SelectField, TextField } from "./Fields";
 import { AgentPanel } from "./AgentPanel";
+import { AdvancedStructure } from "./AdvancedStructure";
 import { WorkspaceEmpty } from "./workspaces/WorkspaceEmpty";
 
 interface Props {
@@ -429,6 +430,7 @@ function OverviewWorkspace({ project, state, currentUnit, onMutate, onMutateBatc
         </div>
       </section>
       <RelationEditor project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} />
+      <AdvancedStructure project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} />
     </div>
   );
 }

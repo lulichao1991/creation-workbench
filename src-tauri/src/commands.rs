@@ -122,7 +122,7 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
             params![new_project_id, new_name.trim(), now(), old_project_id],
         )
         .map_err(|e| format!("更新项目副本失败：{e}"))?;
-        for table in ["content_units", "assets", "relations"] {
+        for table in ["content_units", "assets", "relations", "story_elements"] {
             conn.execute(
                 &format!("UPDATE {table} SET project_id=?1 WHERE project_id=?2"),
                 params![new_project_id, old_project_id],
@@ -133,6 +133,11 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
             conn.execute(&format!("DELETE FROM {table}"), [])
                 .map_err(|e| e.to_string())?;
         }
+        conn.execute(
+            "UPDATE graph_layouts SET scope_id=?1 WHERE scope_type='project' AND scope_id=?2",
+            params![new_project_id, old_project_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM snapshots", [])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM changes", [])
@@ -486,6 +491,16 @@ mod tests {
                 params![project.id, timestamp],
             )
             .unwrap();
+            conn.execute(
+                "INSERT INTO story_elements (id, project_id, type, name, created_at, updated_at) VALUES ('mainline', ?1, 'mainline', '主线', ?2, ?2)",
+                params![project.id, timestamp],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO graph_layouts (id, scope_type, scope_id, view_type, updated_at) VALUES ('layout', 'project', ?1, 'graph', ?2)",
+                params![project.id, timestamp],
+            )
+            .unwrap();
         }
         let original_id = project.id;
         let copy = copy_project(project.path, "智斗游戏 副本".into()).unwrap();
@@ -496,6 +511,22 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM snapshots", [], |row| row.get(0))
             .unwrap();
         assert_eq!(snapshot_count, 0);
+        let copied_story_project: String = copy_conn
+            .query_row(
+                "SELECT project_id FROM story_elements WHERE id='mainline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let copied_layout_scope: String = copy_conn
+            .query_row(
+                "SELECT scope_id FROM graph_layouts WHERE id='layout'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(copied_story_project, copy.id);
+        assert_eq!(copied_layout_scope, copy.id);
         for table in crate::database::AGENT_TABLES {
             let count: i64 = copy_conn
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {

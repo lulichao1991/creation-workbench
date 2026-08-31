@@ -174,6 +174,22 @@ const RELATION_FIELDS: &[&str] = &[
     "importance",
     "status",
 ];
+const STORY_ELEMENT_FIELDS: &[&str] = &[
+    "project_id",
+    "type",
+    "name",
+    "description",
+    "scope_unit_id",
+    "maturity",
+    "status",
+];
+const STORY_ELEMENT_OCCURRENCE_FIELDS: &[&str] = &[
+    "story_element_id",
+    "content_unit_id",
+    "occurrence_type",
+    "description",
+    "sort_order",
+];
 const PROJECT_FIELDS: &[&str] = &[
     "name",
     "description",
@@ -272,6 +288,18 @@ fn entity_spec(entity_type: &str) -> AppResult<EntitySpec> {
             entity_type: "relation",
             table: "relations",
             fields: RELATION_FIELDS,
+            composite: false,
+        },
+        "storyElement" => EntitySpec {
+            entity_type: "storyElement",
+            table: "story_elements",
+            fields: STORY_ELEMENT_FIELDS,
+            composite: false,
+        },
+        "storyElementOccurrence" => EntitySpec {
+            entity_type: "storyElementOccurrence",
+            table: "story_element_occurrences",
+            fields: STORY_ELEMENT_OCCURRENCE_FIELDS,
             composite: false,
         },
         _ => return Err(format!("不支持的对象类型：{entity_type}")),

@@ -13,6 +13,8 @@ const objectTypes = new Set<ContextObjectType>([
   "keyframe",
   "generationTask",
   "relation",
+  "storyElement",
+  "storyElementOccurrence",
   "changeSet",
 ]);
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 4;
+pub const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 pub const AGENT_TABLES: &[&str] = &[
     "ai_cards",
@@ -35,6 +35,8 @@ pub const BUSINESS_TABLES: &[&str] = &[
     "generation_tasks",
     "generation_task_shots",
     "relations",
+    "story_elements",
+    "story_element_occurrences",
 ];
 
 pub const STATE_TABLES: &[&str] = &[
@@ -53,6 +55,9 @@ pub const STATE_TABLES: &[&str] = &[
     "generation_tasks",
     "generation_task_shots",
     "relations",
+    "story_elements",
+    "story_element_occurrences",
+    "graph_layouts",
     "change_sets",
     "changes",
     "snapshots",
@@ -107,6 +112,8 @@ pub fn init_database(
         .map_err(|e| format!("初始化数据库结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V4)
         .map_err(|e| format!("初始化 Agent 数据结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V5)
+        .map_err(|e| format!("初始化高级作品结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -161,6 +168,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 4 {
         tx.execute_batch(MIGRATION_V4)
             .map_err(|e| format!("迁移到数据库版本 4 失败：{e}"))?;
+    }
+    if version < 5 {
+        tx.execute_batch(MIGRATION_V5)
+            .map_err(|e| format!("迁移到数据库版本 5 失败：{e}"))?;
     }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
@@ -749,6 +760,53 @@ CREATE INDEX IF NOT EXISTS idx_ai_cards_task_status ON ai_cards(task_id, status)
 CREATE INDEX IF NOT EXISTS idx_project_expert_overrides_project ON project_expert_overrides(project_id);
 "#;
 
+const MIGRATION_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS story_elements (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  scope_unit_id TEXT,
+  maturity TEXT NOT NULL DEFAULT 'exploring',
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY(scope_unit_id) REFERENCES content_units(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_element_occurrences (
+  id TEXT PRIMARY KEY,
+  story_element_id TEXT NOT NULL,
+  content_unit_id TEXT NOT NULL,
+  occurrence_type TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(story_element_id) REFERENCES story_elements(id) ON DELETE CASCADE,
+  FOREIGN KEY(content_unit_id) REFERENCES content_units(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS graph_layouts (
+  id TEXT PRIMARY KEY,
+  scope_type TEXT NOT NULL,
+  scope_id TEXT NOT NULL,
+  view_type TEXT NOT NULL,
+  filter_json TEXT NOT NULL DEFAULT '{}',
+  layout_json TEXT NOT NULL DEFAULT '{}',
+  updated_at TEXT NOT NULL,
+  UNIQUE(scope_type, scope_id, view_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_story_elements_project_type ON story_elements(project_id, type);
+CREATE INDEX IF NOT EXISTS idx_story_elements_scope ON story_elements(scope_unit_id, status);
+CREATE INDEX IF NOT EXISTS idx_story_occurrences_unit ON story_element_occurrences(content_unit_id);
+CREATE INDEX IF NOT EXISTS idx_story_occurrences_element ON story_element_occurrences(story_element_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_graph_layouts_scope ON graph_layouts(scope_type, scope_id, view_type);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +841,8 @@ mod tests {
             "idx_agent_tasks_session",
             "idx_patch_items_proposal",
             "idx_ai_cards_task_status",
+            "idx_story_occurrences_unit",
+            "idx_graph_layouts_scope",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -820,6 +880,9 @@ mod tests {
                  DROP TABLE shot_assets;
                  DROP TABLE asset_media_requirements;
                  DROP TABLE asset_requirement_sources;
+                 DROP TABLE story_element_occurrences;
+                 DROP TABLE story_elements;
+                 DROP TABLE graph_layouts;
                  PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -834,6 +897,9 @@ mod tests {
             "shot_assets",
             "asset_media_requirements",
             "asset_requirement_sources",
+            "story_elements",
+            "story_element_occurrences",
+            "graph_layouts",
         ] {
             let exists: i64 = conn
                 .query_row(

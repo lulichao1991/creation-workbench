@@ -9,6 +9,8 @@ export type ContextObjectType =
   | "keyframe"
   | "generationTask"
   | "relation"
+  | "storyElement"
+  | "storyElementOccurrence"
   | "changeSet";
 
 export interface ObjectRef {
