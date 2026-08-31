@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 5;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 pub const AGENT_TABLES: &[&str] = &[
     "ai_cards",
@@ -58,6 +58,8 @@ pub const STATE_TABLES: &[&str] = &[
     "story_elements",
     "story_element_occurrences",
     "graph_layouts",
+    "project_memories",
+    "memory_sources",
     "change_sets",
     "changes",
     "snapshots",
@@ -114,6 +116,8 @@ pub fn init_database(
         .map_err(|e| format!("初始化 Agent 数据结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V5)
         .map_err(|e| format!("初始化高级作品结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V6)
+        .map_err(|e| format!("初始化项目记忆结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -172,6 +176,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 5 {
         tx.execute_batch(MIGRATION_V5)
             .map_err(|e| format!("迁移到数据库版本 5 失败：{e}"))?;
+    }
+    if version < 6 {
+        tx.execute_batch(MIGRATION_V6)
+            .map_err(|e| format!("迁移到数据库版本 6 失败：{e}"))?;
     }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
@@ -807,6 +815,39 @@ CREATE INDEX IF NOT EXISTS idx_story_occurrences_element ON story_element_occurr
 CREATE INDEX IF NOT EXISTS idx_graph_layouts_scope ON graph_layouts(scope_type, scope_id, view_type);
 "#;
 
+const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS project_memories (
+  id TEXT PRIMARY KEY,
+  scope_type TEXT NOT NULL DEFAULT 'project',
+  scope_id TEXT,
+  category TEXT NOT NULL DEFAULT 'decision',
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate', 'active', 'superseded', 'invalidated')),
+  confidence REAL NOT NULL DEFAULT 1.0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  source_type TEXT NOT NULL DEFAULT 'user',
+  source_id TEXT,
+  supersedes_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(supersedes_id) REFERENCES project_memories(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS memory_sources (
+  id TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT,
+  excerpt TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(memory_id) REFERENCES project_memories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_project_memories_scope_status
+ON project_memories(scope_type, scope_id, status, priority, updated_at);
+CREATE INDEX IF NOT EXISTS idx_memory_sources_memory ON memory_sources(memory_id, created_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +884,7 @@ mod tests {
             "idx_ai_cards_task_status",
             "idx_story_occurrences_unit",
             "idx_graph_layouts_scope",
+            "idx_project_memories_scope_status",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -883,6 +925,8 @@ mod tests {
                  DROP TABLE story_element_occurrences;
                  DROP TABLE story_elements;
                  DROP TABLE graph_layouts;
+                 DROP TABLE memory_sources;
+                 DROP TABLE project_memories;
                  PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -900,6 +944,8 @@ mod tests {
             "story_elements",
             "story_element_occurrences",
             "graph_layouts",
+            "project_memories",
+            "memory_sources",
         ] {
             let exists: i64 = conn
                 .query_row(

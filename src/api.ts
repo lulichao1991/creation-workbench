@@ -21,6 +21,7 @@ import type {
   ContextPackage,
   ContextSearchResult,
 } from "./features/context";
+import type { CreateMemoryInput, MemoryRecord, UpdateMemoryInput } from "./features/memory";
 import type {
   AICard,
   ApplyPatchInput,
@@ -67,6 +68,14 @@ export const api = {
     invoke<ContextPackage>("context_build", { projectPath, input }),
   contextSearch: (projectPath: string, query: string, limit = 20) =>
     invoke<ContextSearchResult[]>("context_search", { projectPath, query, limit }),
+  memoryList: (projectPath: string, query?: string) =>
+    invoke<MemoryRecord[]>("memory_list", { projectPath, query }),
+  memoryCreate: (projectPath: string, input: CreateMemoryInput) =>
+    invoke<MemoryRecord>("memory_create", { projectPath, input }),
+  memoryUpdate: (projectPath: string, input: UpdateMemoryInput) =>
+    invoke<MemoryRecord>("memory_update", { projectPath, input }),
+  memoryInvalidate: (projectPath: string, storage: MemoryRecord["storage"], memoryId: string) =>
+    invoke<MemoryRecord>("memory_invalidate", { projectPath, storage, memoryId }),
   patchPropose: (projectPath: string, input: ProposePatchInput) =>
     invoke<PatchProposal>("patch_propose", { projectPath, input }),
   patchGet: (projectPath: string, proposalId: string) =>

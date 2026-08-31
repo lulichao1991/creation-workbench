@@ -11,6 +11,8 @@ export type ContextObjectType =
   | "relation"
   | "storyElement"
   | "storyElementOccurrence"
+  | "projectMemory"
+  | "longTermMemory"
   | "changeSet";
 
 export interface ObjectRef {

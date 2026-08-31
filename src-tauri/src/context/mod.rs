@@ -3,11 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::path::Path;
+use tauri::Manager;
 
 use crate::agent_runtime::ensure_agent_core_enabled;
+use crate::app_database::load_feature_flags;
 use crate::database::{new_id, now, open_database, row_to_json, AppResult};
+use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
 
-const CONTEXT_POLICY_VERSION: &str = "context-v1";
+const CONTEXT_POLICY_VERSION: &str = "context-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,13 +104,18 @@ struct Candidate {
     reference: ObjectRef,
     source: &'static str,
     data: Value,
+    memory_id: Option<String>,
 }
 
-pub fn build_context(conn: &mut Connection, input: BuildContextInput) -> AppResult<ContextPackage> {
+pub fn build_context_with_memories(
+    conn: &mut Connection,
+    input: BuildContextInput,
+    global_memories: Option<&[MemoryContextEntry]>,
+) -> AppResult<ContextPackage> {
     let tx = conn
         .transaction()
         .map_err(|e| format!("开始构建 ContextPackage 失败：{e}"))?;
-    let package = build_context_in_transaction(&tx, input)?;
+    let package = build_context_in_transaction(&tx, input, global_memories)?;
     tx.commit()
         .map_err(|e| format!("提交 ContextPackage 失败：{e}"))?;
     Ok(package)
@@ -116,6 +124,7 @@ pub fn build_context(conn: &mut Connection, input: BuildContextInput) -> AppResu
 fn build_context_in_transaction(
     conn: &Connection,
     input: BuildContextInput,
+    global_memories: Option<&[MemoryContextEntry]>,
 ) -> AppResult<ContextPackage> {
     if !(32..=100_000).contains(&input.token_budget) {
         return Err("Context token budget 必须在 32–100000 之间".into());
@@ -149,6 +158,7 @@ fn build_context_in_transaction(
         data: object_value(conn, &center, false)?,
         reference: center.clone(),
         source: "center",
+        memory_id: None,
     }];
     for reference in &input.selection.selected {
         if reference != &center {
@@ -156,6 +166,7 @@ fn build_context_in_transaction(
                 data: object_value(conn, reference, true)?,
                 reference: reference.clone(),
                 source: "selection",
+                memory_id: None,
             });
         }
     }
@@ -169,6 +180,7 @@ fn build_context_in_transaction(
             data: object_value(conn, &next, true)?,
             reference: next.clone(),
             source: "parent",
+            memory_id: None,
         });
         parent = next;
     }
@@ -177,6 +189,7 @@ fn build_context_in_transaction(
             data: object_value(conn, &reference, true)?,
             reference,
             source: "neighbor",
+            memory_id: None,
         });
     }
     for (reference, data) in relation_items(conn, &center, policy.relation_limit)? {
@@ -184,6 +197,7 @@ fn build_context_in_transaction(
             reference,
             source: "relation",
             data,
+            memory_id: None,
         });
     }
     if center.object_type == "changeSet" {
@@ -194,6 +208,7 @@ fn build_context_in_transaction(
             candidates.push(Candidate {
                 reference: affected.clone(),
                 source: "affected",
+                memory_id: None,
                 data,
             });
             let mut parent = affected.clone();
@@ -205,6 +220,7 @@ fn build_context_in_transaction(
                     data: object_value(conn, &next, true)?,
                     reference: next.clone(),
                     source: "parent",
+                    memory_id: None,
                 });
                 parent = next;
             }
@@ -213,6 +229,7 @@ fn build_context_in_transaction(
                     data: object_value(conn, &reference, true)?,
                     reference,
                     source: "neighbor",
+                    memory_id: None,
                 });
             }
             for (reference, data) in relation_items(conn, &affected, policy.relation_limit)? {
@@ -220,14 +237,45 @@ fn build_context_in_transaction(
                     reference,
                     source: "relation",
                     data,
+                    memory_id: None,
                 });
             }
+        }
+    }
+
+    if let Some(global_memories) = global_memories {
+        let mut memories = active_project_memories(conn, &center)?;
+        memories.extend(global_memories.iter().take(4).cloned());
+        for memory in memories {
+            candidates.push(Candidate {
+                reference: ObjectRef {
+                    project_id: project_id.clone(),
+                    object_type: if memory.storage == "project" {
+                        "projectMemory".into()
+                    } else {
+                        "longTermMemory".into()
+                    },
+                    object_id: memory.id.clone(),
+                    field: None,
+                },
+                source: "memory",
+                data: json!({
+                    "category": memory.category,
+                    "content": memory.content,
+                    "scopeType": memory.scope_type,
+                    "scopeId": memory.scope_id,
+                    "sourceType": memory.source_type,
+                    "priority": memory.priority,
+                }),
+                memory_id: Some(memory.id),
+            });
         }
     }
 
     let mut seen = HashSet::new();
     let mut included_items = Vec::new();
     let mut omitted_summary = Vec::new();
+    let mut included_memory_ids = Vec::new();
     let mut token_estimate = 0;
     for candidate in candidates {
         let key = (
@@ -249,6 +297,9 @@ fn build_context_in_transaction(
         };
         if let Some((data, estimate)) = fitted {
             token_estimate += estimate;
+            if let Some(memory_id) = candidate.memory_id {
+                included_memory_ids.push(memory_id);
+            }
             included_items.push(ContextItem {
                 reference: candidate.reference,
                 source: candidate.source.into(),
@@ -270,6 +321,7 @@ fn build_context_in_transaction(
         "expertType": input.expert_type,
         "centerRef": center,
         "items": included_items,
+        "memoryIds": included_memory_ids,
         "omitted": omitted_summary,
     });
     let checksum = stable_checksum(checksum_input.to_string().as_bytes());
@@ -280,7 +332,7 @@ fn build_context_in_transaction(
         policy_version: CONTEXT_POLICY_VERSION.into(),
         center_ref: center,
         included_items,
-        included_memory_ids: Vec::new(),
+        included_memory_ids,
         omitted_summary,
         token_estimate,
         checksum,
@@ -349,7 +401,16 @@ pub fn context_build(
 ) -> AppResult<ContextPackage> {
     ensure_agent_core_enabled(&app)?;
     let mut conn = open_database(Path::new(&project_path))?;
-    build_context(&mut conn, input)
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    let globals = if load_feature_flags(&app_data_dir)?.get("memory") == Some(&true) {
+        Some(active_global_memories(&app_data_dir)?)
+    } else {
+        None
+    };
+    build_context_with_memories(&mut conn, input, globals.as_deref())
 }
 
 #[tauri::command]
@@ -1076,8 +1137,10 @@ mod tests {
         let mut conn = open_database(temp.path()).unwrap();
         insert_fixture(&conn, &project.id);
 
-        let first = build_context(&mut conn, build_input(&project.id, 0)).unwrap();
-        let second = build_context(&mut conn, build_input(&project.id, 0)).unwrap();
+        let first =
+            build_context_with_memories(&mut conn, build_input(&project.id, 0), None).unwrap();
+        let second =
+            build_context_with_memories(&mut conn, build_input(&project.id, 0), None).unwrap();
         assert_eq!(first.checksum, second.checksum);
         assert!(first.token_estimate <= 600);
         assert!(first
@@ -1114,13 +1177,58 @@ mod tests {
     }
 
     #[test]
+    fn facts_precede_active_memories_and_inactive_memories_are_excluded() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Memory Context", "series").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        insert_fixture(&conn, &project.id);
+        let timestamp = now();
+        for (id, status, content) in [
+            ("active-memory", "active", "镜头切换必须出现新信息"),
+            ("candidate-memory", "candidate", "尚未确认的倾向"),
+            ("invalid-memory", "invalidated", "已经废弃的错误偏好"),
+        ] {
+            conn.execute(
+                "INSERT INTO project_memories (id, scope_type, scope_id, category, content, status, source_type, created_at, updated_at) VALUES (?1, 'contentUnit', 'unit', 'editing', ?2, ?3, 'user', ?4, ?4)",
+                params![id, content, status, timestamp],
+            )
+            .unwrap();
+        }
+        let globals = vec![MemoryContextEntry {
+            id: "global-memory".into(),
+            storage: "global".into(),
+            scope_type: "global".into(),
+            scope_id: None,
+            category: "language".into(),
+            content: "默认使用中文".into(),
+            source_type: "user".into(),
+            priority: 0,
+            updated_at: timestamp,
+        }];
+        let mut input = build_input(&project.id, 0);
+        input.token_budget = 2_000;
+        let package = build_context_with_memories(&mut conn, input, Some(&globals)).unwrap();
+        assert_eq!(package.included_items[0].source, "center");
+        assert_eq!(
+            package.included_memory_ids,
+            ["active-memory", "global-memory"]
+        );
+        let serialized = serde_json::to_string(&package).unwrap();
+        assert!(serialized.contains("镜头切换必须出现新信息"));
+        assert!(serialized.contains("默认使用中文"));
+        assert!(!serialized.contains("尚未确认的倾向"));
+        assert!(!serialized.contains("已经废弃的错误偏好"));
+    }
+
+    #[test]
     fn rejects_stale_selection_and_searches_project_with_fts() {
         let temp = tempfile::tempdir().unwrap();
         let project = init_database(temp.path(), "Search Project", "series").unwrap();
         let mut conn = open_database(temp.path()).unwrap();
         insert_fixture(&conn, &project.id);
 
-        let error = build_context(&mut conn, build_input(&project.id, 1)).unwrap_err();
+        let error =
+            build_context_with_memories(&mut conn, build_input(&project.id, 1), None).unwrap_err();
         assert!(error.contains("revision 已过期"));
         let mut sensitive = build_input(&project.id, 0);
         sensitive.selection.center = Some(ObjectRef {
@@ -1129,7 +1237,7 @@ mod tests {
             object_id: "keyframe".into(),
             field: Some("filePath".into()),
         });
-        let error = build_context(&mut conn, sensitive).unwrap_err();
+        let error = build_context_with_memories(&mut conn, sensitive, None).unwrap_err();
         assert!(error.contains("敏感本地字段"));
         let results = search_project(&conn, "暗号蓝门", 5).unwrap();
         assert_eq!(results.len(), 1);
@@ -1160,7 +1268,7 @@ mod tests {
         )
         .unwrap();
 
-        let package = build_context(
+        let package = build_context_with_memories(
             &mut conn,
             BuildContextInput {
                 task_id: "task".into(),
@@ -1179,6 +1287,7 @@ mod tests {
                 expert_type: "main".into(),
                 token_budget: 1_200,
             },
+            None,
         )
         .unwrap();
 

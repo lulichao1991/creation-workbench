@@ -7,7 +7,7 @@ const row = (id: string, parent_id: string | null, type: ContentUnitRow["type"],
 });
 
 const baseState = (): ProjectState => ({
-  projects: [], contentUnits: [], scripts: [], scenes: [], shots: [], assets: [], assetMedia: [], assetRequirements: [], assetRequirementSources: [], assetMediaRequirements: [], shotAssets: [], keyframes: [], generationTasks: [], generationTaskShots: [], relations: [], storyElements: [], storyElementOccurrences: [], graphLayouts: [], changeSets: [], changes: [], snapshots: [],
+  projects: [], contentUnits: [], scripts: [], scenes: [], shots: [], assets: [], assetMedia: [], assetRequirements: [], assetRequirementSources: [], assetMediaRequirements: [], shotAssets: [], keyframes: [], generationTasks: [], generationTaskShots: [], relations: [], storyElements: [], storyElementOccurrences: [], graphLayouts: [], projectMemories: [], memorySources: [], changeSets: [], changes: [], snapshots: [],
 });
 
 describe("advanced story structure", () => {

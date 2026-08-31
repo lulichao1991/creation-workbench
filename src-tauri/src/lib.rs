@@ -4,6 +4,7 @@ mod app_database;
 mod commands;
 mod context;
 mod database;
+mod memory;
 mod mutation;
 mod permission;
 mod story_structure;
@@ -22,6 +23,7 @@ use commands::{
     import_project_file, list_projects, load_project_state, open_project, read_project_media,
 };
 use context::{context_build, context_search};
+use memory::{memory_create, memory_invalidate, memory_list, memory_update};
 use mutation::{
     apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
     undo_change_set,
@@ -61,6 +63,10 @@ pub fn run() {
             agent_get_task_state,
             context_build,
             context_search,
+            memory_list,
+            memory_create,
+            memory_update,
+            memory_invalidate,
             patch_propose,
             patch_get,
             patch_apply,

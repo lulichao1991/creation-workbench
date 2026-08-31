@@ -7,7 +7,7 @@ use tauri::Manager;
 
 use crate::database::AppResult;
 
-pub const APP_SCHEMA_VERSION: i64 = 1;
+pub const APP_SCHEMA_VERSION: i64 = 2;
 pub const FEATURE_FLAG_KEYS: &[&str] = &[
     "agent_core",
     "expert_agents",
@@ -121,8 +121,10 @@ fn migrate_app_database(
     let tx = conn
         .transaction()
         .map_err(|e| format!("开始迁移 app.db 失败：{e}"))?;
-    tx.execute_batch(APP_SCHEMA)
-        .map_err(|e| format!("迁移 app.db 到版本 1 失败：{e}"))?;
+    if version < 1 {
+        tx.execute_batch(APP_SCHEMA)
+            .map_err(|e| format!("迁移 app.db 到版本 1 失败：{e}"))?;
+    }
     let timestamp = Utc::now().to_rfc3339();
     for key in FEATURE_FLAG_KEYS {
         tx.execute(
@@ -130,6 +132,10 @@ fn migrate_app_database(
             params![key, timestamp],
         )
         .map_err(|e| format!("写入默认功能开关失败：{e}"))?;
+    }
+    if version < 2 {
+        tx.execute_batch(MIGRATION_V2)
+            .map_err(|e| format!("迁移 app.db 到版本 2 失败：{e}"))?;
     }
     verify_app_database(&tx)?;
     tx.pragma_update(None, "user_version", APP_SCHEMA_VERSION)
@@ -170,6 +176,40 @@ CREATE TABLE IF NOT EXISTS feature_flags (
 );
 "#;
 
+const MIGRATION_V2: &str = r#"
+CREATE TABLE IF NOT EXISTS long_term_memories (
+  id TEXT PRIMARY KEY,
+  scope_type TEXT NOT NULL DEFAULT 'global',
+  scope_id TEXT,
+  category TEXT NOT NULL DEFAULT 'preference',
+  content TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'candidate' CHECK(status IN ('candidate', 'active', 'superseded', 'invalidated')),
+  confidence REAL NOT NULL DEFAULT 1.0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  source_type TEXT NOT NULL DEFAULT 'user',
+  source_id TEXT,
+  supersedes_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(supersedes_id) REFERENCES long_term_memories(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS long_term_memory_sources (
+  id TEXT PRIMARY KEY,
+  memory_id TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  source_id TEXT,
+  excerpt TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(memory_id) REFERENCES long_term_memories(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_long_term_memories_status
+ON long_term_memories(status, category, priority, updated_at);
+CREATE INDEX IF NOT EXISTS idx_long_term_memory_sources_memory
+ON long_term_memory_sources(memory_id, created_at);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +222,14 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, APP_SCHEMA_VERSION);
+        let memory_table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('long_term_memories', 'long_term_memory_sources')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(memory_table_count, 2);
         drop(conn);
 
         let flags = load_feature_flags(temp.path()).unwrap();

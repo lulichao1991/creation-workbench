@@ -3,8 +3,9 @@ use crate::agent_runtime::{
     RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
-use crate::context::{build_context, BuildContextInput, SelectionSnapshot};
+use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
 use crate::database::{now, open_database, AppResult};
+use crate::memory::{active_global_memories, MemoryContextEntry};
 use crate::permission::{
     create_card, propose_patch, CreateCardInput, ObjectRef as PermissionObjectRef, PatchItemInput,
     ProposePatchInput, WriteScope,
@@ -305,7 +306,16 @@ pub fn agent_send_message(
     if input.mode == "change_analysis" {
         ensure_change_analysis_enabled(&app)?;
     }
-    let prepared = prepare_task(Path::new(&project_path), input)?;
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    let global_memories = if load_feature_flags(&app_data_dir)?.get("memory") == Some(&true) {
+        Some(active_global_memories(&app_data_dir)?)
+    } else {
+        None
+    };
+    let prepared = prepare_task(Path::new(&project_path), input, global_memories.as_deref())?;
     let Some(runtime_input) = prepared.runtime_input else {
         return Ok(prepared.dispatch);
     };
@@ -542,7 +552,11 @@ fn create_session(project_path: &Path, input: CreateSessionInput) -> AppResult<A
     load_session(&conn, &input.request_id)
 }
 
-fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<PreparedTask> {
+fn prepare_task(
+    project_path: &Path,
+    input: SendMessageInput,
+    global_memories: Option<&[MemoryContextEntry]>,
+) -> AppResult<PreparedTask> {
     if input.request_id.trim().is_empty() || input.message.trim().is_empty() {
         return Err("TOOL_ARGUMENT_INVALID: requestId 和 message 不能为空".into());
     }
@@ -678,7 +692,7 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
     }
 
     let expert_type = route.expert_type.as_deref().unwrap();
-    let package = match build_context(
+    let package = match build_context_with_memories(
         &mut conn,
         BuildContextInput {
             task_id: task_id.clone(),
@@ -687,6 +701,7 @@ fn prepare_task(project_path: &Path, input: SendMessageInput) -> AppResult<Prepa
             expert_type: expert_type.into(),
             token_budget: input.token_budget,
         },
+        global_memories,
     ) {
         Ok(package) => package,
         Err(error) => {
@@ -746,7 +761,7 @@ fn build_expert_prompt(
         "只读模式：patchProposal 必须为 null，不得申请写入。"
     };
     Ok(format!(
-        "你是{}。{}\n{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage 中的事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
+        "你是{}。{}\n{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage。source=memory 的条目只是偏好或已确认共识，不是事实；它与项目事实冲突时必须以事实为准并明确指出冲突，绝不能用记忆覆盖事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
         definition.display_name,
         definition.system_instruction,
         mode_rule,
@@ -762,7 +777,7 @@ fn build_change_analysis_prompt(
     package: &crate::context::ContextPackage,
 ) -> AppResult<String> {
     Ok(format!(
-        "你是创作工作台主 Agent，正在执行用户主动触发的‘分析本轮修改’。只依据 ContextPackage：中心 ChangeSet 含每个字段的 oldValue/newValue，affected/parent/neighbor/relation 是受影响对象、同场景或同剧集上下文及直接正式关系。\n\
+        "你是创作工作台主 Agent，正在执行用户主动触发的‘分析本轮修改’。只依据 ContextPackage：中心 ChangeSet 含每个字段的 oldValue/newValue，affected/parent/neighbor/relation 是受影响对象、同场景或同剧集上下文及直接正式关系。source=memory 的条目只是偏好或已确认共识，不是事实；与项目事实冲突时事实始终优先，并明确指出冲突。\n\
          分析剧本动机与对白一致性、镜头时长/连续性/关键帧/生成任务、资产引用与跨阶段直接影响。默认只分析直接关系和同一剧集；若必须跨剧集深挖，只设置 deepAnalysisRequiresConfirmation=true，不自行扩大范围。\n\
          这是只读任务：不得修改 sync_status，不得返回写入建议，patchProposal 必须为 null。问题与建议必须给出具体差异证据；没有证据就不要生成卡片。\n\
          用户请求：{}\nContextPackage：{}\n\
@@ -1311,6 +1326,7 @@ mod tests {
                 provider: None,
                 model: None,
             },
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -1381,6 +1397,7 @@ mod tests {
                 provider: None,
                 model: None,
             },
+            None,
         )
         .unwrap();
         let readonly_result = complete_agent_task(
@@ -1471,6 +1488,7 @@ mod tests {
                 provider: None,
                 model: None,
             },
+            None,
         )
         .unwrap();
         assert_eq!(prepared.dispatch.route.task_type, "change_analysis");

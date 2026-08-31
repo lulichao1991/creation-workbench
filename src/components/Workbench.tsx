@@ -41,6 +41,7 @@ import type {
 import { NumberField, SelectField, TextField } from "./Fields";
 import { AgentPanel } from "./AgentPanel";
 import { AdvancedStructure } from "./AdvancedStructure";
+import { MemoryPanel } from "./MemoryPanel";
 import { WorkspaceEmpty } from "./workspaces/WorkspaceEmpty";
 
 interface Props {
@@ -276,6 +277,7 @@ export function Workbench({ project, state, busy, onBack, onMutate, onMutateBatc
           </div>
           {rightCollapsed && <span className="collapsed-rail-icon"><Bot size={17} /></span>}
           <div className="inspector-body agent-inspector">
+            <MemoryPanel project={project} currentUnitId={currentUnit?.id ?? null} onError={onError} />
             <AgentPanel
               project={project}
               revision={projectRow?.revision ?? project.revision}

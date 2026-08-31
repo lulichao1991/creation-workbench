@@ -138,6 +138,11 @@ pub fn copy_project(project_path: String, new_name: String) -> AppResult<Project
             params![new_project_id, old_project_id],
         )
         .map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE project_memories SET scope_id=?1 WHERE scope_type='project' AND scope_id=?2",
+            params![new_project_id, old_project_id],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM snapshots", [])
             .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM changes", [])

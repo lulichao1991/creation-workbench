@@ -248,6 +248,31 @@ export interface GraphLayoutRow {
   updated_at: string;
 }
 
+export interface ProjectMemoryRow {
+  id: string;
+  scope_type: string;
+  scope_id: string | null;
+  category: string;
+  content: string;
+  status: "candidate" | "active" | "superseded" | "invalidated";
+  confidence: number;
+  priority: number;
+  source_type: string;
+  source_id: string | null;
+  supersedes_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MemorySourceRow {
+  id: string;
+  memory_id: string;
+  source_type: string;
+  source_id: string | null;
+  excerpt: string;
+  created_at: string;
+}
+
 export interface ChangeSetRow {
   id: string;
   project_id: string;
@@ -303,6 +328,8 @@ export interface ProjectState {
   storyElements: StoryElementRow[];
   storyElementOccurrences: StoryElementOccurrenceRow[];
   graphLayouts: GraphLayoutRow[];
+  projectMemories: ProjectMemoryRow[];
+  memorySources: MemorySourceRow[];
   changeSets: ChangeSetRow[];
   changes: ChangeRow[];
   snapshots: SnapshotRow[];
