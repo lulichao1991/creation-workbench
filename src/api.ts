@@ -11,6 +11,15 @@ import type {
   ContextSearchResult,
 } from "./features/context";
 import type {
+  AICard,
+  ApplyPatchInput,
+  ApplyPatchResponse,
+  CreateCardInput,
+  PatchProposal,
+  ProposePatchInput,
+  ResolveCardInput,
+} from "./features/permission";
+import type {
   MutationRequest,
   MutationResponse,
   BatchMutationRequest,
@@ -33,6 +42,20 @@ export const api = {
     invoke<ContextPackage>("context_build", { projectPath, input }),
   contextSearch: (projectPath: string, query: string, limit = 20) =>
     invoke<ContextSearchResult[]>("context_search", { projectPath, query, limit }),
+  patchPropose: (projectPath: string, input: ProposePatchInput) =>
+    invoke<PatchProposal>("patch_propose", { projectPath, input }),
+  patchGet: (projectPath: string, proposalId: string) =>
+    invoke<PatchProposal>("patch_get", { projectPath, proposalId }),
+  patchApply: (projectPath: string, input: ApplyPatchInput) =>
+    invoke<ApplyPatchResponse>("patch_apply", { projectPath, input }),
+  patchReject: (projectPath: string, proposalId: string) =>
+    invoke<PatchProposal>("patch_reject", { projectPath, proposalId }),
+  cardCreate: (projectPath: string, input: CreateCardInput) =>
+    invoke<AICard>("card_create", { projectPath, input }),
+  cardGet: (projectPath: string, cardId: string) =>
+    invoke<AICard>("card_get", { projectPath, cardId }),
+  cardResolve: (projectPath: string, input: ResolveCardInput) =>
+    invoke<AICard>("card_resolve", { projectPath, input }),
   getDefaultWorkspace: () =>
     invoke<{ defaultPath: string }>("get_default_workspace"),
   listProjects: (rootPath: string) =>

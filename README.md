@@ -1,6 +1,6 @@
 # 创作工作台 V2 开发线
 
-本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.3` 上下文系统阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI 或真实生图服务，V1 工作流保持完整可用：
+本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-alpha.4` 权限与修改提案阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI 或真实生图服务，V1 工作流保持完整可用：
 
 `作品结构 → 剧本 → 分镜 → 资产 → 关键帧 → 生成任务 / 提示词 → 历史与快照`
 
@@ -79,3 +79,12 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - token budget 使用偏保守的中英文估算，超限时保留中心内容并明确记录遗漏项；相同 revision、策略和输入生成稳定 checksum；
 - 显式全文搜索使用 SQLite FTS5 临时索引，与字段级上下文路径隔离，不把全文搜索或整个项目自动加入普通任务；
 - 记忆注入、语义检索、上下文缓存和 Agent 自动路由仍属于后续 Goal。
+
+## V2 Goal16 权限、修改提案与 AI 卡片（0.2.0-alpha.4）
+
+- 新增 `PermissionService`、`PatchProposal` / `PatchItem` 与 `AICard` 的 Rust / TypeScript 契约和 Tauri 命令；创建接口用 `requestId` 作为稳定 ID，重复调用不会生成重复提案或卡片；
+- 提案从 Agent 任务的 `write_scope_json` 推导字段权限，保护范围优先于普通授权；范围外字段进入显式权限卡，保护字段始终拒绝；
+- `patch_get` 返回结构化 old/new 差异预览；`patch_apply` 逐项校验项目 revision、当前旧值、对象存在性和最新写入范围；过期提案持久化为 `stale` 且不能写入；
+- 用户批准项、拒绝项、权限卡解决、Agent 来源 ChangeSet、批量业务修改与提案状态在同一个 SQLite 事务完成，成功修改仍可由 V1 历史系统撤销；
+- 权限卡不能经普通 `card_resolve` 绕过应用事务；未确认的字段级越权、多选未选对象、保护字段、已删除对象、变更后旧值和写入范围变化都有拒绝回归测试；
+- 主 Agent、专业 Agent 路由和右侧 Agent UI 仍属于 Goal17–18。

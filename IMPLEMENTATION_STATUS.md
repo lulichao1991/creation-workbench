@@ -1,6 +1,6 @@
-# Goal 01–15 实施状态
+# Goal 01–16 实施状态
 
-验证日期：2026-08-31（0.2.0-alpha.3，V2 Goal15 上下文系统）
+验证日期：2026-08-31（0.2.0-alpha.4，V2 Goal16 权限、修改提案与 AI 卡片）
 
 ## Goal 对照
 
@@ -21,6 +21,7 @@
 | 13 V2 工程基础 | 完成 | `app.db` V1 与备份迁移；8 个默认关闭的 feature flags；`project.db` V4 Agent 核心表；项目复制隔离 Agent 数据；Agent / Context / Memory / Permission 契约目录；开始拆分 Workbench；V1 端到端回归通过 |
 | 14 Pi Runtime 接入 | 完成 | Rust `AgentRuntime` 与 `PiRuntimeAdapter`；TypeScript Runtime 契约；Pi 官方 RPC JSONL；流式文本和工具事件；追加输入、状态与取消；MockRuntime；Windows `.cmd`、中文空格路径和子进程回收验证 |
 | 15 上下文系统 | 完成 | SelectionSnapshot / ContextPolicy / ContextPackage；字段级中心事实；父链、邻居、Relation 与镜头资产结构查询；FTS5；token budget；稳定 checksum；revision 校验和事务快照；V4 持久化 |
+| 16 权限、修改提案与 AI 卡片 | 完成 | WriteScope / ProtectedScope 权限判断；Patch old/new 差异；权限卡；revision、旧值、对象与权限变化 stale 校验；一次性批准；同事务批量 Mutation 与 Agent ChangeSet；9 个权限安全测试 |
 
 ## 自动化验收
 
@@ -87,3 +88,9 @@ ContextService 只接受带项目 ID 和 revision 的 SelectionSnapshot。字段
 上下文采用固定 `context-v1` 策略版本、偏保守的中英文 token 估算和硬 budget；非中心候选超限会进入 `omittedSummary`，中心超限会明确标记截断。checksum 绑定 revision、策略、任务意图、专家、中心引用、实际条目和遗漏列表；同一输入生成相同 checksum。
 
 FTS5 只在用户或上层服务显式调用搜索接口时建立临时索引，普通字段任务不会触发全文扫描或自动加入搜索结果。测试项目包含 33 个镜头，修改镜头04构图的 ContextPackage 只含目标字段、镜头03/05、父链和正式资产关系，明确验证远端镜头文本未进入上下文。自动化现为前端 6 项、Rust 21 项。
+
+## V2 Goal16 说明
+
+PermissionService 从 `agent_tasks.write_scope_json` 读取当前写入范围，按“保护范围优先、明确对象/字段授权、其余需要确认”分类 PatchItem。Agent 只能创建提案和卡片，没有直接写入工具；`patch_apply` 是唯一将提案转为项目事实的入口，调用已有 MutationService 生成 `source_type=agent` 的单一 ChangeSet。
+
+应用提案会在同一 SQLite 事务中校验 base revision、每个字段 old value、对象存在性和最新权限状态，再处理一次性批准/拒绝、批量写入、权限卡 resolution 与提案状态。任何 revision、旧值、对象或相关写入范围变化都会将提案和待处理项持久化为 stale；保护字段即使被列入批准项也会拒绝。权限卡不能通过普通 `card_resolve` 绕过该事务。自动化现为前端 6 项、Rust 31 项。

@@ -4,6 +4,7 @@ mod commands;
 mod context;
 mod database;
 mod mutation;
+mod permission;
 
 use agent_runtime::{
     agent_cancel_task, agent_get_task_state, agent_runtime_send_input,
@@ -18,6 +19,9 @@ use context::{context_build, context_search};
 use mutation::{
     apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
     undo_change_set,
+};
+use permission::{
+    card_create, card_get, card_resolve, patch_apply, patch_get, patch_propose, patch_reject,
 };
 use tauri::Manager;
 
@@ -42,6 +46,13 @@ pub fn run() {
             agent_get_task_state,
             context_build,
             context_search,
+            patch_propose,
+            patch_get,
+            patch_apply,
+            patch_reject,
+            card_create,
+            card_get,
+            card_resolve,
             get_default_workspace,
             list_projects,
             create_project,

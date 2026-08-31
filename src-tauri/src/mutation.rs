@@ -320,6 +320,29 @@ fn execute_mutations(
     }
     let mut conn = open_database(Path::new(&project_path))?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let result = execute_mutations_in_transaction(
+        &tx,
+        requests,
+        batch_change_set_id,
+        batch_change_set_name,
+        batch_source_type,
+        batch_source_id,
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+pub(crate) fn execute_mutations_in_transaction(
+    tx: &Transaction<'_>,
+    requests: Vec<MutationRequest>,
+    batch_change_set_id: Option<String>,
+    batch_change_set_name: Option<String>,
+    batch_source_type: Option<String>,
+    batch_source_id: Option<String>,
+) -> AppResult<BatchMutationResponse> {
+    if requests.is_empty() {
+        return Err("批量修改不能为空".into());
+    }
     let project_id: String = tx
         .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -338,7 +361,7 @@ fn execute_mutations(
     let change_set_id = match batch_change_set_id.or_else(|| first.change_set_id.clone()) {
         Some(id) => id,
         None => create_change_set(
-            &tx,
+            tx,
             &project_id,
             batch_change_set_name
                 .as_deref()
@@ -364,12 +387,12 @@ fn execute_mutations(
     for request in requests {
         let spec = entity_spec(&request.entity_type)?;
         validate_fields(&spec, &request.values)?;
-        collect_affected_tasks(&tx, &request, &mut affected_task_ids)?;
+        collect_affected_tasks(tx, &request, &mut affected_task_ids)?;
         let operation_source_type = request.source_type.as_deref().unwrap_or(&source_type);
         let operation_source_id = request.source_id.as_deref().or(source_id.as_deref());
         let object_id = match request.action.as_str() {
             "create" => create_object(
-                &tx,
+                tx,
                 &spec,
                 request.object_id,
                 request.values,
@@ -378,7 +401,7 @@ fn execute_mutations(
                 operation_source_id,
             )?,
             "patch" | "move" => patch_object(
-                &tx,
+                tx,
                 &spec,
                 request
                     .object_id
@@ -389,7 +412,7 @@ fn execute_mutations(
                 operation_source_id,
             )?,
             "delete" => delete_object(
-                &tx,
+                tx,
                 &spec,
                 request
                     .object_id
@@ -405,7 +428,7 @@ fn execute_mutations(
 
     for task_id in affected_task_ids {
         recalculate_generation_task_duration(
-            &tx,
+            tx,
             &task_id,
             &change_set_id,
             &source_type,
@@ -426,12 +449,26 @@ fn execute_mutations(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
     Ok(BatchMutationResponse {
         object_ids,
         change_set_id,
         revision,
     })
+}
+
+pub(crate) fn read_field_value(
+    tx: &Transaction<'_>,
+    entity_type: &str,
+    object_id: &str,
+    field: &str,
+) -> AppResult<Value> {
+    let spec = entity_spec(entity_type)?;
+    if !spec.fields.contains(&field) {
+        return Err(format!("对象 {entity_type} 不支持字段 {field}"));
+    }
+    let object =
+        select_object(tx, &spec, object_id)?.ok_or_else(|| format!("对象不存在：{object_id}"))?;
+    Ok(object.get(field).cloned().unwrap_or(Value::Null))
 }
 
 fn collect_affected_tasks(
