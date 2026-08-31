@@ -595,6 +595,14 @@ fn delete_object(
 ) -> AppResult<String> {
     let before =
         select_object(tx, spec, &object_id)?.ok_or_else(|| format!("对象不存在：{}", object_id))?;
+    delete_dependent_objects(
+        tx,
+        spec.entity_type,
+        &object_id,
+        change_set_id,
+        source_type,
+        source_id,
+    )?;
     let (where_clause, keys) = object_keys(spec, &object_id, 1)?;
     let sql = format!("DELETE FROM {} WHERE {where_clause}", spec.table);
     let affected = tx
@@ -615,6 +623,113 @@ fn delete_object(
         source_id,
     )?;
     Ok(object_id)
+}
+
+fn delete_dependent_objects(
+    tx: &Transaction<'_>,
+    entity_type: &str,
+    object_id: &str,
+    change_set_id: &str,
+    source_type: &str,
+    source_id: Option<&str>,
+) -> AppResult<()> {
+    let dependencies: &[(&str, &str)] = match entity_type {
+        "shot" => &[
+            (
+                "generationTaskShot",
+                "SELECT generation_task_id || '|' || shot_id FROM generation_task_shots WHERE shot_id=?1",
+            ),
+            ("keyframe", "SELECT id FROM keyframes WHERE shot_id=?1"),
+            ("shotAsset", "SELECT id FROM shot_assets WHERE shot_id=?1"),
+            (
+                "assetRequirementSource",
+                "SELECT id FROM asset_requirement_sources WHERE source_type='shot' AND source_id=?1",
+            ),
+            (
+                "relation",
+                "SELECT id FROM relations WHERE (source_type='shot' AND source_id=?1) OR (target_type='shot' AND target_id=?1)",
+            ),
+        ],
+        "asset" => &[
+            ("assetMedia", "SELECT id FROM asset_media WHERE asset_id=?1"),
+            (
+                "assetRequirement",
+                "SELECT id FROM asset_requirements WHERE asset_id=?1",
+            ),
+            ("shotAsset", "SELECT id FROM shot_assets WHERE asset_id=?1"),
+            (
+                "relation",
+                "SELECT id FROM relations WHERE (source_type='asset' AND source_id=?1) OR (target_type='asset' AND target_id=?1)",
+            ),
+        ],
+        "assetRequirement" => &[
+            (
+                "assetRequirementSource",
+                "SELECT id FROM asset_requirement_sources WHERE asset_requirement_id=?1",
+            ),
+            (
+                "assetMediaRequirement",
+                "SELECT id FROM asset_media_requirements WHERE asset_requirement_id=?1",
+            ),
+        ],
+        "assetMedia" => &[(
+            "assetMediaRequirement",
+            "SELECT id FROM asset_media_requirements WHERE asset_media_id=?1",
+        )],
+        "generationTask" => &[(
+            "generationTaskShot",
+            "SELECT generation_task_id || '|' || shot_id FROM generation_task_shots WHERE generation_task_id=?1",
+        )],
+        _ => &[],
+    };
+
+    for (child_type, sql) in dependencies {
+        let child_ids = query_string_column(tx, sql, object_id)?;
+        let child_spec = entity_spec(child_type)?;
+        for child_id in child_ids {
+            delete_object(
+                tx,
+                &child_spec,
+                child_id,
+                change_set_id,
+                source_type,
+                source_id,
+            )?;
+        }
+    }
+
+    if entity_type == "shot" {
+        let requirement_ids = query_string_column(
+            tx,
+            "SELECT id FROM asset_requirements WHERE created_from_type='shot' AND created_from_id=?1",
+            object_id,
+        )?;
+        let requirement_spec = entity_spec("assetRequirement")?;
+        for requirement_id in requirement_ids {
+            patch_object(
+                tx,
+                &requirement_spec,
+                requirement_id,
+                Map::from_iter([
+                    ("created_from_type".into(), Value::Null),
+                    ("created_from_id".into(), Value::Null),
+                ]),
+                change_set_id,
+                source_type,
+                source_id,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn query_string_column(tx: &Transaction<'_>, sql: &str, value: &str) -> AppResult<Vec<String>> {
+    let mut stmt = tx.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([value], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn validate_fields(spec: &EntitySpec, values: &Map<String, Value>) -> AppResult<()> {
@@ -1932,5 +2047,158 @@ mod tests {
         assert_eq!(integrity, "ok");
         assert_eq!(foreign_key_violations, 0);
         assert!(Path::new(&project_path).join(imported_asset_path).is_file());
+    }
+
+    #[test]
+    fn deleting_shots_and_assets_records_and_restores_all_relations() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_path = temp.path().to_string_lossy().to_string();
+        let project = init_database(temp.path(), "领域删除", "short").unwrap();
+        let unit_id = new_id();
+        let script_id = new_id();
+        let scene_id = new_id();
+        let shot_id = new_id();
+        let asset_id = new_id();
+        let requirement_id = new_id();
+        let media_id = new_id();
+        let task_id = new_id();
+        apply_batch_mutation(
+            project_path.clone(),
+            batch(
+                vec![
+                    request("create", "contentUnit", Some(unit_id.clone()), json!({"project_id": project.id, "type": "short", "name": "正片", "sort_order": 0})),
+                    request("create", "script", Some(script_id.clone()), json!({"content_unit_id": unit_id, "title": "正片"})),
+                    request("create", "scene", Some(scene_id.clone()), json!({"script_id": script_id, "title": "场01", "sort_order": 0})),
+                    request("create", "shot", Some(shot_id.clone()), json!({"scene_id": scene_id, "title": "镜头01", "sort_order": 0, "duration": 2.5})),
+                    request("create", "asset", Some(asset_id.clone()), json!({"project_id": project.id, "type": "character", "name": "角色"})),
+                    request("create", "assetRequirement", Some(requirement_id.clone()), json!({"asset_id": asset_id, "asset_type": "character", "requirement_type": "标准主图", "created_from_type": "shot", "created_from_id": shot_id})),
+                    request("create", "assetRequirementSource", None, json!({"asset_requirement_id": requirement_id, "source_type": "shot", "source_id": shot_id})),
+                    request("create", "assetMedia", Some(media_id.clone()), json!({"asset_id": asset_id, "file_path": "assets/characters/role.png", "sort_order": 0})),
+                    request("create", "assetMediaRequirement", None, json!({"asset_media_id": media_id, "asset_requirement_id": requirement_id})),
+                    request("create", "shotAsset", None, json!({"shot_id": shot_id, "asset_id": asset_id, "role": "subject"})),
+                    request("create", "keyframe", None, json!({"shot_id": shot_id, "type": "single", "file_path": "keyframes/frame.png", "sort_order": 0})),
+                    request("create", "generationTask", Some(task_id.clone()), json!({"content_unit_id": unit_id, "name": "任务", "duration": 0})),
+                    request("create", "generationTaskShot", None, json!({"generation_task_id": task_id, "shot_id": shot_id, "sort_order": 0})),
+                    request("create", "relation", None, json!({"project_id": project.id, "source_type": "shot", "source_id": shot_id, "relation_type": "uses", "target_type": "asset", "target_id": asset_id})),
+                ],
+                "建立关联链",
+            ),
+        )
+        .unwrap();
+
+        let shot_delete = apply_mutation(
+            project_path.clone(),
+            request("delete", "shot", Some(shot_id.clone()), json!({})),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        for table in [
+            "shots",
+            "shot_assets",
+            "keyframes",
+            "generation_task_shots",
+            "asset_requirement_sources",
+            "relations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be deleted with the shot");
+        }
+        let legacy_source: Option<String> = conn
+            .query_row(
+                "SELECT created_from_id FROM asset_requirements WHERE id=?1",
+                [&requirement_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let duration: f64 = conn
+            .query_row(
+                "SELECT duration FROM generation_tasks WHERE id=?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_source, None);
+        assert_eq!(duration, 0.0);
+        drop(conn);
+
+        undo_change_set(project_path.clone(), shot_delete.change_set_id).unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        for table in [
+            "shots",
+            "shot_assets",
+            "keyframes",
+            "generation_task_shots",
+            "asset_requirement_sources",
+            "relations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table} should be restored by undo");
+        }
+        let duration: f64 = conn
+            .query_row(
+                "SELECT duration FROM generation_tasks WHERE id=?1",
+                [&task_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duration, 2.5);
+        drop(conn);
+
+        let asset_delete = apply_mutation(
+            project_path.clone(),
+            request("delete", "asset", Some(asset_id), json!({})),
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        for table in [
+            "assets",
+            "asset_media",
+            "asset_requirements",
+            "asset_requirement_sources",
+            "asset_media_requirements",
+            "shot_assets",
+            "relations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} should be deleted with the asset");
+        }
+        drop(conn);
+
+        undo_change_set(project_path, asset_delete.change_set_id).unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        for table in [
+            "assets",
+            "asset_media",
+            "asset_requirements",
+            "asset_requirement_sources",
+            "asset_media_requirements",
+            "shot_assets",
+            "relations",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table} should be restored by undo");
+        }
+        let foreign_key_violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_violations, 0);
     }
 }

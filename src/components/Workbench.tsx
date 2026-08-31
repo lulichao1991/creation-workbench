@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { orderedShotsForUnit, supportsWorkspace } from "../domain/projectState";
+import { assetIdForSelection, orderedShotsForUnit, shotIdForSelection, supportsWorkspace } from "../domain/projectState";
 import { useSelectionStore } from "../stores/selectionStore";
 import type {
   AssetMediaRow,
@@ -54,7 +54,7 @@ interface Props {
 }
 
 const tabs: Array<[Workspace, string]> = [
-  ["overview", "作品鸟瞰"],
+  ["overview", "作品结构"],
   ["script", "剧本"],
   ["shots", "分镜"],
   ["assets", "资产"],
@@ -412,7 +412,7 @@ function OverviewWorkspace({ project, state, currentUnit, onMutate, onMutateBatc
   return (
     <div className="workspace-content">
       <div className="workspace-heading">
-        <div><p className="eyebrow">OVERVIEW</p><h2>{currentUnit?.name ?? "作品鸟瞰"}</h2><p>{currentUnit?.summary || "从结构、时间轴与语义关系观察作品。"}</p></div>
+        <div><p className="eyebrow">OVERVIEW</p><h2>{currentUnit?.name ?? "作品结构"}</h2><p>{currentUnit?.summary || "从结构、时间轴与语义关系观察作品。"}</p></div>
         <div className="heading-actions">
           {currentUnit?.type === "season" && <button className="secondary" onClick={() => void bulkCreateEpisodes()}>批量建立剧集</button>}
           {currentUnit?.type === "short" && currentUnit.parent_id === null && <button className="secondary" onClick={() => void expandShortToSeries()}>扩展为系列</button>}
@@ -572,7 +572,7 @@ function ShotEditor({ shot, index, state, onMutate, onMutateBatch }: { shot: Sho
   };
   return (
     <div className="editor-card shot-editor">
-      <div className="workspace-heading"><div><p className="eyebrow">SHOT #{String(index + 1).padStart(2, "0")}</p><h3>{shot.title}</h3></div><button className="danger-text" onClick={() => { if (window.confirm("删除当前镜头？存在关键帧或生成任务引用时数据库会拒绝删除。")) void onMutate({ action: "delete", entityType: "shot", objectId: shot.id, changeSetName: "删除镜头" }); }}>删除镜头</button></div>
+      <div className="workspace-heading"><div><p className="eyebrow">SHOT #{String(index + 1).padStart(2, "0")}</p><h3>{shot.title}</h3></div><button className="danger-text" onClick={() => { if (window.confirm("删除当前镜头及其关键帧、任务和资产关联？本轮修改可以撤销。")) void onMutate({ action: "delete", entityType: "shot", objectId: shot.id, changeSetName: "删除镜头及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除镜头</button></div>
       <div className="field-grid three">
         <TextField label="标题" value={shot.title} onFocus={() => focus("title")} onSave={(v) => patch("title", v)} />
         <NumberField label="时长（秒）" value={shot.duration} step={0.1} onFocus={() => focus("duration")} onSave={(v) => patch("duration", v)} />
@@ -600,7 +600,8 @@ function AssetsWorkspace({ project, state, currentUnit, onMutate, onMutateBatch,
   const selection = useSelectionStore();
   const [type, setType] = useState<AssetRow["type"]>("character");
   const assets = state.assets.filter((asset) => asset.type === type);
-  const selected = assets.find((asset) => asset.id === selection.objectId) ?? assets[0];
+  const selectedAssetId = assetIdForSelection(state, selection.objectType, selection.objectId);
+  const selected = assets.find((asset) => asset.id === selectedAssetId) ?? assets[0];
   const add = async () => {
     const name = window.prompt("资产名称")?.trim(); if (!name) return;
     const result = await onMutate({ action: "create", entityType: "asset", values: { project_id: project.id, type, name, scope_unit_id: currentUnit?.id ?? null }, changeSetName: "新建资产" });
@@ -664,7 +665,7 @@ function AssetEditor({ project, asset, state, currentUnit, onMutate, onMutateBat
   };
   return (
     <div>
-      <div className="workspace-heading"><div><p className="eyebrow">{asset.type.toUpperCase()} ASSET</p><h2>{asset.name}</h2></div><button className="danger-text" onClick={() => { if (window.confirm("删除当前资产？存在媒体或需求时数据库会拒绝删除。")) void onMutate({ action: "delete", entityType: "asset", objectId: asset.id, changeSetName: "删除资产" }); }}>删除资产</button></div>
+      <div className="workspace-heading"><div><p className="eyebrow">{asset.type.toUpperCase()} ASSET</p><h2>{asset.name}</h2></div><button className="danger-text" onClick={() => { if (window.confirm("删除当前资产及其图片、需求和镜头关联？本轮修改可以撤销。")) void onMutate({ action: "delete", entityType: "asset", objectId: asset.id, changeSetName: "删除资产及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除资产</button></div>
       <div className="editor-card"><div className="field-grid"><TextField label="名称" value={asset.name} onFocus={() => selectField("asset", asset.id, "name", selection.select)} onSave={(v) => patch("name", v)} /><SelectField label="作用范围" value={asset.scope_unit_id ?? ""} options={[["", "项目共享"], ...state.contentUnits.map((unit) => [unit.id, unit.name] as [string, string])]} onFocus={() => selectField("asset", asset.id, "scope_unit_id", selection.select)} onSave={(v) => patch("scope_unit_id", v || null)} /><TextField label="文字视觉定义" value={asset.description} multiline onFocus={() => selectField("asset", asset.id, "description", selection.select)} onSave={(v) => patch("description", v)} /></div></div>
       <section><div className="section-heading inline"><div><span className="label">资产需求</span><h3>{requirements.length} 项需求</h3></div><button className="secondary" onClick={() => void addRequirement()}>＋ 添加需求</button></div>{requirements.map((requirement) => { const sources = state.assetRequirementSources.filter((item) => item.asset_requirement_id === requirement.id); return <div className="requirement-card" key={requirement.id}><TextField label="需求类型" value={requirement.requirement_type} onFocus={() => selectField("assetRequirement", requirement.id, "requirement_type", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { requirement_type: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="描述" value={requirement.description} multiline onFocus={() => selectField("assetRequirement", requirement.id, "description", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { description: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="专业提示词草稿" value={requirement.prompt_draft} multiline onFocus={() => selectField("assetRequirement", requirement.id, "prompt_draft", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { prompt_draft: v }, changeSetName: "编辑资产提示词" }).then(() => undefined)} /><div className="requirement-sources"><span>来源：{sources.length ? sources.map((source) => state.shots.find((shot) => shot.id === source.source_id)?.title ?? source.source_id).join("、") : "未关联镜头"}</span><button className="ghost" onClick={() => void addRequirementSource(requirement.id)}>追加来源</button></div><button className="danger-text" onClick={() => void deleteRequirement(requirement.id)}>删除需求</button></div>; })}</section>
       <section><div className="section-heading inline"><div><span className="label">正式图片</span><h3>{media.length} 张图片</h3></div><div className="heading-actions"><button className="ghost" disabled title="第一阶段不接真实生图 API">生成图片</button><button className="secondary" onClick={() => void importMedia()}>导入图片</button></div></div><div className="media-grid">{media.map((item) => { const satisfied = state.assetMediaRequirements.filter((link) => link.asset_media_id === item.id).map((link) => requirements.find((requirement) => requirement.id === link.asset_requirement_id)?.requirement_type).filter(Boolean); return <div className={`media-card ${item.is_primary ? "primary-media" : ""}`} key={item.id}><MediaImage projectPath={project.path} relativePath={item.file_path} alt={asset.name} /><div><strong>{item.label || "资产图片"}</strong><small>{satisfied.length ? `满足：${satisfied.join("、")}` : item.is_primary ? "正式主图" : "候选角度"}</small></div><div className="card-actions">{!item.is_primary && <button className="ghost" onClick={() => void setPrimary(item)}>设为主图</button>}<button className="danger-text" onClick={() => void deleteMedia(item.id)}>移除</button></div></div>; })}</div></section>
@@ -675,7 +676,8 @@ function AssetEditor({ project, asset, state, currentUnit, onMutate, onMutateBat
 function KeyframesWorkspace({ project, state, currentUnit, onMutate, onError }: { project: ProjectDescriptor; state: ProjectState; currentUnit: ContentUnitRow | null; onMutate: Props["onMutate"]; onError: Props["onError"] }) {
   const selection = useSelectionStore();
   const shots = orderedShotsForUnit(state, currentUnit?.id ?? null);
-  const selectedShot = shots.find((shot) => shot.id === (selection.objectType === "shot" ? selection.objectId : null)) ?? shots[0];
+  const selectedShotId = shotIdForSelection(state, selection.objectType, selection.objectId);
+  const selectedShot = shots.find((shot) => shot.id === selectedShotId) ?? shots[0];
   const keyframes = state.keyframes.filter((keyframe) => keyframe.shot_id === selectedShot?.id).sort((a, b) => a.sort_order - b.sort_order);
   const selectedFrame = keyframes.find((frame) => frame.id === (selection.objectType === "keyframe" ? selection.objectId : null)) ?? keyframes[0];
   const inheritedAssets = state.shotAssets.filter((link) => link.shot_id === selectedShot?.id).map((link) => state.assets.find((asset) => asset.id === link.asset_id)).filter((asset): asset is AssetRow => Boolean(asset));

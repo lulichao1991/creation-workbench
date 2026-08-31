@@ -5,6 +5,7 @@ use crate::database::{
 use base64::Engine;
 use rusqlite::params;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -237,6 +238,42 @@ pub fn cleanup_project_media(project_path: String) -> AppResult<usize> {
             referenced.insert(path.map_err(|e| e.to_string())?.replace('\\', "/"));
         }
     }
+    let mut snapshot_stmt = conn
+        .prepare("SELECT snapshot_json FROM snapshots")
+        .map_err(|e| e.to_string())?;
+    let snapshots = snapshot_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    for snapshot in snapshots {
+        let raw = snapshot.map_err(|e| e.to_string())?;
+        let value: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("快照数据损坏，已停止媒体清理：{e}"))?;
+        collect_file_paths(&value, &mut referenced);
+    }
+    drop(snapshot_stmt);
+
+    let mut history_stmt = conn
+        .prepare(
+            "SELECT changes.field_name, changes.old_value FROM changes JOIN change_sets ON change_sets.id=changes.change_set_id WHERE change_sets.status<>'undone' AND changes.old_value IS NOT NULL",
+        )
+        .map_err(|e| e.to_string())?;
+    let history = history_stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in history {
+        let (field_name, raw) = row.map_err(|e| e.to_string())?;
+        let value: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("变更历史损坏，已停止媒体清理：{e}"))?;
+        if field_name == "file_path" {
+            if let Some(path) = value.as_str() {
+                protect_file_path(path, &mut referenced);
+            }
+        } else if field_name == "__deleted__" {
+            collect_file_paths(&value, &mut referenced);
+        }
+    }
     let mut removed = 0;
     for directory in [
         "assets/characters",
@@ -247,6 +284,31 @@ pub fn cleanup_project_media(project_path: String) -> AppResult<usize> {
         removed += remove_unreferenced_files(&project, &project.join(directory), &referenced)?;
     }
     Ok(removed)
+}
+
+fn protect_file_path(path: &str, referenced: &mut HashSet<String>) {
+    if !path.is_empty() {
+        referenced.insert(path.replace('\\', "/"));
+    }
+}
+
+fn collect_file_paths(value: &Value, referenced: &mut HashSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(path) = object.get("file_path").and_then(Value::as_str) {
+                protect_file_path(path, referenced);
+            }
+            for child in object.values() {
+                collect_file_paths(child, referenced);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_file_paths(child, referenced);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn remove_unreferenced_files(
@@ -414,5 +476,53 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(!orphan.exists());
         assert!(reference.exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_media_referenced_by_snapshots_and_undo_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = create_project(
+            temp.path().to_string_lossy().to_string(),
+            "历史媒体保护".into(),
+            "short".into(),
+        )
+        .unwrap();
+        let root = PathBuf::from(&project.path);
+        let snapshot_path = "assets/characters/from-snapshot.png";
+        let history_path = "keyframes/from-history.png";
+        let undone_path = "assets/props/from-undone-history.png";
+        let orphan_path = "assets/locations/orphan.png";
+        for path in [snapshot_path, history_path, undone_path, orphan_path] {
+            fs::write(root.join(path), path.as_bytes()).unwrap();
+        }
+
+        let conn = open_database(&root).unwrap();
+        let timestamp = now();
+        conn.execute(
+            "INSERT INTO snapshots (id, project_id, scope_type, name, description, revision, snapshot_json, created_at) VALUES (?1, ?2, 'project', '保护快照', '', 0, ?3, ?4)",
+            params![new_id(), project.id, format!(r#"{{"asset_media":[{{"file_path":"{snapshot_path}"}}]}}"#), timestamp],
+        )
+        .unwrap();
+        for (status, path) in [("closed", history_path), ("undone", undone_path)] {
+            let set_id = new_id();
+            conn.execute(
+                "INSERT INTO change_sets (id, project_id, name, status, created_at) VALUES (?1, ?2, '删除媒体', ?3, ?4)",
+                params![set_id, project.id, status, timestamp],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO changes (id, change_set_id, object_type, object_id, field_name, old_value, new_value, created_at) VALUES (?1, ?2, 'assetMedia', ?3, '__deleted__', ?4, 'null', ?5)",
+                params![new_id(), set_id, new_id(), format!(r#"{{"file_path":"{path}"}}"#), timestamp],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let removed = cleanup_project_media(project.path).unwrap();
+        assert_eq!(removed, 2);
+        assert!(root.join(snapshot_path).exists());
+        assert!(root.join(history_path).exists());
+        assert!(!root.join(undone_path).exists());
+        assert!(!root.join(orphan_path).exists());
     }
 }

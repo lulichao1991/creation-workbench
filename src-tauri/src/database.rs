@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 pub const BUSINESS_TABLES: &[&str] = &[
     "content_units",
@@ -139,6 +139,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 2 {
         tx.execute_batch(MIGRATION_V2)
             .map_err(|e| format!("迁移到数据库版本 2 失败：{e}"))?;
+    }
+    if version < 3 {
+        tx.execute_batch(MIGRATION_V3)
+            .map_err(|e| format!("迁移到数据库版本 3 失败：{e}"))?;
     }
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("更新数据库版本失败：{e}"))?;
@@ -387,7 +391,8 @@ CREATE TABLE IF NOT EXISTS asset_requirement_sources (
   source_id TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE
+  FOREIGN KEY(asset_requirement_id) REFERENCES asset_requirements(id) ON DELETE CASCADE,
+  UNIQUE(asset_requirement_id, source_type, source_id)
 );
 
 CREATE TABLE IF NOT EXISTS asset_media_requirements (
@@ -551,6 +556,37 @@ CREATE INDEX IF NOT EXISTS idx_asset_media_requirements_media ON asset_media_req
 CREATE INDEX IF NOT EXISTS idx_shot_assets_shot ON shot_assets(shot_id);
 "#;
 
+const MIGRATION_V3: &str = r#"
+INSERT INTO asset_requirement_sources (
+  id, asset_requirement_id, source_type, source_id, created_at, updated_at
+)
+SELECT
+  lower(hex(randomblob(16))),
+  requirement.id,
+  COALESCE(NULLIF(requirement.created_from_type, ''), 'shot'),
+  requirement.created_from_id,
+  requirement.created_at,
+  requirement.updated_at
+FROM asset_requirements AS requirement
+WHERE requirement.created_from_id IS NOT NULL
+  AND requirement.created_from_id <> ''
+  AND NOT EXISTS (
+    SELECT 1
+    FROM asset_requirement_sources AS source
+    WHERE source.asset_requirement_id = requirement.id
+      AND source.source_type = COALESCE(NULLIF(requirement.created_from_type, ''), 'shot')
+      AND source.source_id = requirement.created_from_id
+  );
+DELETE FROM asset_requirement_sources
+WHERE rowid NOT IN (
+  SELECT MIN(rowid)
+  FROM asset_requirement_sources
+  GROUP BY asset_requirement_id, source_type, source_id
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_requirement_sources_unique
+ON asset_requirement_sources(asset_requirement_id, source_type, source_id);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,6 +615,11 @@ mod tests {
         init_database(temp.path(), "旧项目", "short").unwrap();
         {
             let conn = Connection::open(db_path(temp.path())).unwrap();
+            conn.execute(
+                "INSERT INTO asset_requirements (id, asset_type, requirement_type, created_from_type, created_from_id, created_at, updated_at) VALUES ('legacy-requirement', 'character', '背面', 'shot', 'legacy-shot', ?1, ?1)",
+                [now()],
+            )
+            .unwrap();
             conn.execute_batch(
                 "DROP TABLE shot_assets; DROP TABLE asset_media_requirements; DROP TABLE asset_requirement_sources; PRAGMA user_version = 1;",
             )
@@ -604,6 +645,26 @@ mod tests {
                 .unwrap();
             assert_eq!(exists, 1, "missing migrated table {table}");
         }
+        let migrated_source: (String, String, String) = conn
+            .query_row(
+                "SELECT asset_requirement_id, source_type, source_id FROM asset_requirement_sources WHERE asset_requirement_id='legacy-requirement'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            migrated_source,
+            (
+                "legacy-requirement".into(),
+                "shot".into(),
+                "legacy-shot".into()
+            )
+        );
+        let duplicate = conn.execute(
+            "INSERT INTO asset_requirement_sources (id, asset_requirement_id, source_type, source_id, created_at, updated_at) VALUES ('duplicate-source', 'legacy-requirement', 'shot', 'legacy-shot', ?1, ?1)",
+            [now()],
+        );
+        assert!(duplicate.is_err());
         let backups = fs::read_dir(temp.path().join("backups")).unwrap().count();
         assert_eq!(backups, 1);
     }

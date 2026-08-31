@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { orderedShotsForUnit, supportsWorkspace } from "./projectState";
+import { assetIdForSelection, orderedShotsForUnit, shotIdForSelection, supportsWorkspace } from "./projectState";
 import type { ContentUnitRow, ProjectState, SceneRow, ScriptRow, ShotRow } from "../types";
 
 const base = { created_at: "", updated_at: "" };
@@ -22,5 +22,20 @@ describe("project state derivations", () => {
     expect(supportsWorkspace(season, "overview")).toBe(true);
     expect(supportsWorkspace(season, "assets")).toBe(true);
     expect(supportsWorkspace(season, "shots")).toBe(false);
+  });
+
+  it("keeps the parent asset selected while editing a requirement", () => {
+    const state = {
+      assetMedia: [],
+      assetRequirementSources: [],
+      assetMediaRequirements: [],
+      assetRequirements: [{ id: "requirement-2", asset_id: "asset-2" }],
+    } as unknown as Pick<ProjectState, "assetMedia" | "assetRequirements" | "assetRequirementSources" | "assetMediaRequirements">;
+    expect(assetIdForSelection(state, "assetRequirement", "requirement-2")).toBe("asset-2");
+  });
+
+  it("keeps the parent shot selected while editing a keyframe", () => {
+    const state = { keyframes: [{ id: "frame-5", shot_id: "shot-5" }] } as unknown as Pick<ProjectState, "keyframes">;
+    expect(shotIdForSelection(state, "keyframe", "frame-5")).toBe("shot-5");
   });
 });

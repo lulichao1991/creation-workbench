@@ -24,3 +24,30 @@ export function supportsWorkspace(unit: ContentUnitRow | null, workspace: Worksp
   if (unit.type === "season") return !productionWorkspaces.has(workspace);
   return true;
 }
+
+type AssetNavigationState = Pick<ProjectState, "assetMedia" | "assetRequirements" | "assetRequirementSources" | "assetMediaRequirements">;
+
+export function assetIdForSelection(state: AssetNavigationState, objectType: string | null, objectId: string | null): string | null {
+  if (!objectId) return null;
+  if (objectType === "asset") return objectId;
+  if (objectType === "assetMedia") return state.assetMedia.find((item) => item.id === objectId)?.asset_id ?? null;
+  if (objectType === "assetRequirement") return state.assetRequirements.find((item) => item.id === objectId)?.asset_id ?? null;
+  if (objectType === "assetRequirementSource") {
+    const requirementId = state.assetRequirementSources.find((item) => item.id === objectId)?.asset_requirement_id;
+    return state.assetRequirements.find((item) => item.id === requirementId)?.asset_id ?? null;
+  }
+  if (objectType === "assetMediaRequirement") {
+    const mediaId = state.assetMediaRequirements.find((item) => item.id === objectId)?.asset_media_id;
+    return state.assetMedia.find((item) => item.id === mediaId)?.asset_id ?? null;
+  }
+  return null;
+}
+
+type ShotNavigationState = Pick<ProjectState, "keyframes">;
+
+export function shotIdForSelection(state: ShotNavigationState, objectType: string | null, objectId: string | null): string | null {
+  if (!objectId) return null;
+  if (objectType === "shot") return objectId;
+  if (objectType === "keyframe") return state.keyframes.find((item) => item.id === objectId)?.shot_id ?? null;
+  return null;
+}
