@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentSelection, buildChangeAnalysisSelection, buildWriteScope } from "./panelState";
+import { buildAgentSelection, buildChangeAnalysisSelection, buildWriteScope, canRequestExpertTeam, isExpertTeamRunning } from "./panelState";
 
 describe("Agent panel selection and permission derivation", () => {
   it("uses the exact selected field in edit mode", () => {
@@ -42,5 +42,15 @@ describe("Agent panel selection and permission derivation", () => {
       projectRevision: 13,
     });
     expect(buildWriteScope(selection, "suggestion")).toEqual({ refs: [], protectedRefs: [] });
+  });
+
+  it("requires two experts and a separate explicit confirmation step", () => {
+    const members = new Set(["writer", "director"] as const);
+    expect(canRequestExpertTeam("这一场哪里不对？", members, false)).toBe(true);
+    expect(canRequestExpertTeam("", members, false)).toBe(false);
+    expect(canRequestExpertTeam("检查", new Set(["writer"] as const), false)).toBe(false);
+    expect(isExpertTeamRunning("awaiting_confirmation")).toBe(false);
+    expect(isExpertTeamRunning("running")).toBe(true);
+    expect(isExpertTeamRunning("synthesizing")).toBe(true);
   });
 });

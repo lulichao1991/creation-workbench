@@ -153,3 +153,11 @@ PromptCompiler 以 GenerationTask 为编译中心，严格按 `generation_task_s
 每次编译只新增 PromptCompilation，不修改 `generation_tasks.prompt`。用户可以保留编译稿、编辑独立 override、查看 warnings/source map 和对比当前正式稿；只有界面内二次确认后，后端才校验 expected revision，并在同一事务中通过 Mutation 写入当前正式提示词、目标模型、ChangeSet、编译记录 current 状态和项目 revision。重新编译不会覆盖已保存的人工 override。
 
 本阶段没有视频 Provider、视频 Job、视频 HTTP Adapter 或视频生成命令。自动化现为前端 15 项、Rust 55 项，覆盖同一任务的多模型差异、稳定编译、版本与来源追踪、能力警告、编译/正式隔离及人工覆盖保留。
+
+## V2 Goal24 说明
+
+项目库 V9 新增专家团申请与成员记录。申请阶段只持久化 `waiting_for_user` 主任务，以及 `expert_team` 申请卡和 `cost` 高成本确认卡；成员 AgentTask、ContextPackage 和 Runtime 调用全部延迟到 `expert_team_confirm` 收到 `confirmed=true` 之后。通用 Card 解决命令不能处理专家团、成本或权限卡，因此无法绕过专用确认事务。
+
+确认后每位成员使用不同 task ID 构建独立 ContextPackage，任务类型固定为 `expert_team_member`，WriteScope 强制为空，提示要求专家互不查看意见且只读分析。模型返回的 PatchProposal 或 permissionRequests 会被丢弃并记录风险。成员全部终止后，主 Agent 才以 `expert_team_synthesis` 任务整合共识、分歧、建议、问题和风险；综合结果仍为只读，若项目 revision 变化则持久化为 stale，修改只能另行走 Goal16 Patch 流程。
+
+右侧 Agent 面板现可选择 2–6 位专家、生成申请卡、确认高成本、查看成员状态、取消任务并阅读结构化综合结果。自动化现为前端 16 项、Rust 58 项；Windows Tauri 实机使用三位专家验证了确认前零成员任务、确认后 3 个独立上下文、主 Agent 综合、零写入范围、零 PatchProposal 和 revision 不变。全程没有视频生成命令或入口。

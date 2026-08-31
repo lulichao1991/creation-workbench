@@ -1,6 +1,6 @@
 import type { ObjectRef, SelectionSnapshot, ContextObjectType } from "../context";
 import type { WriteScope } from "../permission";
-import type { AgentMode } from ".";
+import type { AgentMode, ExpertTeamStatus, ExpertType } from ".";
 
 const objectTypes = new Set<ContextObjectType>([
   "project",
@@ -95,4 +95,16 @@ export function buildChangeAnalysisSelection(
 export function displayRef(reference: ObjectRef | null): string {
   if (!reference) return "尚未建立选区";
   return `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`;
+}
+
+export function isExpertTeamRunning(status?: ExpertTeamStatus): boolean {
+  return status === "running" || status === "synthesizing";
+}
+
+export function canRequestExpertTeam(
+  message: string,
+  members: ReadonlySet<ExpertType>,
+  busy: boolean,
+): boolean {
+  return !busy && Boolean(message.trim()) && members.size >= 2;
 }

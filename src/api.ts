@@ -7,6 +7,8 @@ import type {
   AgentTask,
   CreateSessionInput,
   ExpertDefinition,
+  ExpertTeamConsultation,
+  RequestExpertTeamInput,
   ResolveIntentInput,
   ResolvedIntent,
   SendAgentMessageInput,
@@ -72,6 +74,16 @@ export const api = {
     invoke<AgentTask>("agent_get_task", { projectPath, taskId }),
   agentListMessages: (projectPath: string, sessionId: string) =>
     invoke<AgentMessage[]>("agent_list_messages", { projectPath, sessionId }),
+  expertTeamRequest: (projectPath: string, input: RequestExpertTeamInput) =>
+    invoke<ExpertTeamConsultation>("expert_team_request", { projectPath, input }),
+  expertTeamConfirm: (projectPath: string, consultationId: string) =>
+    invoke<ExpertTeamConsultation>("expert_team_confirm", { projectPath, input: { consultationId, confirmed: true } }),
+  expertTeamGet: (projectPath: string, consultationId: string) =>
+    invoke<ExpertTeamConsultation>("expert_team_get", { projectPath, consultationId }),
+  expertTeamList: (projectPath: string, sessionId: string) =>
+    invoke<ExpertTeamConsultation[]>("expert_team_list", { projectPath, sessionId }),
+  expertTeamCancel: (projectPath: string, consultationId: string) =>
+    invoke<ExpertTeamConsultation>("expert_team_cancel", { projectPath, consultationId }),
   agentStartReadonlyTask: (input: RuntimeTaskInput) =>
     invoke<RuntimeTaskHandle>("agent_runtime_start_readonly", { input }),
   agentSendRuntimeInput: (taskId: string, input: string) =>

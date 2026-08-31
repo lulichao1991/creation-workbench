@@ -4,10 +4,12 @@ import {
   Bot,
   Check,
   MessageCircle,
+  Coins,
   Send,
   ShieldCheck,
   Sparkles,
   Square,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +18,9 @@ import type {
   AgentMessage,
   AgentMode,
   AgentTask,
+  ExpertDefinition,
+  ExpertTeamConsultation,
+  ExpertTeamResult,
   ExpertType,
   RuntimeEvent,
 } from "../features/agent";
@@ -24,7 +29,9 @@ import {
   buildAgentSelection,
   buildChangeAnalysisSelection,
   buildWriteScope,
+  canRequestExpertTeam,
   displayRef,
+  isExpertTeamRunning,
 } from "../features/agent/panelState";
 import type { FeatureFlags } from "../features/featureFlags";
 import type { AICard, PatchProposal } from "../features/permission";
@@ -89,6 +96,13 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   const [cards, setCards] = useState<AICard[]>([]);
   const [selectedPatchIds, setSelectedPatchIds] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState(false);
+  const [experts, setExperts] = useState<ExpertDefinition[]>([]);
+  const [showTeamBuilder, setShowTeamBuilder] = useState(false);
+  const [teamRequest, setTeamRequest] = useState("");
+  const [teamMembers, setTeamMembers] = useState<Set<ExpertType>>(
+    new Set(["writer", "director", "cinematography"]),
+  );
+  const [consultation, setConsultation] = useState<ExpertTeamConsultation | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const activeTaskIdRef = useRef<string | null>(null);
 
@@ -107,6 +121,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     [agentSelection, mode],
   );
   const taskRunning = activeTask && ["created", "context_building", "queued", "running"].includes(activeTask.status);
+  const teamRunning = isExpertTeamRunning(consultation?.status);
 
   useEffect(() => {
     void api.getFeatureFlags().then(setFlags).catch(onError);
@@ -134,6 +149,31 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
       }
     }).catch(onError);
   }, [agentEnabled, project.id, project.name, project.path, onError]);
+
+  useEffect(() => {
+    if (!agentEnabled) return;
+    void api.agentListExperts().then(setExperts).catch(onError);
+  }, [agentEnabled, onError]);
+
+  useEffect(() => {
+    if (!sessionId || !flags?.expert_team) return;
+    void api.expertTeamList(project.path, sessionId)
+      .then((items) => setConsultation(items[0] ?? null))
+      .catch(onError);
+  }, [sessionId, flags?.expert_team, project.path, onError]);
+
+  useEffect(() => {
+    if (!consultation || !["running", "synthesizing"].includes(consultation.status)) return;
+    const timer = window.setInterval(() => {
+      void api.expertTeamGet(project.path, consultation.id).then(async (next) => {
+        setConsultation(next);
+        if (!["running", "synthesizing"].includes(next.status) && sessionId) {
+          setMessages(await api.agentListMessages(project.path, sessionId));
+        }
+      }).catch(onError);
+    }, 600);
+    return () => window.clearInterval(timer);
+  }, [consultation?.id, consultation?.status, project.path, sessionId, onError]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -184,7 +224,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
 
   const sendMessage = async () => {
     const message = input.trim();
-    if (!message || !sessionId || taskRunning) return;
+    if (!message || !sessionId || taskRunning || teamRunning) return;
     setWorking(true);
     setInput("");
     setProposal(null);
@@ -220,7 +260,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   };
 
   const analyzeChangeSet = async () => {
-    if (!activeChangeSetId || activeChangeCount === 0 || !sessionId || taskRunning) return;
+    if (!activeChangeSetId || activeChangeCount === 0 || !sessionId || taskRunning || teamRunning) return;
     setWorking(true);
     setProposal(null);
     setCards([]);
@@ -249,6 +289,73 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         setMessages(await api.agentListMessages(project.path, sessionId));
         if (!dispatch.runtimeStarted) await refreshTask(dispatch.taskId);
       }
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const openTeamBuilder = async () => {
+    if (!flags?.expert_team) {
+      try {
+        setFlags(await api.setFeatureFlag("expert_team", true));
+      } catch (error) {
+        onError(error);
+        return;
+      }
+    }
+    setShowTeamBuilder(true);
+  };
+
+  const requestTeam = async () => {
+    const message = teamRequest.trim();
+    if (!sessionId || !message || teamMembers.size < 2 || taskRunning || teamRunning) return;
+    setWorking(true);
+    try {
+      const next = await api.expertTeamRequest(project.path, {
+        requestId: crypto.randomUUID(),
+        sessionId,
+        message,
+        selection: agentSelection,
+        members: [...teamMembers],
+        tokenBudget: 8_000,
+      });
+      setConsultation(next);
+      setTeamRequest("");
+      setShowTeamBuilder(false);
+      setMessages(await api.agentListMessages(project.path, sessionId));
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const confirmTeam = async () => {
+    if (!consultation || consultation.status !== "awaiting_confirmation") return;
+    setWorking(true);
+    try {
+      setConsultation(await api.expertTeamConfirm(project.path, consultation.id));
+    } catch (error) {
+      try {
+        setConsultation(await api.expertTeamGet(project.path, consultation.id));
+      } catch {
+        // Keep the confirmation error as the actionable message.
+      }
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const cancelTeam = async () => {
+    if (!consultation) return;
+    setWorking(true);
+    try {
+      const next = await api.expertTeamCancel(project.path, consultation.id);
+      setConsultation(next);
+      if (sessionId) setMessages(await api.agentListMessages(project.path, sessionId));
     } catch (error) {
       onError(error);
     } finally {
@@ -351,6 +458,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         <strong>{expertLabels[activeExpert]}</strong>
         <small>{activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
+        {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
       </section>
 
       <section className="agent-change-row">
@@ -365,10 +473,51 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
           </button>
         )}
         {hasActiveChangeSet && <button className="ghost" onClick={onCloseChangeSet}>结束本轮</button>}
+        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning} onClick={() => void openTeamBuilder()}><Users size={11} />专家团</button>
         <button className="ghost" onClick={() => selection.select({ workspace: "history" })}>历史 / 快照</button>
       </section>
 
       <section className="agent-conversation" aria-label="Agent 对话">
+        {showTeamBuilder && (
+          <article className="expert-team-builder">
+            <header><Users size={14} /><strong>申请专家团会诊</strong><span>只读 · 高成本</span></header>
+            <textarea
+              aria-label="专家团会诊问题"
+              value={teamRequest}
+              placeholder="描述需要多个专业方向共同判断的问题"
+              onChange={(event) => setTeamRequest(event.target.value)}
+            />
+            <div className="expert-team-options">
+              {experts.map((item) => (
+                <label key={item.expertType}>
+                  <input
+                    type="checkbox"
+                    checked={teamMembers.has(item.expertType)}
+                    onChange={() => setTeamMembers((current) => {
+                      const next = new Set(current);
+                      if (next.has(item.expertType)) next.delete(item.expertType); else next.add(item.expertType);
+                      return next;
+                    })}
+                  />
+                  {item.displayName}
+                </label>
+              ))}
+            </div>
+            <p><Coins size={12} />申请后只生成确认卡；确认前不会启动任何专家任务。</p>
+            <div className="expert-team-actions">
+              <button className="ghost" onClick={() => setShowTeamBuilder(false)}>取消</button>
+              <button className="primary" disabled={!canRequestExpertTeam(teamRequest, teamMembers, working)} onClick={() => void requestTeam()}>生成申请卡</button>
+            </div>
+          </article>
+        )}
+        {consultation && (
+          <ExpertTeamView
+            consultation={consultation}
+            disabled={working}
+            onConfirm={() => void confirmTeam()}
+            onCancel={() => void cancelTeam()}
+          />
+        )}
         {!messages.length && (
           <div className="agent-welcome">
             <Bot size={22} />
@@ -434,7 +583,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
           value={input}
           aria-label="给主 Agent 的消息"
           placeholder={taskRunning ? "任务运行中…" : "描述你希望分析或修改的内容"}
-          disabled={Boolean(taskRunning)}
+          disabled={Boolean(taskRunning) || teamRunning}
           onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -445,12 +594,79 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         />
         <div className="agent-composer-footer">
           <label><input type="checkbox" checked={attachSelection} onChange={(event) => setAttachSelection(event.target.checked)} />附加当前选区</label>
-          <button className="primary" disabled={!input.trim() || !sessionId || Boolean(taskRunning) || working} onClick={() => void sendMessage()}>
+          <button className="primary" disabled={!input.trim() || !sessionId || Boolean(taskRunning) || teamRunning || working} onClick={() => void sendMessage()}>
             <Send size={13} />发送
           </button>
         </div>
       </section>
     </div>
+  );
+}
+
+function ExpertTeamView({ consultation, disabled, onConfirm, onCancel }: {
+  consultation: ExpertTeamConsultation;
+  disabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const result = consultation.result as ExpertTeamResult | null;
+  const actionable = consultation.status === "awaiting_confirmation";
+  const cancellable = ["awaiting_confirmation", "running", "synthesizing"].includes(consultation.status);
+  return (
+    <article className={`expert-team-card ${consultation.status}`}>
+      <header><Users size={14} /><strong>专家团会诊</strong><span>{teamStatusLabel(consultation.status)}</span></header>
+      <p className="expert-team-question">{consultation.userRequest}</p>
+      <div className="expert-team-members">
+        {consultation.members.map((member) => (
+          <span className={member.status} key={member.id}>
+            {expertLabels[member.expertType]} · {memberStatusLabel(member.status)}
+          </span>
+        ))}
+      </div>
+      {actionable && (
+        <>
+          <section className="expert-team-application">
+            <strong>会诊申请</strong>
+            <small>每位专家获得独立 ContextPackage，并且互不查看彼此意见。</small>
+          </section>
+          <section className="expert-team-cost">
+            <Coins size={13} />
+            <div><strong>成本等级：高</strong><small>默认只读；确认前不会创建或启动专业任务。</small></div>
+          </section>
+        </>
+      )}
+      {consultation.status === "synthesizing" && <p className="expert-team-progress">各专家已完成，主 Agent 正在综合共识与分歧…</p>}
+      {result && consultation.status !== "cancelled" && (
+        <div className="expert-team-result">
+          <strong>{result.summary ?? "会诊已结束"}</strong>
+          <ResultGroup title="共识" values={result.consensus} />
+          <ResultGroup title="分歧" values={result.disagreements} emphasis />
+          <ResultGroup title="建议" values={result.recommendations} />
+          {result.questions?.map((question) => <p className="agent-question" key={question}>{question}</p>)}
+          {result.risks?.map((risk) => <p className="agent-risk" key={risk}><AlertTriangle size={12} />{risk}</p>)}
+          <small>会诊结果只读；如需修改，请另行发起修改提案。</small>
+        </div>
+      )}
+      {consultation.status === "cancelled" && <p className="expert-team-progress">会诊已取消，没有写入项目事实。</p>}
+      {consultation.status === "failed" && <p className="agent-runtime-error"><AlertTriangle size={12} />会诊未完成，请检查 Runtime 配置后重新申请。</p>}
+      {consultation.status === "stale" && <p className="stale-warning"><AlertTriangle size={12} />项目已从 r{consultation.baseRevision} 发生变化，请重新申请会诊。</p>}
+      {(actionable || cancellable) && (
+        <div className="expert-team-actions">
+          <button className="ghost danger" disabled={disabled} onClick={onCancel}>{actionable ? "放弃申请" : "取消会诊"}</button>
+          {actionable && <button className="primary" disabled={disabled} onClick={onConfirm}><Check size={12} />确认专家与高成本并启动</button>}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function ResultGroup({ title, values, emphasis = false }: { title: string; values?: unknown[]; emphasis?: boolean }) {
+  if (!values?.length) return null;
+  return (
+    <section className={emphasis ? "expert-team-disagreements" : ""}>
+      <strong>{title}</strong>
+      <ul>{values.map((value, index) => <li key={index}>{displayValue(value)}</li>)}</ul>
+    </section>
   );
 }
 
@@ -570,6 +786,14 @@ function permissionLabel(state: string): string {
 
 function taskStatusLabel(status: string): string {
   return ({ created: "正在理解", context_building: "正在组装上下文", queued: "正在调用专业 Agent", running: "专业 Agent 处理中", waiting_for_user: "等待你的决定", completed: "已完成", cancelled: "已取消", failed: "失败", stale: "结果过期", interrupted: "已中断" } as Record<string, string>)[status] ?? status;
+}
+
+function teamStatusLabel(status: string): string {
+  return ({ awaiting_confirmation: "等待确认", running: "专家独立分析中", synthesizing: "主 Agent 综合中", completed: "已完成", cancelled: "已取消", failed: "失败", stale: "已过期" } as Record<string, string>)[status] ?? status;
+}
+
+function memberStatusLabel(status: string): string {
+  return ({ planned: "待确认", queued: "等待运行", running: "分析中", completed: "已完成", cancelled: "已取消", failed: "失败", stale: "已过期" } as Record<string, string>)[status] ?? status;
 }
 
 function taskErrorMessage(error: unknown): string {

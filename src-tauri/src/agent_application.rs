@@ -362,7 +362,7 @@ pub fn agent_list_messages(
     list_messages(&conn, &session_id)
 }
 
-fn ensure_expert_agents_enabled(app: &tauri::AppHandle) -> AppResult<()> {
+pub(crate) fn ensure_expert_agents_enabled(app: &tauri::AppHandle) -> AppResult<()> {
     ensure_agent_core_enabled(app)?;
     let app_data_dir = app
         .path()
@@ -385,7 +385,7 @@ fn ensure_change_analysis_enabled(app: &tauri::AppHandle) -> AppResult<()> {
     Ok(())
 }
 
-fn expert(expert_type: &str) -> Option<&'static ExpertDefinition> {
+pub(crate) fn expert(expert_type: &str) -> Option<&'static ExpertDefinition> {
     EXPERTS
         .iter()
         .find(|expert| expert.expert_type == expert_type)
@@ -747,7 +747,7 @@ fn prepare_task(
     })
 }
 
-fn build_expert_prompt(
+pub(crate) fn build_expert_prompt(
     expert_type: &str,
     mode: &str,
     user_message: &str,
@@ -788,7 +788,7 @@ fn build_change_analysis_prompt(
     ))
 }
 
-fn expert_model_override(
+pub(crate) fn expert_model_override(
     conn: &rusqlite::Connection,
     project_id: &str,
     expert_type: &str,

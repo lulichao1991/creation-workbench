@@ -2,7 +2,7 @@ mod pi;
 mod runtime;
 
 #[cfg(test)]
-mod mock;
+pub(crate) mod mock;
 
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -17,14 +17,15 @@ pub use runtime::{RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState};
 
 pub const RUNTIME_EVENT_NAME: &str = "agent-runtime-event";
 
+#[derive(Clone)]
 pub struct RuntimeState {
-    runtime: Mutex<PiRuntimeAdapter>,
+    runtime: Arc<Mutex<Box<dyn AgentRuntime>>>,
 }
 
 impl Default for RuntimeState {
     fn default() -> Self {
         Self {
-            runtime: Mutex::new(PiRuntimeAdapter::default()),
+            runtime: Arc::new(Mutex::new(Box::new(PiRuntimeAdapter::default()))),
         }
     }
 }
@@ -39,6 +40,20 @@ impl RuntimeState {
             .lock()
             .map_err(|_| "Runtime 状态锁损坏".to_string())?
             .start_task(input, event_sink)
+    }
+
+    pub(crate) fn cancel_task(&self, task_id: &str) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .cancel_task(task_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_runtime(runtime: impl AgentRuntime + 'static) -> Self {
+        Self {
+            runtime: Arc::new(Mutex::new(Box::new(runtime))),
+        }
     }
 }
 
@@ -78,11 +93,7 @@ pub fn agent_cancel_task(
     task_id: String,
 ) -> AppResult<()> {
     ensure_agent_core_enabled(&app)?;
-    state
-        .runtime
-        .lock()
-        .map_err(|_| "Runtime 状态锁损坏".to_string())?
-        .cancel_task(&task_id)
+    state.cancel_task(&task_id)
 }
 
 #[tauri::command]

@@ -128,3 +128,73 @@ export interface AgentDispatch {
   runtimeStarted: boolean;
   status: AgentTaskStatus;
 }
+
+export type ExpertTeamStatus =
+  | "awaiting_confirmation"
+  | "running"
+  | "synthesizing"
+  | "completed"
+  | "cancelled"
+  | "failed"
+  | "stale";
+
+export interface ExpertTeamMember {
+  id: string;
+  expertType: ExpertType;
+  taskId: string | null;
+  status: "planned" | "queued" | "running" | "completed" | "cancelled" | "failed" | "stale";
+  result: unknown | null;
+  error: unknown | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExpertTeamResult {
+  summary?: string;
+  consensus?: unknown[];
+  disagreements?: unknown[];
+  recommendations?: unknown[];
+  questions?: string[];
+  risks?: string[];
+  memberResults?: unknown[];
+  patchProposal?: null;
+  readOnly?: boolean;
+  costLevel?: "high";
+  baseRevision?: number;
+  currentRevision?: number;
+  stale?: boolean;
+}
+
+export interface ExpertTeamConsultation {
+  id: string;
+  requestTaskId: string;
+  sessionId: string;
+  userRequest: string;
+  selection: SelectionSnapshot;
+  members: ExpertTeamMember[];
+  costLevel: "high";
+  readOnly: true;
+  tokenBudget: number;
+  baseRevision: number;
+  status: ExpertTeamStatus;
+  synthesisTaskId: string | null;
+  result: ExpertTeamResult | null;
+  error: unknown | null;
+  applicationCardId: string;
+  costCardId: string;
+  createdAt: string;
+  confirmedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface RequestExpertTeamInput {
+  requestId: string;
+  sessionId: string;
+  message: string;
+  selection: SelectionSnapshot;
+  members: ExpertType[];
+  tokenBudget?: number;
+  provider?: string | null;
+  model?: string | null;
+}

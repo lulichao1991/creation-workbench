@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 pub const AGENT_TABLES: &[&str] = &[
+    "expert_team_members",
+    "expert_team_consultations",
     "ai_cards",
     "patch_items",
     "patch_proposals",
@@ -125,6 +127,8 @@ pub fn init_database(
         .map_err(|e| format!("初始化静态生图结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V8)
         .map_err(|e| format!("初始化提示词编译结构失败：{e}"))?;
+    conn.execute_batch(MIGRATION_V9)
+        .map_err(|e| format!("初始化专家团结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -195,6 +199,10 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 8 {
         tx.execute_batch(MIGRATION_V8)
             .map_err(|e| format!("迁移到数据库版本 8 失败：{e}"))?;
+    }
+    if version < 9 {
+        tx.execute_batch(MIGRATION_V9)
+            .map_err(|e| format!("迁移到数据库版本 9 失败：{e}"))?;
     }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
@@ -925,6 +933,56 @@ CREATE INDEX IF NOT EXISTS idx_prompt_compilations_task
 ON prompt_compilations(generation_task_id, created_at);
 "#;
 
+const MIGRATION_V9: &str = r#"
+CREATE TABLE IF NOT EXISTS expert_team_consultations (
+  id TEXT PRIMARY KEY,
+  request_task_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL,
+  user_request TEXT NOT NULL,
+  selection_json TEXT NOT NULL,
+  members_json TEXT NOT NULL,
+  cost_level TEXT NOT NULL DEFAULT 'high' CHECK(cost_level = 'high'),
+  read_only INTEGER NOT NULL DEFAULT 1 CHECK(read_only = 1),
+  token_budget INTEGER NOT NULL DEFAULT 8000 CHECK(token_budget BETWEEN 32 AND 100000),
+  base_revision INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'awaiting_confirmation'
+    CHECK(status IN ('awaiting_confirmation', 'running', 'synthesizing', 'completed', 'cancelled', 'failed', 'stale')),
+  synthesis_task_id TEXT,
+  result_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  confirmed_at TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(request_task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE,
+  FOREIGN KEY(session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY(synthesis_task_id) REFERENCES agent_tasks(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS expert_team_members (
+  id TEXT PRIMARY KEY,
+  consultation_id TEXT NOT NULL,
+  expert_type TEXT NOT NULL,
+  task_id TEXT UNIQUE,
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK(status IN ('planned', 'queued', 'running', 'completed', 'cancelled', 'failed', 'stale')),
+  result_json TEXT,
+  error_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(consultation_id) REFERENCES expert_team_consultations(id) ON DELETE CASCADE,
+  FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE SET NULL,
+  UNIQUE(consultation_id, expert_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_expert_team_session
+ON expert_team_consultations(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_expert_team_status
+ON expert_team_consultations(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_expert_team_members_consultation
+ON expert_team_members(consultation_id, status);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1021,8 @@ mod tests {
             "idx_graph_layouts_scope",
             "idx_project_memories_scope_status",
             "idx_image_generation_jobs_target",
+            "idx_expert_team_session",
+            "idx_expert_team_members_consultation",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -990,6 +1050,8 @@ mod tests {
             conn.execute_batch(
                 "PRAGMA foreign_keys = OFF;
                  DROP TABLE ai_cards;
+                 DROP TABLE expert_team_members;
+                 DROP TABLE expert_team_consultations;
                  DROP TABLE patch_items;
                  DROP TABLE patch_proposals;
                  DROP TABLE context_packages;
@@ -1028,6 +1090,8 @@ mod tests {
             "memory_sources",
             "image_generation_jobs",
             "image_generation_results",
+            "expert_team_consultations",
+            "expert_team_members",
         ] {
             let exists: i64 = conn
                 .query_row(

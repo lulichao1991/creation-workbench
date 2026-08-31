@@ -72,7 +72,7 @@ pub enum RuntimeEvent {
     },
 }
 
-pub trait AgentRuntime {
+pub trait AgentRuntime: Send {
     fn start_task(
         &mut self,
         input: RuntimeTaskInput,

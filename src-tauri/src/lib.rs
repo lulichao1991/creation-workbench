@@ -4,6 +4,7 @@ mod app_database;
 mod commands;
 mod context;
 mod database;
+mod expert_team;
 mod image_generation;
 mod memory;
 mod mutation;
@@ -26,6 +27,9 @@ use commands::{
     import_project_file, list_projects, load_project_state, open_project, read_project_media,
 };
 use context::{context_build, context_search};
+use expert_team::{
+    expert_team_cancel, expert_team_confirm, expert_team_get, expert_team_list, expert_team_request,
+};
 use image_generation::{
     image_cancel, image_generate, image_get_job, image_list_jobs, image_select_result,
     image_update_result_state, ImageGenerationState,
@@ -70,6 +74,11 @@ pub fn run() {
             agent_send_message,
             agent_get_task,
             agent_list_messages,
+            expert_team_request,
+            expert_team_confirm,
+            expert_team_get,
+            expert_team_list,
+            expert_team_cancel,
             agent_runtime_start_readonly,
             agent_runtime_send_input,
             agent_cancel_task,

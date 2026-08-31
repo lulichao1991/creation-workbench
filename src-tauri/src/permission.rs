@@ -542,10 +542,8 @@ fn resolve_card(project_path: &Path, input: ResolveCardInput) -> AppResult<AiCar
             |row| row.get(0),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: 待处理 AI Card 不存在".to_string())?;
-    if card_type == "permission" {
-        return Err(
-            "TOOL_ARGUMENT_INVALID: 权限卡必须通过 patch_apply 或 patch_reject 处理".into(),
-        );
+    if matches!(card_type.as_str(), "permission" | "expert_team" | "cost") {
+        return Err("TOOL_ARGUMENT_INVALID: 权限、专家团和成本卡必须通过对应的确认流程处理".into());
     }
     let changed = conn
         .execute(
