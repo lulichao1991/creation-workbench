@@ -1,6 +1,7 @@
 mod agent_runtime;
 mod app_database;
 mod commands;
+mod context;
 mod database;
 mod mutation;
 
@@ -13,6 +14,7 @@ use commands::{
     cleanup_project_media, copy_project, create_project, delete_project, get_default_workspace,
     import_project_file, list_projects, load_project_state, open_project, read_project_media,
 };
+use context::{context_build, context_search};
 use mutation::{
     apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
     undo_change_set,
@@ -38,6 +40,8 @@ pub fn run() {
             agent_runtime_send_input,
             agent_cancel_task,
             agent_get_task_state,
+            context_build,
+            context_search,
             get_default_workspace,
             list_projects,
             create_project,

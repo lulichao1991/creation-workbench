@@ -89,7 +89,7 @@ pub fn agent_get_task_state(
         .get_task_state(&task_id)
 }
 
-fn ensure_agent_core_enabled(app: &tauri::AppHandle) -> AppResult<()> {
+pub(crate) fn ensure_agent_core_enabled(app: &tauri::AppHandle) -> AppResult<()> {
     let app_data_dir = app
         .path()
         .app_data_dir()

@@ -6,6 +6,11 @@ import type {
   RuntimeTaskState,
 } from "./features/agent/runtime";
 import type {
+  BuildContextInput,
+  ContextPackage,
+  ContextSearchResult,
+} from "./features/context";
+import type {
   MutationRequest,
   MutationResponse,
   BatchMutationRequest,
@@ -24,6 +29,10 @@ export const api = {
     invoke<void>("agent_cancel_task", { taskId }),
   agentGetTaskState: (taskId: string) =>
     invoke<RuntimeTaskState>("agent_get_task_state", { taskId }),
+  contextBuild: (projectPath: string, input: BuildContextInput) =>
+    invoke<ContextPackage>("context_build", { projectPath, input }),
+  contextSearch: (projectPath: string, query: string, limit = 20) =>
+    invoke<ContextSearchResult[]>("context_search", { projectPath, query, limit }),
   getDefaultWorkspace: () =>
     invoke<{ defaultPath: string }>("get_default_workspace"),
   listProjects: (rootPath: string) =>

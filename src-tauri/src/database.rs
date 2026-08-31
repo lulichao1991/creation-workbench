@@ -245,7 +245,7 @@ pub fn row_by_id(conn: &Connection, table: &str, id: &str) -> AppResult<Option<V
     }
 }
 
-fn row_to_json(row: &Row<'_>, column_names: &[String]) -> rusqlite::Result<Value> {
+pub(crate) fn row_to_json(row: &Row<'_>, column_names: &[String]) -> rusqlite::Result<Value> {
     let mut object = Map::new();
     for (index, name) in column_names.iter().enumerate() {
         let value = match row.get_ref(index)? {
