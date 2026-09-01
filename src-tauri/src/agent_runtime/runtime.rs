@@ -10,9 +10,15 @@ pub type RuntimeEventSink = Arc<dyn Fn(RuntimeEvent) + Send + Sync>;
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskInput {
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub prompt: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub thinking_level: Option<String>,
     #[serde(default)]
     pub attachments: Vec<RuntimeAttachment>,
 }

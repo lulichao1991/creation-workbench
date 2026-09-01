@@ -1,3 +1,4 @@
+mod host;
 mod pi;
 mod runtime;
 
@@ -9,6 +10,7 @@ use tauri::{Emitter, Manager};
 
 use crate::app_database::load_feature_flags;
 use crate::database::AppResult;
+use host::{diagnose_pi_sdk_host, PiSdkRuntimeAdapter};
 use pi::{diagnose_pi_runtime, PiRuntimeAdapter};
 use runtime::AgentRuntime;
 
@@ -26,8 +28,13 @@ pub struct RuntimeState {
 
 impl Default for RuntimeState {
     fn default() -> Self {
+        let runtime: Box<dyn AgentRuntime> = if use_pi_sdk_runtime() {
+            Box::new(PiSdkRuntimeAdapter::default())
+        } else {
+            Box::new(PiRuntimeAdapter::default())
+        };
         Self {
-            runtime: Arc::new(Mutex::new(Box::new(PiRuntimeAdapter::default()))),
+            runtime: Arc::new(Mutex::new(runtime)),
         }
     }
 }
@@ -114,7 +121,17 @@ pub fn agent_get_task_state(
 
 #[tauri::command]
 pub fn agent_runtime_doctor() -> RuntimeDiagnostics {
-    diagnose_pi_runtime()
+    if use_pi_sdk_runtime() {
+        diagnose_pi_sdk_host()
+    } else {
+        diagnose_pi_runtime()
+    }
+}
+
+fn use_pi_sdk_runtime() -> bool {
+    std::env::var("WORKBENCH_AGENT_RUNTIME")
+        .map(|value| value.eq_ignore_ascii_case("pi_sdk"))
+        .unwrap_or(false)
 }
 
 pub(crate) fn ensure_agent_core_enabled(app: &tauri::AppHandle) -> AppResult<()> {
@@ -142,9 +159,12 @@ mod tests {
     fn input(task_id: &str, prompt: &str) -> RuntimeTaskInput {
         RuntimeTaskInput {
             task_id: Some(task_id.into()),
+            session_id: None,
             prompt: prompt.into(),
             provider: None,
             model: None,
+            system_prompt: None,
+            thinking_level: None,
             attachments: Vec::new(),
         }
     }

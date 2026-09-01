@@ -787,7 +787,7 @@ fn prepare_task(
     }
     Ok(PreparedTask {
         dispatch: AgentDispatch {
-            session_id: input.session_id,
+            session_id: input.session_id.clone(),
             task_id: task_id.clone(),
             route,
             runtime_started: false,
@@ -795,9 +795,12 @@ fn prepare_task(
         },
         runtime_input: Some(RuntimeTaskInput {
             task_id: Some(task_id),
+            session_id: Some(input.session_id),
             prompt,
             provider,
             model,
+            system_prompt: None,
+            thinking_level: None,
             attachments,
         }),
     })

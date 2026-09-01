@@ -1,0 +1,22 @@
+{
+  "name": "workbench-agent-host",
+  "private": true,
+  "version": "0.2.0-beta.2",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist/**/*.test.js",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.8.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

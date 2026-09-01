@@ -453,10 +453,13 @@ fn prepare_member_tasks(
         .map_err(|e| e.to_string())?;
         prepared.push(PreparedRuntimeTask {
             input: RuntimeTaskInput {
-                task_id: Some(task_id),
+                task_id: Some(task_id.clone()),
+                session_id: Some(task_id),
                 prompt,
                 provider,
                 model,
+                system_prompt: None,
+                thinking_level: None,
                 attachments: Vec::new(),
             },
         });
@@ -751,9 +754,12 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
     let prompt = build_synthesis_prompt(&user_request, &members)?;
     Ok(Some(RuntimeTaskInput {
         task_id: Some(synthesis_task_id),
+        session_id: Some(session_id),
         prompt,
         provider,
         model,
+        system_prompt: None,
+        thinking_level: None,
         attachments: Vec::new(),
     }))
 }

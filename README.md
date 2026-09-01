@@ -11,6 +11,7 @@
 - Rust + SQLite（rusqlite）
 - Zustand
 - Vitest
+- Pi SDK AgentSession（Beta 2 双 Runtime 迁移中）
 
 ## 开发
 
@@ -18,6 +19,15 @@
 npm install
 npm run tauri dev
 ```
+
+开发期默认继续使用 legacy Pi CLI Runtime。要切换到 Pi SDK Agent Host：
+
+```powershell
+$env:WORKBENCH_AGENT_RUNTIME="pi_sdk"
+npm run tauri dev
+```
+
+`npm install` 会安装隔离在 `agent-host/` 下并固定为 `0.84.4` 的 Pi SDK；Agent Host 不加载用户 `~/.pi`、项目扩展、Skills 或 `AGENTS.md`。
 
 ## 验证
 
@@ -172,3 +182,10 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 静态生图参考图真实进入 OpenAI Compatible `images/edits` multipart 请求；未明确允许上传时不会静默退化成纯文本生成。
 - 新增 Pi Runtime 检测、终态资源回收、多季完整路径排序、`memoryKey` 冲突键，以及提示词编译参考图清单。
 - 本机尚未安装 Pi，因此真实 Pi + 真实模型端到端验收仍是进入 RC 前的外部门槛；可在 Agent 面板运行 Runtime 检测。
+
+## V2 Beta 2 Goal26 Pi SDK Agent Host
+
+- 新增独立 TypeScript `agent-host`，直接使用 Pi `ModelRuntime` 与真实 `AgentSession`，通过严格 LF-JSONL 与 Rust 通信，不开放本地 HTTP 端口。
+- Agent Host 使用独立系统数据目录和显式空资源加载器，不读取用户 Pi 环境或项目文件；默认禁用全部内置文件与 Shell 工具。
+- Rust 新增 `PiSdkRuntimeAdapter`，复用现有 Runtime 事件契约，并通过 `WORKBENCH_AGENT_RUNTIME=pi_sdk` 与 legacy Runtime 双轨迁移。
+- 自动化覆盖真实 Pi SDK Session 创建、同一 Session 两轮上下文、Host Doctor、中文空格路径、流式事件以及前后端原有回归测试。
