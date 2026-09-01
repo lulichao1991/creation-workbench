@@ -1,7 +1,7 @@
 {
   "name": "workbench-agent-host",
   "private": true,
-  "version": "0.2.0-beta.3",
+  "version": "0.2.0-beta.4",
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -128,13 +128,16 @@ impl HostProcess {
             .map_err(|_| "Agent Host pending 锁损坏".to_string())?
             .insert(id.clone(), tx);
         let write_result = (|| -> AppResult<()> {
+            let encoded = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
             let mut stdin = self
                 .stdin
                 .lock()
                 .map_err(|_| "Agent Host stdin 锁损坏".to_string())?;
-            serde_json::to_writer(&mut *stdin, &body).map_err(|error| error.to_string())?;
-            stdin.write_all(b"\n").map_err(|error| error.to_string())?;
-            stdin.flush().map_err(|error| error.to_string())
+            stdin
+                .write_all(&encoded)
+                .and_then(|_| stdin.write_all(b"\n"))
+                .and_then(|_| stdin.flush())
+                .map_err(host_write_error)
         })();
         if let Err(error) = write_result {
             if let Ok(mut pending) = self.pending.lock() {
@@ -144,6 +147,15 @@ impl HostProcess {
         }
         rx.recv_timeout(Duration::from_secs(10))
             .map_err(|_| format!("Agent Host 请求超时：{request_type}"))?
+    }
+
+    fn is_running(&self) -> AppResult<bool> {
+        self.child
+            .lock()
+            .map_err(|_| "Agent Host 进程锁损坏".to_string())?
+            .try_wait()
+            .map(|status| status.is_none())
+            .map_err(|error| format!("检查 Agent Host 状态失败：{error}"))
     }
 
     fn shutdown(&mut self) {
@@ -197,10 +209,28 @@ impl PiSdkRuntimeAdapter {
     }
 
     fn process(&mut self) -> AppResult<&HostProcess> {
+        let stopped = match self.process.as_ref() {
+            Some(process) => !process.is_running()?,
+            None => false,
+        };
+        if stopped {
+            if let Some(mut process) = self.process.take() {
+                process.shutdown();
+            }
+            self.sessions.clear();
+        }
         if self.process.is_none() {
             self.process = Some(HostProcess::spawn(&self.command)?);
         }
         Ok(self.process.as_ref().expect("process initialized"))
+    }
+}
+
+fn host_write_error(error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(232) {
+        "Pi SDK Agent Host 已停止，请重试当前操作".into()
+    } else {
+        format!("写入 Pi SDK Agent Host 失败：{error}")
     }
 }
 
@@ -801,6 +831,31 @@ mod tests {
         assert_eq!(
             runtime.get_task_state("sdk-task").unwrap(),
             RuntimeTaskState::Completed
+        );
+        runtime.dispose().unwrap();
+    }
+
+    #[test]
+    fn sdk_adapter_restarts_a_stopped_host_before_the_next_request() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data")
+            .join("含中文 空格")
+            .join("mock_agent_host.mjs");
+        let mut runtime = PiSdkRuntimeAdapter::new(command_for_path(fixture));
+        assert_eq!(
+            runtime.doctor().unwrap().sdk_version.as_deref(),
+            Some("mock-sdk")
+        );
+
+        let process = runtime.process.as_ref().unwrap();
+        let mut child = process.child.lock().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        drop(child);
+
+        assert_eq!(
+            runtime.doctor().unwrap().sdk_version.as_deref(),
+            Some("mock-sdk")
         );
         runtime.dispose().unwrap();
     }
