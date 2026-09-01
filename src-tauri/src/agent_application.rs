@@ -360,7 +360,9 @@ pub fn agent_send_message(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
-    let global_memories = if load_feature_flags(&app_data_dir)?.get("memory") == Some(&true) {
+    let global_memories = if (!use_pi_sdk_runtime() || input.mode == "change_analysis")
+        && load_feature_flags(&app_data_dir)?.get("memory") == Some(&true)
+    {
         Some(active_global_memories(&app_data_dir)?)
     } else {
         None
@@ -724,6 +726,15 @@ fn prepare_task(
     input: SendMessageInput,
     global_memories: Option<&[MemoryContextEntry]>,
 ) -> AppResult<PreparedTask> {
+    prepare_task_for_runtime(project_path, input, global_memories, use_pi_sdk_runtime())
+}
+
+fn prepare_task_for_runtime(
+    project_path: &Path,
+    input: SendMessageInput,
+    global_memories: Option<&[MemoryContextEntry]>,
+    pi_sdk_runtime: bool,
+) -> AppResult<PreparedTask> {
     if input.request_id.trim().is_empty() || input.message.trim().is_empty() {
         return Err("TOOL_ARGUMENT_INVALID: requestId 和 message 不能为空".into());
     }
@@ -856,22 +867,28 @@ fn prepare_task(
     }
 
     let expert_type = route.expert_type.as_deref().unwrap();
-    let package = match build_context_with_memories(
-        &mut conn,
-        BuildContextInput {
-            task_id: task_id.clone(),
-            selection: input.selection.clone(),
-            task_intent: route.task_type.clone(),
-            expert_type: expert_type.into(),
-            token_budget: input.token_budget,
-        },
-        global_memories,
-    ) {
-        Ok(package) => package,
-        Err(error) => {
-            mark_task_failed(project_path, &task_id, &error)?;
-            return Err(error);
-        }
+    let package = if pi_sdk_runtime && !is_change_analysis {
+        None
+    } else {
+        Some(
+            match build_context_with_memories(
+                &mut conn,
+                BuildContextInput {
+                    task_id: task_id.clone(),
+                    selection: input.selection.clone(),
+                    task_intent: route.task_type.clone(),
+                    expert_type: expert_type.into(),
+                    token_budget: input.token_budget,
+                },
+                global_memories,
+            ) {
+                Ok(package) => package,
+                Err(error) => {
+                    mark_task_failed(project_path, &task_id, &error)?;
+                    return Err(error);
+                }
+            },
+        )
     };
     let (provider, model) = if is_change_analysis {
         (input.provider, input.model)
@@ -883,7 +900,7 @@ fn prepare_task(
         params![provider, model, task_id],
     )
     .map_err(|e| e.to_string())?;
-    let working_memory = if use_pi_sdk_runtime() {
+    let working_memory = if pi_sdk_runtime {
         None
     } else {
         Some(session_working_memory(
@@ -898,14 +915,25 @@ fn prepare_task(
         visual_attachments(project_path, &conn, expert_type, &input.selection)?
     };
     let mut prompt = if is_change_analysis {
-        build_change_analysis_prompt(&input.message, &package)?
+        build_change_analysis_prompt(
+            &input.message,
+            package.as_ref().ok_or("ContextPackage 未构建")?,
+        )?
+    } else if pi_sdk_runtime {
+        build_tool_driven_prompt(
+            expert_type,
+            &input.mode,
+            &input.message,
+            &input.selection,
+            &input.write_scope,
+        )?
     } else {
         build_expert_prompt(
             expert_type,
             &input.mode,
             &input.message,
             &input.write_scope,
-            &package,
+            package.as_ref().ok_or("ContextPackage 未构建")?,
             working_memory.as_ref(),
         )?
     };
@@ -1070,6 +1098,30 @@ fn encode_visual_attachments(
             })
         })
         .collect()
+}
+
+fn build_tool_driven_prompt(
+    expert_type: &str,
+    mode: &str,
+    user_message: &str,
+    selection: &SelectionSnapshot,
+    write_scope: &WriteScope,
+) -> AppResult<String> {
+    let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
+    let mode_rule = if mode == "edit" {
+        "如需修改，只能在最终 JSON 中返回 patchProposal；工作台会继续执行权限和 stale 校验。"
+    } else {
+        "这是只读讨论，最终 JSON 的 patchProposal 必须为 null。"
+    };
+    Ok(format!(
+        "当前请求由主 Pi AgentSession 处理，专业关注方向是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
+        definition.display_name,
+        definition.system_instruction,
+        mode_rule,
+        user_message,
+        serde_json::to_string(selection).map_err(|e| e.to_string())?,
+        serde_json::to_string(write_scope).map_err(|e| e.to_string())?,
+    ))
 }
 
 pub(crate) fn build_expert_prompt(
@@ -1812,6 +1864,59 @@ mod tests {
         assert!(ensure_session_can_close(temp.path(), &session.id)
             .unwrap_err()
             .starts_with("SESSION_BUSY"));
+    }
+
+    #[test]
+    fn pi_sdk_main_turn_uses_minimal_tool_driven_startup_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "工具化上下文", "short").unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let timestamp = now();
+        conn.execute("INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES ('unit', ?1, 'short', '正片', 0, ?2, ?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'unit', '正片', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, composition, created_at, updated_at) VALUES ('shot', 'scene', 0, '镜头04', '不应进入启动包的旧构图事实', ?1, ?1)", [&timestamp]).unwrap();
+        drop(conn);
+        let session = create_session(
+            temp.path(),
+            CreateSessionInput {
+                request_id: "tool-session".into(),
+                project_id: project.id.clone(),
+                scope_type: "project".into(),
+                scope_id: Some(project.id.clone()),
+                title: "工具讨论".into(),
+            },
+        )
+        .unwrap();
+        let prepared = prepare_task_for_runtime(
+            temp.path(),
+            SendMessageInput {
+                request_id: "tool-message".into(),
+                session_id: session.id,
+                message: "这个镜头为什么不够有压迫感？".into(),
+                workspace: Some("shots".into()),
+                mode: "discussion".into(),
+                selection: selection(&project.id, "shot", "shot", Some("composition")),
+                write_scope: WriteScope::default(),
+                token_budget: 8_000,
+                provider: None,
+                model: None,
+            },
+            None,
+            true,
+        )
+        .unwrap();
+        let prompt = prepared.runtime_input.unwrap().prompt;
+        assert!(prompt.contains("read_shot_context"));
+        assert!(!prompt.contains("不应进入启动包的旧构图事实"));
+        assert!(prompt.len() < 3_000);
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM context_packages", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

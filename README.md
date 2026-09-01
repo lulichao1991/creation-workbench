@@ -205,3 +205,10 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - Rust 对任务、会话、项目对象、参数白名单、当前 revision 和 64 KiB 结果上限逐次校验；资产图片仅返回不含本地路径的媒体元数据。
 - 每次调用写入 `agent_tool_calls` 并更新任务 `tool_call_count`；审计摘要会截断并清除 Key、Token、Secret、路径和图片字段。
 - 自动化覆盖真实 Pi 多工具循环、Rust↔Host 双向 IPC、全部首批读取工具、SQL 注入字符串、任意文件尝试、结果限额、revision 更新和审计。
+
+## V2 Beta 2 Goal29 ContextSystem 工具化
+
+- Pi SDK 普通对话只发送用户请求、选区引用与 WriteScope，不再预先构建或注入完整 ContextPackage；专项“分析本轮修改”和 legacy 回退仍保留可审计的批量上下文包。
+- `ContextPolicy v3` 直接约束 `read_shot_context` 与 `read_story_structure` 等组合读取，Agent 可在同一 Tool Loop 中按需读取并再次读取当前项目事实。
+- 工具网关同时限制约 12K token 和 64 KiB 结果，返回当前 policy、revision 与 token 估算；超限调用进入失败审计，不会把大结果送入模型。
+- 相同任务、项目 revision、工具与参数的结果使用有界内存缓存；revision 变化自动产生新缓存键，确保后续读取取得新事实。

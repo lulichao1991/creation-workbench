@@ -1,16 +1,22 @@
 use rusqlite::{params, Connection};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::app_database::load_feature_flags;
 use crate::context::{
-    neighbor_refs, object_value, parent_ref, search_project, ObjectRef, SelectionSnapshot,
+    neighbor_refs, object_value, parent_ref, search_project, ContextPolicy, ObjectRef,
+    SelectionSnapshot, CONTEXT_POLICY_VERSION,
 };
 use crate::database::{now, open_database, AppResult};
 use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
 
 const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
+const MAX_TOOL_RESULT_TOKENS: usize = 12_000;
 const MAX_AUDIT_TEXT_BYTES: usize = 4 * 1024;
+const MAX_CACHE_ENTRIES: usize = 256;
+static TOOL_CACHE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct ToolGatewayRequest {
@@ -28,17 +34,26 @@ pub fn execute_tool(
 ) -> AppResult<Value> {
     let mut conn = open_database(project_path)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let (session_id, agent_type, selection_json, write_scope_json): (
+    let (session_id, agent_type, task_type, selection_json, write_scope_json): (
+        String,
         String,
         String,
         String,
         String,
     ) = tx
         .query_row(
-            "SELECT session_id, agent_type, selection_json, write_scope_json
+            "SELECT session_id, agent_type, task_type, selection_json, write_scope_json
              FROM agent_tasks WHERE id=?1",
             [&request.task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string())?;
     if session_id != request.session_id {
@@ -70,29 +85,63 @@ pub fn execute_tool(
 
     let selection: SelectionSnapshot =
         serde_json::from_str(&selection_json).map_err(|e| format!("读取任务选区失败：{e}"))?;
-    let result = argument_object(&request.arguments)
-    .and_then(|arguments| {
-        validate_arguments(&request.tool_name, arguments)?;
-        execute_inner(
-            &tx,
-            app_data_dir,
-            &project_id,
-            &selection,
-            &write_scope_json,
-            &request.tool_name,
-            arguments,
-        )
-    })
-    .and_then(|data| {
-        let wrapped = json!({ "projectRevision": revision, "data": data });
-        let bytes = serde_json::to_vec(&wrapped).map_err(|e| e.to_string())?.len();
-        if bytes > MAX_TOOL_RESULT_BYTES {
-            return Err(format!(
-                "TOOL_RESULT_TOO_LARGE: 工具结果 {bytes} bytes，最大允许 {MAX_TOOL_RESULT_BYTES} bytes"
-            ));
-        }
-        Ok((wrapped, bytes))
-    });
+    let policy = ContextPolicy::for_intent(&task_type);
+    let cache_key = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        project_path.display(),
+        request.task_id,
+        revision,
+        request.tool_name,
+        request.arguments
+    );
+    let cached = cache_get(&cache_key);
+    let cache_hit = cached.is_some();
+    let result = cached
+        .map(Ok)
+        .unwrap_or_else(|| {
+            argument_object(&request.arguments).and_then(|arguments| {
+                validate_arguments(&request.tool_name, arguments)?;
+                execute_inner(
+                    &tx,
+                    app_data_dir,
+                    &project_id,
+                    &selection,
+                    &write_scope_json,
+                    &policy,
+                    &request.tool_name,
+                    arguments,
+                )
+            })
+        })
+        .and_then(|data| {
+            let token_estimate = serde_json::to_string(&data)
+                .map_err(|e| e.to_string())?
+                .chars()
+                .count()
+                .div_ceil(4);
+            if token_estimate > MAX_TOOL_RESULT_TOKENS {
+                return Err(format!(
+                    "TOOL_RESULT_TOO_LARGE: 工具结果约 {token_estimate} tokens，最大允许 {MAX_TOOL_RESULT_TOKENS} tokens"
+                ));
+            }
+            let wrapped = json!({
+                "projectRevision": revision,
+                "contextPolicy": CONTEXT_POLICY_VERSION,
+                "cached": cache_hit,
+                "tokenEstimate": token_estimate,
+                "data": data,
+            });
+            let bytes = serde_json::to_vec(&wrapped).map_err(|e| e.to_string())?.len();
+            if bytes > MAX_TOOL_RESULT_BYTES {
+                return Err(format!(
+                    "TOOL_RESULT_TOO_LARGE: 工具结果 {bytes} bytes，最大允许 {MAX_TOOL_RESULT_BYTES} bytes"
+                ));
+            }
+            if !cache_hit {
+                cache_put(cache_key.clone(), data);
+            }
+            Ok((wrapped, bytes))
+        });
 
     let completed_at = now();
     let (status, summary) = match &result {
@@ -117,12 +166,14 @@ pub fn execute_tool(
     result.map(|(value, _)| value)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_inner(
     conn: &Connection,
     app_data_dir: Option<&Path>,
     project_id: &str,
     selection: &SelectionSnapshot,
     write_scope_json: &str,
+    policy: &ContextPolicy,
     tool_name: &str,
     arguments: &Map<String, Value>,
 ) -> AppResult<Value> {
@@ -157,7 +208,7 @@ fn execute_inner(
         }
         "read_scene" => read_scene(conn, project_id, &string_arg(arguments, "sceneId")?),
         "read_shot_context" => {
-            read_shot_context(conn, project_id, &string_arg(arguments, "shotId")?)
+            read_shot_context(conn, project_id, &string_arg(arguments, "shotId")?, policy)
         }
         "read_asset" => read_asset(conn, project_id, &string_arg(arguments, "assetId")?),
         "read_generation_task" => read_generation_task(
@@ -173,6 +224,7 @@ fn execute_inner(
                 .unwrap_or("project"),
             optional_string_arg(arguments, "scopeId")?.as_deref(),
             usize_arg(arguments, "limit", 120, 160)?,
+            policy,
         ),
         "search_project" => serde_json::to_value(search_project(
             conn,
@@ -272,11 +324,16 @@ fn read_scene(conn: &Connection, project_id: &str, scene_id: &str) -> AppResult<
     Ok(json!({ "scene": object_value(conn, &scene, false)?, "shots": shots }))
 }
 
-fn read_shot_context(conn: &Connection, project_id: &str, shot_id: &str) -> AppResult<Value> {
+fn read_shot_context(
+    conn: &Connection,
+    project_id: &str,
+    shot_id: &str,
+    policy: &ContextPolicy,
+) -> AppResult<Value> {
     let shot = reference(project_id, "shot", shot_id);
     let scene =
         parent_ref(conn, &shot)?.ok_or_else(|| "OBJECT_NOT_FOUND: 镜头缺少所属场".to_string())?;
-    let neighbors = neighbor_refs(conn, &shot, 2)?
+    let neighbors = neighbor_refs(conn, &shot, policy.neighbor_count)?
         .iter()
         .map(|item| object_value(conn, item, false))
         .collect::<AppResult<Vec<_>>>()?;
@@ -380,6 +437,7 @@ fn read_story_structure(
     scope_type: &str,
     scope_id: Option<&str>,
     limit: usize,
+    policy: &ContextPolicy,
 ) -> AppResult<Value> {
     let unit_ids = match scope_type {
         "project" => query_ids(
@@ -465,7 +523,7 @@ fn read_story_structure(
         .iter()
         .map(|item| object_value(conn, item, false))
         .collect::<AppResult<Vec<_>>>()?;
-    let relations = query_refs(conn, "SELECT id FROM relations WHERE project_id=?1 ORDER BY importance DESC, created_at, id LIMIT ?2", project_id, "relation", project_id, limit)?
+    let relations = query_refs(conn, "SELECT id FROM relations WHERE project_id=?1 ORDER BY importance DESC, created_at, id LIMIT ?2", project_id, "relation", project_id, limit.min(policy.relation_limit))?
         .iter().map(|item| object_value(conn, item, false)).collect::<AppResult<Vec<_>>>()?;
     Ok(
         json!({ "scopeType": scope_type, "scopeId": scope_id, "contentUnits": units, "storyElements": elements, "occurrences": occurrences, "relations": relations }),
@@ -625,6 +683,26 @@ fn usize_arg(
     }
 }
 
+fn cache_get(key: &str) -> Option<Value> {
+    TOOL_CACHE
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+}
+
+fn cache_put(key: String, value: Value) {
+    let Ok(mut cache) = TOOL_CACHE.get_or_init(|| Mutex::new(HashMap::new())).lock() else {
+        return;
+    };
+    if cache.len() >= MAX_CACHE_ENTRIES {
+        if let Some(key_to_remove) = cache.keys().next().cloned() {
+            cache.remove(&key_to_remove);
+        }
+    }
+    cache.insert(key, value);
+}
+
 fn audit_text(value: &Value) -> String {
     let redacted = redact(value);
     truncate_utf8(&redacted.to_string(), MAX_AUDIT_TEXT_BYTES)
@@ -776,6 +854,11 @@ mod tests {
             json!({ "assetId": "hero" }),
         )
         .unwrap();
+        assert_eq!(asset["cached"], true);
+        assert_eq!(asset["contextPolicy"], CONTEXT_POLICY_VERSION);
+        assert!(asset["tokenEstimate"]
+            .as_u64()
+            .is_some_and(|value| value > 0));
         let asset_text = asset.to_string();
         assert!(!asset_text.contains("C:/private"));
         assert!(!asset_text.contains("file_path"));
@@ -843,6 +926,12 @@ mod tests {
                 .unwrap(),
             1
         );
+        drop(conn);
+        let first = call(temp.path(), "cache-first", "get_selection", json!({})).unwrap();
+        let second = call(temp.path(), "cache-second", "get_selection", json!({})).unwrap();
+        assert_eq!(first["cached"], false);
+        assert_eq!(second["cached"], true);
+        let conn = open_database(temp.path()).unwrap();
         conn.execute(
             "UPDATE scenes SET content=?1 WHERE id='scene'",
             ["压".repeat(70_000)],
@@ -869,9 +958,8 @@ mod tests {
         );
         conn.execute("UPDATE projects SET revision=8", []).unwrap();
         drop(conn);
-        assert_eq!(
-            call(temp.path(), "fresh", "get_selection", json!({})).unwrap()["projectRevision"],
-            8
-        );
+        let fresh = call(temp.path(), "fresh", "get_selection", json!({})).unwrap();
+        assert_eq!(fresh["projectRevision"], 8);
+        assert_eq!(fresh["cached"], false);
     }
 }

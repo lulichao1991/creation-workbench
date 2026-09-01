@@ -10,7 +10,7 @@ use crate::app_database::load_feature_flags;
 use crate::database::{new_id, now, open_database, row_to_json, AppResult};
 use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
 
-const CONTEXT_POLICY_VERSION: &str = "context-v3";
+pub(crate) const CONTEXT_POLICY_VERSION: &str = "context-v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
