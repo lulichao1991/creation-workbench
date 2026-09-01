@@ -13,10 +13,13 @@ test("creates an isolated real Pi SDK session without builtin tools", async () =
   try {
     const doctor = host.doctor();
     assert.equal(doctor.healthy, true);
+    assert.equal(doctor.agentHostHealthy, true);
+    assert.equal(doctor.modelRuntimeHealthy, true);
+    assert.equal(doctor.toolGatewayHealthy, false);
     assert.match(String(doctor.sdkVersion), /^0\.84\./);
     const created = await host.handle({ id: "create", type: "create_session", sessionId: "00000000-0000-4000-8000-000000000001" });
     assert.equal((created as Record<string, unknown>).runtimeSessionId, "00000000-0000-4000-8000-000000000001");
-    assert.equal(host.doctor().sessionCount, 1);
+    assert.deepEqual(host.doctor().sessionHealth, { active: 1, busy: 0 });
   } finally {
     host.dispose();
   }

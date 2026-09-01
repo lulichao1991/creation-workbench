@@ -12,7 +12,7 @@ process.stdin.on("data", (chunk) => {
     if (!line.trim()) continue;
     const request = JSON.parse(line);
     if (request.type === "doctor") {
-      write({ id: request.id, type: "response", success: true, result: { healthy: true, sdkVersion: "mock-sdk" } });
+      write({ id: request.id, type: "response", success: true, result: { healthy: true, agentHostHealthy: true, sdkVersion: "mock-sdk", modelRuntimeHealthy: true, providerCount: 1, modelCount: 1, providerAuth: [], sessionHealth: { active: 0, busy: 0 }, toolGatewayHealthy: true } });
     } else if (request.type === "create_session") {
       write({ id: request.id, type: "response", success: true, result: { runtimeSessionId: request.sessionId } });
     } else if (request.type === "send_message") {

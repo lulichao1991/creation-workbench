@@ -11,7 +11,7 @@
 - Rust + SQLite（rusqlite）
 - Zustand
 - Vitest
-- Pi SDK AgentSession（Beta 2 双 Runtime 迁移中）
+- Pi SDK AgentSession（内置 Agent Host）
 
 ## 开发
 
@@ -20,14 +20,7 @@ npm install
 npm run tauri dev
 ```
 
-开发期默认继续使用 legacy Pi CLI Runtime。要切换到 Pi SDK Agent Host：
-
-```powershell
-$env:WORKBENCH_AGENT_RUNTIME="pi_sdk"
-npm run tauri dev
-```
-
-`npm install` 会安装隔离在 `agent-host/` 下并固定为 `0.84.4` 的 Pi SDK；Agent Host 不加载用户 `~/.pi`、项目扩展、Skills 或 `AGENTS.md`。
+`npm install` 会安装隔离在 `agent-host/` 下并固定为 `0.84.4` 的 Pi SDK；开发与正式版都只使用内置 Agent Host，不加载用户 `~/.pi`、项目扩展、Skills 或 `AGENTS.md`。
 
 ## 验证
 
@@ -75,11 +68,9 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 
 ## V2 Goal14 Pi Runtime（0.2.0-alpha.2）
 
-- 业务层通过统一 `AgentRuntime` 契约使用 Runtime；Rust 端提供 `PiRuntimeAdapter`，前端冻结对应 TypeScript 类型；
-- Pi 以独立进程运行，使用 `pi --mode rpc --no-session --no-tools` 和严格 LF 分隔 JSONL 通信；
-- 支持文本增量事件、工具事件映射、追加输入、查询状态和 `abort` 取消；应用退出或取消超时会回收子进程；
-- Windows 测试覆盖 npm 常见 `.cmd` 入口、中文与空格路径、流式输出、取消和无孤儿进程；
-- 开发期从 PATH 查找 `pi`，也可通过 `PI_AGENT_CLI` 指定路径。当前 `agent_core` 开关仍默认关闭；模型配置、密钥读取和 Agent UI 属于后续 Goal。
+- 该阶段建立了统一 `AgentRuntime`、流式事件、追加输入、状态查询和取消契约；
+- 早期外部命令行原型已在 Beta 2 Goal33 完整删除，现由内置 Pi SDK Agent Host 实现同一契约；
+- 当前实现不读取系统 PATH 中的 Pi、Node 或 npm，也不暴露内置文件和 Shell 工具。
 
 ## V2 Goal15 上下文系统（0.2.0-alpha.3）
 
@@ -113,7 +104,7 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 所有现有工作区共用右侧主 Agent 面板；上下文条持续显示当前对象、模式、revision、写入范围和保护范围；
 - 会话历史和任务结果持久化，支持流式文本、专业 Agent 状态、任务停止，以及讨论、建议、编辑三种模式；讨论和建议模式在后端强制只读，即使模型违规返回 Patch 也不会落库；
 - AI Card、权限申请和 Patch 差异在对话内展示，可逐项选择、应用全部、拒绝或继续讨论；应用仍统一经过 Goal16 的权限、旧值和 stale 校验；
-- 未启用时显示本机 Pi / `PI_AGENT_CLI` 前置条件；用户显式启用后才打开 Agent 功能开关，不会自动安装 Runtime 或发送请求；
+- 未启用时说明 Pi SDK Agent Host 已内置；用户显式启用后才打开 Agent 功能开关，不会在启用前发送模型请求；
 - 面板支持收起并释放中央空间，已在真实 Windows Tauri 窗口中验证作品结构和资产工作区。
 
 ## V2 Goal19 分析本轮修改（0.2.0-alpha.7）
@@ -187,7 +178,7 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 
 - 新增独立 TypeScript `agent-host`，直接使用 Pi `ModelRuntime` 与真实 `AgentSession`，通过严格 LF-JSONL 与 Rust 通信，不开放本地 HTTP 端口。
 - Agent Host 使用独立系统数据目录和显式空资源加载器，不读取用户 Pi 环境或项目文件；默认禁用全部内置文件与 Shell 工具。
-- Rust 新增 `PiSdkRuntimeAdapter`，复用现有 Runtime 事件契约，并通过 `WORKBENCH_AGENT_RUNTIME=pi_sdk` 与 legacy Runtime 双轨迁移。
+- Rust 新增 `PiSdkRuntimeAdapter` 并复用现有 Runtime 事件契约；Goal33 已将其升级为唯一正式 Runtime。
 - 自动化覆盖真实 Pi SDK Session 创建、同一 Session 两轮上下文、Host Doctor、中文空格路径、流式事件以及前后端原有回归测试。
 
 ## V2 Beta 2 Goal27 MainAgentSession
@@ -235,3 +226,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 主 Agent 可设置默认 Provider、模型和 thinking level；编剧、导演、摄影、美术、关键帧和提示词六类专业 Agent 均可选择独立模型覆盖，未覆盖时沿用主 Agent。
 - 普通 MainAgentSession、单专业调用和专家团成员启动时均会解析应用设置；项目级专业覆盖仍保持最高优先级，任务记录实际使用的 Provider 与模型。
 - 自动化覆盖 ModelRuntime 模型/视觉能力枚举、API Key 登录与注销、非敏感设置持久化、专业覆盖解析，以及前端生产构建和完整回归测试。
+
+## V2 Beta 2 Goal33 移除外部 Runtime 依赖
+
+- 删除早期外部 Pi 命令行适配器、PATH 探测、运行参数和双 Runtime 环境开关；生产入口始终创建 `PiSdkRuntimeAdapter`，不存在回退到全局 Pi 的路径。
+- 正式 Windows 包携带私有 Node Runtime、Agent Host 构建产物、固定 Pi SDK 与全部生产依赖；目标电脑不需要安装 Pi、Node 或 npm。
+- Runtime 检测替换为 Agent Host Doctor，统一显示 Pi SDK 版本、ModelRuntime 状态、Provider 登录数、Session 健康和 Tool Gateway 健康。
+- 应用启动时从 Tauri `resource_dir` 解析私有 Runtime 与 Host 脚本；开发测试仍可显式指定 Host fixture，但正式包不会执行系统 Shell 或 PATH 查找。
+- 自动化覆盖私有 Runtime 路径解析、Agent Host Doctor、Provider/模型状态、Session 状态、Tool Gateway 状态及完整前后端回归测试。

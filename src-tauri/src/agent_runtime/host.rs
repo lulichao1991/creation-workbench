@@ -171,6 +171,20 @@ impl PiSdkRuntimeAdapter {
         }
     }
 
+    pub(crate) fn for_resource_dir(resource_dir: PathBuf) -> Self {
+        let bundled = bundled_host_command(&resource_dir);
+        if bundled.program.is_file()
+            && bundled
+                .args
+                .first()
+                .is_some_and(|script| PathBuf::from(script).is_file())
+        {
+            Self::new(bundled)
+        } else {
+            Self::default()
+        }
+    }
+
     fn process(&mut self) -> AppResult<&HostProcess> {
         if self.process.is_none() {
             self.process = Some(HostProcess::spawn(&self.command)?);
@@ -359,6 +373,12 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
         Ok(())
     }
 
+    fn doctor(&mut self) -> AppResult<RuntimeDiagnostics> {
+        let value = self.process()?.request("doctor", json!({}))?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("解析 Agent Host Doctor 失败：{error}"))
+    }
+
     fn dispose(&mut self) -> AppResult<()> {
         if let Some(mut process) = self.process.take() {
             process.shutdown();
@@ -371,51 +391,6 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
 impl Drop for PiSdkRuntimeAdapter {
     fn drop(&mut self) {
         let _ = self.dispose();
-    }
-}
-
-pub fn diagnose_pi_sdk_host() -> RuntimeDiagnostics {
-    let command = resolve_host_command();
-    match HostProcess::spawn(&command) {
-        Ok(mut process) => {
-            let result = process.request("doctor", json!({}));
-            process.shutdown();
-            match result {
-                Ok(value) => RuntimeDiagnostics {
-                    found: true,
-                    executable_path: Some(command.display),
-                    version: value
-                        .get("sdkVersion")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    rpc_handshake: value.get("healthy").and_then(Value::as_bool) == Some(true),
-                    current_provider: None,
-                    current_model: None,
-                    supports_vision: None,
-                    error: None,
-                },
-                Err(error) => RuntimeDiagnostics {
-                    found: true,
-                    executable_path: Some(command.display),
-                    version: None,
-                    rpc_handshake: false,
-                    current_provider: None,
-                    current_model: None,
-                    supports_vision: None,
-                    error: Some(error),
-                },
-            }
-        }
-        Err(error) => RuntimeDiagnostics {
-            found: false,
-            executable_path: Some(command.display),
-            version: None,
-            rpc_handshake: false,
-            current_provider: None,
-            current_model: None,
-            supports_vision: None,
-            error: Some(error),
-        },
     }
 }
 
@@ -495,6 +470,10 @@ fn handle_host_message(
                 .unwrap_or_default()
                 .into(),
             result: value.get("result").cloned().unwrap_or(Value::Null),
+        },
+        "usage_updated" => RuntimeEvent::UsageUpdated {
+            task_id: task_id.into(),
+            usage: value.get("usage").cloned().unwrap_or(Value::Null),
         },
         "task_completed" => {
             task.state = RuntimeTaskState::Completed;
@@ -633,6 +612,17 @@ fn resolve_host_command() -> HostCommand {
     command_for_path(script)
 }
 
+fn bundled_host_command(resource_dir: &std::path::Path) -> HostCommand {
+    let host_dir = resource_dir.join("agent-host");
+    let program = host_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
+    let script = host_dir.join("dist").join("index.js");
+    HostCommand {
+        display: format!("{} {}", program.display(), script.display()),
+        program,
+        args: vec![script.to_string_lossy().into_owned()],
+    }
+}
+
 fn command_for_path(path: PathBuf) -> HostCommand {
     if matches!(
         path.extension().and_then(|value| value.to_str()),
@@ -680,6 +670,19 @@ mod tests {
         let command = command_for_path(PathBuf::from(r"C:\含中文 空格\host.js"));
         assert_eq!(command.program, PathBuf::from("node"));
         assert_eq!(command.args, vec![r"C:\含中文 空格\host.js"]);
+    }
+
+    #[test]
+    fn bundled_host_uses_private_node_runtime_and_resource_script() {
+        let command = bundled_host_command(std::path::Path::new(r"C:\portable\resources"));
+        assert_eq!(
+            command.program,
+            PathBuf::from(r"C:\portable\resources\agent-host\node.exe")
+        );
+        assert_eq!(
+            command.args,
+            vec![r"C:\portable\resources\agent-host\dist\index.js"]
+        );
     }
 
     #[test]

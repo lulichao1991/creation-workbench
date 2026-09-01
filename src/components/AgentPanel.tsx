@@ -556,9 +556,9 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         <button className="primary full" disabled={working} onClick={() => void enableAgent()}>
           {working ? "正在启用…" : "启用 Agent"}
         </button>
-        <small>需要本机安装 Pi，或通过 PI_AGENT_CLI 指定 Runtime。</small>
-        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测 Pi Runtime"}</button>
-        {runtimeDiagnostics && <small>{runtimeDiagnostics.rpcHandshake ? `RPC 正常 · ${runtimeDiagnostics.currentProvider ?? "默认 Provider"} / ${runtimeDiagnostics.currentModel ?? "默认模型"}${runtimeDiagnostics.supportsVision ? " · 支持视觉" : ""}` : runtimeDiagnostics.error}</small>}
+        <small>Pi SDK Agent Host 已随工作台内置；启用后可直接配置 Provider 与模型。</small>
+        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测 Agent Host"}</button>
+        {runtimeDiagnostics && <small>{runtimeDiagnostics.healthy ? `Agent Host 正常 · Pi SDK ${runtimeDiagnostics.sdkVersion ?? "未知"} · ${runtimeDiagnostics.modelCount} 个模型` : runtimeDiagnostics.error}</small>}
       </div>
     );
   }
@@ -602,6 +602,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "Runtime 检测"}</button>}
       </section>
       {runtimeDiagnostics?.error && <p className="agent-runtime-error"><AlertTriangle size={12} />{runtimeDiagnostics.error}</p>}
+      {runtimeDiagnostics?.healthy && <p className="agent-runtime-ok">Pi SDK {runtimeDiagnostics.sdkVersion} · ModelRuntime {runtimeDiagnostics.modelRuntimeHealthy ? "正常" : "异常"} · Provider 已登录 {runtimeDiagnostics.providerAuth.filter((item) => item.configured).length}/{runtimeDiagnostics.providerCount} · Session {runtimeDiagnostics.sessionHealth.active} · Tool Gateway {runtimeDiagnostics.toolGatewayHealthy ? "正常" : "异常"}</p>}
 
       <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>
@@ -676,7 +677,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         )}
         {Boolean(activeTask?.error) && (
           <p className="agent-runtime-error" role="alert">
-            <AlertTriangle size={13} />{taskErrorMessage(activeTask?.error)} 请检查本机 Pi 或 PI_AGENT_CLI 配置后重试。
+            <AlertTriangle size={13} />{taskErrorMessage(activeTask?.error)} 请在 AI 模型设置中检查 Provider 登录与模型配置后重试。
           </p>
         )}
         {activeTask?.status === "stale" && (
@@ -769,7 +770,7 @@ function ExpertTeamView({ consultation, disabled, onConfirm, onCancel }: {
         <>
           <section className="expert-team-application">
             <strong>会诊申请</strong>
-            <small>每位专家获得独立 ContextPackage，并且互不查看彼此意见。</small>
+            <small>每位专家使用独立 Pi AgentSession 按需读取事实，并且互不查看彼此意见。</small>
           </section>
           <section className="expert-team-cost">
             <Coins size={13} />

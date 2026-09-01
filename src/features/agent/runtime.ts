@@ -23,13 +23,16 @@ export interface RuntimeTaskHandle {
 }
 
 export interface RuntimeDiagnostics {
-  found: boolean;
-  executablePath: string | null;
-  version: string | null;
-  rpcHandshake: boolean;
-  currentProvider: string | null;
-  currentModel: string | null;
-  supportsVision: boolean | null;
+  healthy: boolean;
+  agentHostHealthy: boolean;
+  sdkVersion: string | null;
+  modelRuntimeHealthy: boolean;
+  modelRuntimeError: string | null;
+  providerCount: number;
+  modelCount: number;
+  providerAuth: Array<{ providerId: string; configured: boolean; source: string | null; label: string | null }>;
+  sessionHealth: { active: number; busy: number };
+  toolGatewayHealthy: boolean;
   error: string | null;
 }
 

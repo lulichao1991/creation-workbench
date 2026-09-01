@@ -1,7 +1,7 @@
 use crate::agent_models::model_choice_for_role;
 use crate::agent_runtime::{
-    ensure_agent_core_enabled, use_pi_sdk_runtime, RuntimeAttachment, RuntimeEvent,
-    RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
+    ensure_agent_core_enabled, RuntimeAttachment, RuntimeEvent, RuntimeEventSink, RuntimeState,
+    RuntimeTaskInput, RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
@@ -361,14 +361,19 @@ pub fn agent_send_message(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
-    let global_memories = if (!use_pi_sdk_runtime() || input.mode == "change_analysis")
+    let global_memories = if input.mode == "change_analysis"
         && load_feature_flags(&app_data_dir)?.get("memory") == Some(&true)
     {
         Some(active_global_memories(&app_data_dir)?)
     } else {
         None
     };
-    let prepared = prepare_task(Path::new(&project_path), input, global_memories.as_deref())?;
+    let prepared = prepare_task_for_runtime(
+        Path::new(&project_path),
+        input,
+        global_memories.as_deref(),
+        true,
+    )?;
     let role = prepared
         .dispatch
         .route
@@ -380,18 +385,16 @@ pub fn agent_send_message(
     let Some(mut runtime_input) = prepared.runtime_input else {
         return Ok(prepared.dispatch);
     };
-    if use_pi_sdk_runtime() {
-        let choice = model_choice_for_role(&app_data_dir, &role)?;
-        runtime_input.provider = runtime_input.provider.or(choice.provider);
-        runtime_input.model = runtime_input.model.or(choice.model);
-        runtime_input.thinking_level = runtime_input.thinking_level.or(choice.thinking_level);
-        open_database(Path::new(&project_path))?
-            .execute(
-                "UPDATE agent_tasks SET model_provider=?1, model_name=?2 WHERE id=?3",
-                params![runtime_input.provider, runtime_input.model, task_id],
-            )
-            .map_err(|error| error.to_string())?;
-    }
+    let choice = model_choice_for_role(&app_data_dir, &role)?;
+    runtime_input.provider = runtime_input.provider.or(choice.provider);
+    runtime_input.model = runtime_input.model.or(choice.model);
+    runtime_input.thinking_level = runtime_input.thinking_level.or(choice.thinking_level);
+    open_database(Path::new(&project_path))?
+        .execute(
+            "UPDATE agent_tasks SET model_provider=?1, model_name=?2 WHERE id=?3",
+            params![runtime_input.provider, runtime_input.model, task_id],
+        )
+        .map_err(|error| error.to_string())?;
     runtime_input.project_path = Some(project_path.clone());
     runtime_input.app_data_dir = Some(app_data_dir.to_string_lossy().into_owned());
     let buffer = Arc::new(Mutex::new(String::new()));
@@ -741,12 +744,13 @@ fn update_session_status(
     load_session(&conn, session_id)
 }
 
+#[cfg(test)]
 fn prepare_task(
     project_path: &Path,
     input: SendMessageInput,
     global_memories: Option<&[MemoryContextEntry]>,
 ) -> AppResult<PreparedTask> {
-    prepare_task_for_runtime(project_path, input, global_memories, use_pi_sdk_runtime())
+    prepare_task_for_runtime(project_path, input, global_memories, false)
 }
 
 fn prepare_task_for_runtime(

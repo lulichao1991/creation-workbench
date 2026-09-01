@@ -67,8 +67,11 @@ pub fn run() {
             let app_data_dir = tauri::Manager::path(app)
                 .app_data_dir()
                 .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+            let resource_dir = tauri::Manager::path(app)
+                .resource_dir()
+                .map_err(|e| format!("读取应用资源目录失败：{e}"))?;
             app_database::initialize_app_database(&app_data_dir)?;
-            app.manage(RuntimeState::default());
+            app.manage(RuntimeState::for_resource_dir(resource_dir));
             app.manage(ImageGenerationState::default());
             Ok(())
         })

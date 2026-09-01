@@ -5,13 +5,12 @@ use crate::agent_application::{
 use crate::agent_gateway::{expert_tool_names, professional_system_prompt};
 use crate::agent_models::model_choice_for_role;
 use crate::agent_runtime::{
-    use_pi_sdk_runtime, RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput,
-    RUNTIME_EVENT_NAME,
+    RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
 use crate::database::{now, open_database, AppResult};
-use crate::memory::{active_global_memories, MemoryContextEntry};
+use crate::memory::MemoryContextEntry;
 use crate::permission::WriteScope;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -132,15 +131,13 @@ pub fn expert_team_request(
     mut input: RequestExpertTeamInput,
 ) -> AppResult<ExpertTeamConsultation> {
     ensure_expert_team_enabled(&app)?;
-    if use_pi_sdk_runtime() {
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
-        let choice = model_choice_for_role(&app_data_dir, "main")?;
-        input.provider = input.provider.or(choice.provider);
-        input.model = input.model.or(choice.model);
-    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    let choice = model_choice_for_role(&app_data_dir, "main")?;
+    input.provider = input.provider.or(choice.provider);
+    input.model = input.model.or(choice.model);
     request_consultation(Path::new(&project_path), input)
 }
 
@@ -156,24 +153,18 @@ pub fn expert_team_confirm(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
-    let memories = if !use_pi_sdk_runtime()
-        && load_feature_flags(&app_data_dir)?.get("memory") == Some(&true)
-    {
-        Some(active_global_memories(&app_data_dir)?)
-    } else {
-        None
-    };
     let event_app = app.clone();
     let emitter: EventEmitter = Arc::new(move |event| {
         let _ = event_app.emit(RUNTIME_EVENT_NAME, event);
     });
-    confirm_consultation(
+    confirm_consultation_for_runtime(
         Path::new(&project_path),
         input,
-        memories.as_deref(),
+        None,
         Some(&app_data_dir),
         runtime.inner().clone(),
         Some(emitter),
+        true,
     )
 }
 
@@ -315,6 +306,7 @@ fn request_consultation(
     load_consultation(&conn, &input.request_id)
 }
 
+#[cfg(test)]
 fn confirm_consultation(
     project_path: &Path,
     input: ConfirmExpertTeamInput,
@@ -330,7 +322,7 @@ fn confirm_consultation(
         app_data_dir,
         runtime,
         emitter,
-        use_pi_sdk_runtime(),
+        false,
     )
 }
 

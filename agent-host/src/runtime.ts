@@ -52,6 +52,7 @@ export class WorkbenchAgentHost {
     private readonly modelRuntime: ModelRuntime,
     private readonly emit: Emit,
     private readonly gateway: ToolGateway,
+    private readonly toolGatewayHealthy: boolean,
   ) {}
 
   static async create(
@@ -70,16 +71,29 @@ export class WorkbenchAgentHost {
       refreshOnCreate: false,
     });
     configureRuntime?.(modelRuntime);
-    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit, gateway);
+    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit, gateway, gateway !== unavailableGateway);
   }
 
   doctor(): Record<string, unknown> {
+    const providers = this.modelRuntime.getProviders();
+    const models = this.modelRuntime.getModels();
     return {
       healthy: true,
+      agentHostHealthy: true,
       sdkVersion: this.sdkVersion,
-      providerCount: this.modelRuntime.getProviders().length,
-      modelCount: this.modelRuntime.getModels().length,
-      sessionCount: this.sessions.size,
+      modelRuntimeHealthy: !this.modelRuntime.getError() && providers.length > 0 && models.length > 0,
+      modelRuntimeError: this.modelRuntime.getError(),
+      providerCount: providers.length,
+      modelCount: models.length,
+      providerAuth: providers.map((provider) => ({
+        providerId: provider.id,
+        ...this.modelRuntime.getProviderAuthStatus(provider.id),
+      })),
+      sessionHealth: {
+        active: this.sessions.size,
+        busy: [...this.sessions.values()].filter((entry) => entry.activeTaskId).length,
+      },
+      toolGatewayHealthy: this.toolGatewayHealthy,
     };
   }
 

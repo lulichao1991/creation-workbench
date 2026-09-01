@@ -218,6 +218,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .agent-model-overrides > strong { font-size: 8px; }
 .agent-model-override { display: grid; grid-template-columns: 68px minmax(0,1fr) 78px; align-items: center; gap: 5px; color: var(--muted); font-size: 8px; }
 .agent-model-save { justify-self: end; }
+.agent-runtime-ok { margin: 0; padding: 5px 9px; color: var(--success); background: color-mix(in srgb, var(--success) 8%, transparent); font-size: 8px; }
 .agent-context-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
 .agent-context-strip > div { min-width: 0; display: grid; gap: 3px; padding: 8px 10px; background: var(--surface-2); }
 .agent-context-strip > div:first-child { grid-column: 1/-1; }

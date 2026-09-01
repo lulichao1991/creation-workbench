@@ -7,7 +7,7 @@
     "postinstall": "npm --prefix agent-host install --ignore-scripts",
     "dev": "vite",
     "build": "npm run build:agent-host && tsc && vite build",
-    "build:agent-host": "npm --prefix agent-host run build",
+    "build:agent-host": "npm --prefix agent-host run build && node scripts/prepare-agent-host-runtime.mjs",
     "test": "vitest run",
     "test:agent-host": "npm --prefix agent-host run check",
     "test:all": "npm test && npm run test:agent-host",

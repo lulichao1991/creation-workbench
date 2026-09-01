@@ -19,7 +19,7 @@
 | 11 快照 | 完成 | JSON 快照创建、内容统计查看和完整恢复；`snapshot_restores_business_state` |
 | 12 整体 Review | 完成 | Rust、TypeScript、Vitest、Clippy、桌面可视化与 NSIS 发布构建全部通过 |
 | 13 V2 工程基础 | 完成 | `app.db` V1 与备份迁移；8 个默认关闭的 feature flags；`project.db` V4 Agent 核心表；项目复制隔离 Agent 数据；Agent / Context / Memory / Permission 契约目录；开始拆分 Workbench；V1 端到端回归通过 |
-| 14 Pi Runtime 接入 | 完成 | Rust `AgentRuntime` 与 `PiRuntimeAdapter`；TypeScript Runtime 契约；Pi 官方 RPC JSONL；流式文本和工具事件；追加输入、状态与取消；MockRuntime；Windows `.cmd`、中文空格路径和子进程回收验证 |
+| 14 Pi Runtime 接入 | 完成 | Rust `AgentRuntime` 与 TypeScript Runtime 契约；流式文本、工具、追加输入、状态与取消；早期外部命令行原型已由 Goal33 的内置 Pi SDK Agent Host 取代 |
 | 15 上下文系统 | 完成 | SelectionSnapshot / ContextPolicy / ContextPackage；字段级中心事实；父链、邻居、Relation 与镜头资产结构查询；FTS5；token budget；稳定 checksum；revision 校验和事务快照；V4 持久化 |
 | 16 权限、修改提案与 AI 卡片 | 完成 | WriteScope / ProtectedScope 权限判断；Patch old/new 差异；权限卡；revision、旧值、对象与权限变化 stale 校验；一次性批准；同事务批量 Mutation 与 Agent ChangeSet；9 个权限安全测试 |
 | 17 主 Agent 与单专业 Agent | 完成 | MainAgent 应用服务；IntentResolver；ExpertRegistry / ExpertRouter；六类专家配置；会话/任务持久化；Context/Pi/Patch 串联；统一结构化输出；固定路由测试与含糊澄清 |
@@ -84,9 +84,9 @@ V1 `0.1.2` 不包含 Pi Agent、主 Agent、专业 Agent、专家团、记忆、
 
 ## V2 Goal14 说明
 
-Pi Runtime 采用官方 headless RPC 模式，通过 stdin/stdout 严格 JSONL 通信。适配器每个任务使用独立进程，启动参数固定为 `--mode rpc --no-session --no-tools`，因此当前只消费显式传入的只读上下文，不暴露文件写入工具。支持 `prompt`、流式 `message_update/text_delta`、工具事件、`abort` 和 `agent_end`，并将其转换为工作台统一事件。
+Goal14 建立的 Runtime 契约现由 Beta 2 内置 Pi SDK Agent Host 实现。Host 通过 stdin/stdout 严格 LF-JSONL 与 Rust 通信，支持流式文本、工具事件、追加输入、取消、Session 恢复和终态回收；默认不注册文件写入或 Shell 工具。
 
-开发环境从 PATH 查找 `pi`，或读取 `PI_AGENT_CLI`。Windows 会解析 npm 安装产生的 `pi.cmd`，测试固定覆盖中文和空格路径；取消 500ms 后仍未退出会强制回收，Runtime Drop 也会清理全部子进程。当前本机未安装真实 Pi、未配置 Provider/API Key，验收使用遵循同一官方协议的 sidecar fixture 与 MockRuntime，不把任何密钥或未知 Pi API 写入业务层。自动化现为前端 6 项、Rust 19 项。
+Goal33 已删除早期外部命令行实现和系统 PATH 依赖。正式 Windows 包携带私有 Node Runtime、固定 Pi SDK、Agent Host 与生产依赖；模型凭据统一由工作台 UI 和 Pi ModelRuntime 管理。
 
 ## V2 Goal15 说明
 

@@ -41,24 +41,43 @@ pub struct RuntimeAttachment {
     pub data: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskHandle {
     pub task_id: String,
     pub runtime_session_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
-    pub found: bool,
-    pub executable_path: Option<String>,
-    pub version: Option<String>,
-    pub rpc_handshake: bool,
-    pub current_provider: Option<String>,
-    pub current_model: Option<String>,
-    pub supports_vision: Option<bool>,
+    pub healthy: bool,
+    pub agent_host_healthy: bool,
+    pub sdk_version: Option<String>,
+    pub model_runtime_healthy: bool,
+    pub model_runtime_error: Option<String>,
+    pub provider_count: usize,
+    pub model_count: usize,
+    pub provider_auth: Vec<ProviderAuthDiagnostic>,
+    pub session_health: SessionHealthDiagnostic,
+    pub tool_gateway_healthy: bool,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAuthDiagnostic {
+    pub provider_id: String,
+    pub configured: bool,
+    pub source: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHealthDiagnostic {
+    pub active: usize,
+    pub busy: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -159,6 +178,9 @@ pub trait AgentRuntime: Send {
     }
     fn logout_provider(&mut self, _provider_id: &str) -> AppResult<()> {
         Err("当前 Runtime 不支持应用内 Provider 注销".into())
+    }
+    fn doctor(&mut self) -> AppResult<RuntimeDiagnostics> {
+        Err("当前 Runtime 不支持 Agent Host Doctor".into())
     }
     fn dispose(&mut self) -> AppResult<()>;
 }
