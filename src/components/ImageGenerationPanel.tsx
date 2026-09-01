@@ -124,12 +124,16 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
 
   const generate = async () => {
     if (!selectedProvider || !prompt.trim()) return;
+    const canUseReferences = selectedProvider.allowImageUpload && selectedProvider.capabilities.referenceImages;
+    if (referenceImages.length > 0 && !canUseReferences) {
+      onError(new Error("当前 Provider 未启用参考图上传；请在 Provider 配置中明确允许后再生成。"));
+      return;
+    }
     if (!confirmingGeneration) {
       setConfirmingGeneration(true);
       return;
     }
     setConfirmingGeneration(false);
-    const canUseReferences = selectedProvider.allowImageUpload && selectedProvider.capabilities.referenceImages;
     try {
       await api.imageGenerate(projectPath, {
         requestId: crypto.randomUUID(),
@@ -138,7 +142,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
         providerId: selectedProvider.id,
         model: selectedProvider.defaultModel,
         prompt: prompt.trim(),
-        referenceImages: canUseReferences ? referenceImages : [],
+        referenceImages,
         options,
       });
       await refresh();
@@ -188,6 +192,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
           <label>Base URL<input value={providerForm.baseUrl} onChange={(event) => setProviderForm({ ...providerForm, baseUrl: event.target.value })} /></label>
           <label>默认模型<input value={providerForm.defaultModel} onChange={(event) => setProviderForm({ ...providerForm, defaultModel: event.target.value })} /></label>
           {providerForm.providerType !== "mock" && <label>API Key<input type="password" autoComplete="off" value={providerForm.apiKey ?? ""} placeholder="不会写入项目数据库" onChange={(event) => setProviderForm({ ...providerForm, apiKey: event.target.value })} /></label>}
+          {providerForm.providerType !== "mock" && <label><input type="checkbox" checked={providerForm.allowImageUpload ?? false} onChange={(event) => setProviderForm({ ...providerForm, allowImageUpload: event.target.checked })} /> 允许向该 Provider 上传项目参考图</label>}
           <button className="secondary" disabled={saving || !providerForm.displayName.trim() || !providerForm.defaultModel.trim()} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存 Provider"}</button>
         </div>
       </details>
@@ -197,8 +202,8 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
         <label>尺寸<select value={options.size} onChange={(event) => setOptions({ ...options, size: event.target.value as ImageOptions["size"] })}><option value="1024x1024">方形 1024</option><option value="1024x1536">竖版 2:3</option><option value="1536x1024">横版 3:2</option></select></label>
         <label>质量<select value={options.quality} onChange={(event) => setOptions({ ...options, quality: event.target.value })}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
         <label>数量<select value={options.count} onChange={(event) => setOptions({ ...options, count: Number(event.target.value) })}>{[1, 2, 3, 4].map((count) => <option value={count} key={count}>{count} 张</option>)}</select></label>
-        <div className="cost-notice">{selectedProvider && generationCostNotice(selectedProvider, options)}{referenceImages.length > 0 && <small>{selectedProvider?.capabilities.referenceImages ? ` · ${referenceImages.length} 张正式参考图` : " · 当前 Provider 不支持参考图，按纯文本生成"}</small>}</div>
-        <button className="primary" disabled={!selectedProvider || !prompt.trim() || hasActiveJob} onClick={() => void generate()}>{hasActiveJob ? "正在生成…" : confirmingGeneration ? "再次点击，确认生成" : "确认参数并生成候选"}</button>
+        <div className="cost-notice">{selectedProvider && generationCostNotice(selectedProvider, options)}{referenceImages.length > 0 && <small>{selectedProvider?.capabilities.referenceImages ? ` · 将上传 ${referenceImages.length} 张正式参考图` : " · 当前 Provider 未启用参考图上传"}</small>}</div>
+        <button className="primary" disabled={!selectedProvider || !prompt.trim() || hasActiveJob || (referenceImages.length > 0 && !selectedProvider?.capabilities.referenceImages)} onClick={() => void generate()}>{hasActiveJob ? "正在生成…" : confirmingGeneration ? "再次点击，确认生成" : "确认参数并生成候选"}</button>
         {confirmingGeneration && <button className="ghost generation-confirm-cancel" onClick={() => setConfirmingGeneration(false)}>取消</button>}
       </div>}
 

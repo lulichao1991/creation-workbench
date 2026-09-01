@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,10 +9,11 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::runtime::{
-    AgentRuntime, RuntimeEvent, RuntimeEventSink, RuntimeTaskHandle, RuntimeTaskInput,
-    RuntimeTaskState,
+    AgentRuntime, RuntimeAttachment, RuntimeDiagnostics, RuntimeEvent, RuntimeEventSink,
+    RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState,
 };
 use crate::database::{new_id, AppResult};
+use base64::Engine;
 
 struct PiTaskProcess {
     command_tx: mpsc::Sender<Value>,
@@ -22,12 +23,19 @@ struct PiTaskProcess {
     exited: Arc<AtomicBool>,
     reader: JoinHandle<()>,
     writer: JoinHandle<()>,
+    stderr_reader: JoinHandle<()>,
+}
+
+struct PendingVisualPrompt {
+    capability_request_id: String,
+    prompt_command: Value,
 }
 
 pub struct PiRuntimeAdapter {
     executable: PathBuf,
     prefix_args: Vec<String>,
     tasks: HashMap<String, PiTaskProcess>,
+    terminal_states: HashMap<String, RuntimeTaskState>,
 }
 
 impl Default for PiRuntimeAdapter {
@@ -48,6 +56,31 @@ impl PiRuntimeAdapter {
             executable,
             prefix_args,
             tasks: HashMap::new(),
+            terminal_states: HashMap::new(),
+        }
+    }
+
+    fn cleanup_terminal_tasks(&mut self) {
+        let completed = self
+            .tasks
+            .iter()
+            .filter(|(_, task)| task.exited.load(Ordering::Acquire))
+            .map(|(task_id, _)| task_id.clone())
+            .collect::<Vec<_>>();
+        for task_id in completed {
+            let Some(task) = self.tasks.remove(&task_id) else {
+                continue;
+            };
+            let state = task
+                .state
+                .lock()
+                .map(|state| state.clone())
+                .unwrap_or(RuntimeTaskState::Failed);
+            drop(task.command_tx);
+            let _ = task.writer.join();
+            let _ = task.reader.join();
+            let _ = task.stderr_reader.join();
+            self.terminal_states.insert(task_id, state);
         }
     }
 
@@ -67,11 +100,12 @@ impl AgentRuntime for PiRuntimeAdapter {
         input: RuntimeTaskInput,
         event_sink: RuntimeEventSink,
     ) -> AppResult<RuntimeTaskHandle> {
+        self.cleanup_terminal_tasks();
         if input.prompt.trim().is_empty() {
             return Err("Agent 任务内容不能为空".into());
         }
         let task_id = input.task_id.unwrap_or_else(new_id);
-        if self.tasks.contains_key(&task_id) {
+        if self.tasks.contains_key(&task_id) || self.terminal_states.contains_key(&task_id) {
             return Err(format!("Agent 任务已存在：{task_id}"));
         }
         if let Some(provider) = input.provider.as_deref() {
@@ -80,6 +114,8 @@ impl AgentRuntime for PiRuntimeAdapter {
         if let Some(model) = input.model.as_deref() {
             validate_cli_selector("模型", model)?;
         }
+        validate_attachments(&input.attachments)?;
+        let prompt_command = prompt_command(&task_id, &input.prompt, &input.attachments);
 
         let mut command = Command::new(&self.executable);
         command
@@ -87,7 +123,7 @@ impl AgentRuntime for PiRuntimeAdapter {
             .args(["--mode", "rpc", "--no-session", "--no-tools"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         if let Some(provider) = input.provider.as_deref() {
             command.args(["--provider", provider]);
         }
@@ -107,15 +143,20 @@ impl AgentRuntime for PiRuntimeAdapter {
             let _ = child.wait();
             return Err("Pi Runtime stdout 不可用".into());
         };
-        if let Err(error) = write_jsonl(
-            &mut stdin,
-            &json!({ "id": task_id, "type": "prompt", "message": input.prompt }),
-        ) {
+        let Some(mut stderr) = child.stderr.take() else {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(error);
-        }
-
+            return Err("Pi Runtime stderr 不可用".into());
+        };
+        let stderr_text = Arc::new(Mutex::new(String::new()));
+        let stderr_target = Arc::clone(&stderr_text);
+        let stderr_reader = thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            if let Ok(mut target) = stderr_target.lock() {
+                *target = text;
+            }
+        });
         let child = Arc::new(Mutex::new(child));
         let state = Arc::new(Mutex::new(RuntimeTaskState::Running));
         let exited = Arc::new(AtomicBool::new(false));
@@ -128,6 +169,22 @@ impl AgentRuntime for PiRuntimeAdapter {
             }
         });
 
+        let pending_visual_prompt = if input.attachments.is_empty() {
+            command_tx
+                .send(prompt_command)
+                .map_err(|_| "Pi Runtime 已停止".to_string())?;
+            None
+        } else {
+            let capability_request_id = format!("capabilities-{task_id}");
+            command_tx
+                .send(json!({ "id": capability_request_id, "type": "get_state" }))
+                .map_err(|_| "Pi Runtime 已停止".to_string())?;
+            Some(PendingVisualPrompt {
+                capability_request_id,
+                prompt_command,
+            })
+        };
+
         event_sink(RuntimeEvent::TaskStarted {
             task_id: task_id.clone(),
         });
@@ -136,8 +193,18 @@ impl AgentRuntime for PiRuntimeAdapter {
         let reader_child = Arc::clone(&child);
         let reader_exited = Arc::clone(&exited);
         let reader_sink = Arc::clone(&event_sink);
+        let reader_command_tx = command_tx.clone();
+        let reader_stderr = Arc::clone(&stderr_text);
         let reader = thread::spawn(move || {
-            read_pi_events(stdout, &reader_task_id, &reader_state, &reader_sink);
+            read_pi_events(
+                stdout,
+                &reader_task_id,
+                &reader_state,
+                &reader_sink,
+                &reader_command_tx,
+                pending_visual_prompt,
+                &reader_stderr,
+            );
             terminate_child(&reader_child);
             reader_exited.store(true, Ordering::Release);
         });
@@ -152,12 +219,14 @@ impl AgentRuntime for PiRuntimeAdapter {
                 exited,
                 reader,
                 writer,
+                stderr_reader,
             },
         );
         Ok(RuntimeTaskHandle { task_id })
     }
 
     fn send_user_input(&mut self, task_id: &str, input: String) -> AppResult<()> {
+        self.cleanup_terminal_tasks();
         if input.trim().is_empty() {
             return Err("追加输入不能为空".into());
         }
@@ -171,6 +240,10 @@ impl AgentRuntime for PiRuntimeAdapter {
     }
 
     fn cancel_task(&mut self, task_id: &str) -> AppResult<()> {
+        self.cleanup_terminal_tasks();
+        if self.terminal_states.contains_key(task_id) {
+            return Ok(());
+        }
         let task = self
             .tasks
             .get(task_id)
@@ -201,13 +274,17 @@ impl AgentRuntime for PiRuntimeAdapter {
     }
 
     fn get_task_state(&self, task_id: &str) -> AppResult<RuntimeTaskState> {
-        self.tasks
+        if let Some(task) = self.tasks.get(task_id) {
+            return task
+                .state
+                .lock()
+                .map(|state| state.clone())
+                .map_err(|_| "任务状态锁损坏".into());
+        }
+        self.terminal_states
             .get(task_id)
-            .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?
-            .state
-            .lock()
-            .map(|state| state.clone())
-            .map_err(|_| "任务状态锁损坏".into())
+            .cloned()
+            .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))
     }
 
     fn dispose(&mut self) -> AppResult<()> {
@@ -216,7 +293,9 @@ impl AgentRuntime for PiRuntimeAdapter {
             drop(task.command_tx);
             let _ = task.writer.join();
             let _ = task.reader.join();
+            let _ = task.stderr_reader.join();
         }
+        self.terminal_states.clear();
         Ok(())
     }
 }
@@ -224,6 +303,133 @@ impl AgentRuntime for PiRuntimeAdapter {
 impl Drop for PiRuntimeAdapter {
     fn drop(&mut self) {
         let _ = self.dispose();
+    }
+}
+
+pub(crate) fn diagnose_pi_runtime() -> RuntimeDiagnostics {
+    let configured = std::env::var_os("PI_AGENT_CLI").map(PathBuf::from);
+    let path = configured.or_else(find_pi_on_path);
+    let Some(path) = path else {
+        return RuntimeDiagnostics {
+            found: false,
+            executable_path: None,
+            version: None,
+            rpc_handshake: false,
+            current_provider: None,
+            current_model: None,
+            supports_vision: None,
+            error: Some("未找到 Pi；请安装 Pi 或设置 PI_AGENT_CLI".into()),
+        };
+    };
+    diagnose_pi_runtime_at(path)
+}
+
+fn diagnose_pi_runtime_at(path: PathBuf) -> RuntimeDiagnostics {
+    let display_path = path.to_string_lossy().into_owned();
+    let (executable, prefix_args) = process_command(path);
+    let version = Command::new(&executable)
+        .args(&prefix_args)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| {
+            let text = if output.stdout.is_empty() {
+                String::from_utf8_lossy(&output.stderr).trim().to_string()
+            } else {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            };
+            (!text.is_empty()).then_some(text)
+        });
+    let mut command = Command::new(&executable);
+    command
+        .args(&prefix_args)
+        .args(["--mode", "rpc", "--no-session", "--no-tools"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return RuntimeDiagnostics {
+                found: true,
+                executable_path: Some(display_path),
+                version,
+                rpc_handshake: false,
+                current_provider: None,
+                current_model: None,
+                supports_vision: None,
+                error: Some(format!("无法启动 Pi RPC：{error}")),
+            }
+        }
+    };
+    let result = (|| -> AppResult<Value> {
+        let mut stdin = child.stdin.take().ok_or("Pi Runtime stdin 不可用")?;
+        let stdout = child.stdout.take().ok_or("Pi Runtime stdout 不可用")?;
+        write_jsonl(
+            &mut stdin,
+            &json!({ "id": "runtime-doctor", "type": "get_state" }),
+        )?;
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            let _ = BufReader::new(stdout).read_line(&mut line);
+            let _ = tx.send(line);
+        });
+        let line = rx
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| "Pi RPC 握手超时".to_string())?;
+        serde_json::from_str(line.trim()).map_err(|e| format!("Pi RPC 返回无效 JSON：{e}"))
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    match result {
+        Ok(value) if value.get("success") == Some(&Value::Bool(true)) => {
+            let model = value.pointer("/data/model");
+            let inputs = value.pointer("/data/model/input").and_then(Value::as_array);
+            RuntimeDiagnostics {
+                found: true,
+                executable_path: Some(display_path),
+                version,
+                rpc_handshake: true,
+                current_provider: model
+                    .and_then(|value| value.get("provider"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                current_model: model
+                    .and_then(|value| value.get("id").or_else(|| value.get("name")))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                supports_vision: inputs
+                    .map(|items| items.iter().any(|input| input.as_str() == Some("image"))),
+                error: None,
+            }
+        }
+        Ok(value) => RuntimeDiagnostics {
+            found: true,
+            executable_path: Some(display_path),
+            version,
+            rpc_handshake: false,
+            current_provider: None,
+            current_model: None,
+            supports_vision: None,
+            error: Some(
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pi RPC 拒绝握手")
+                    .to_string(),
+            ),
+        },
+        Err(error) => RuntimeDiagnostics {
+            found: true,
+            executable_path: Some(display_path),
+            version,
+            rpc_handshake: false,
+            current_provider: None,
+            current_model: None,
+            supports_vision: None,
+            error: Some(error),
+        },
     }
 }
 
@@ -240,13 +446,24 @@ fn read_pi_events(
     task_id: &str,
     state: &Arc<Mutex<RuntimeTaskState>>,
     event_sink: &RuntimeEventSink,
+    command_tx: &mpsc::Sender<Value>,
+    mut pending_visual_prompt: Option<PendingVisualPrompt>,
+    stderr: &Arc<Mutex<String>>,
 ) {
     let mut reader = BufReader::new(stdout);
     loop {
         let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => {
-                fail_if_running(task_id, state, event_sink, "Pi Runtime 意外退出");
+                let detail = stderr
+                    .lock()
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let message = detail
+                    .map(|value| format!("Pi Runtime 意外退出：{value}"))
+                    .unwrap_or_else(|| "Pi Runtime 意外退出".into());
+                fail_if_running(task_id, state, event_sink, &message);
                 break;
             }
             Ok(_) => {}
@@ -276,10 +493,94 @@ fn read_pi_events(
                 break;
             }
         };
+        if let Some(pending) = pending_visual_prompt.as_ref() {
+            if value.get("id").and_then(Value::as_str)
+                == Some(pending.capability_request_id.as_str())
+            {
+                if value.get("success") != Some(&Value::Bool(true)) {
+                    fail_if_running(
+                        task_id,
+                        state,
+                        event_sink,
+                        "MODEL_CAPABILITY_UNKNOWN: 无法确认当前 Pi 模型的视觉能力",
+                    );
+                    break;
+                }
+                let supports_vision = value
+                    .pointer("/data/model/input")
+                    .and_then(Value::as_array)
+                    .is_some_and(|inputs| {
+                        inputs.iter().any(|input| input.as_str() == Some("image"))
+                    });
+                if !supports_vision {
+                    fail_if_running(
+                        task_id,
+                        state,
+                        event_sink,
+                        "MODEL_CAPABILITY_MISSING: 当前 Pi 模型不支持视觉输入，请更换支持 image 输入的模型",
+                    );
+                    break;
+                }
+                let pending = pending_visual_prompt.take().expect("pending visual prompt");
+                if command_tx.send(pending.prompt_command).is_err() {
+                    fail_if_running(task_id, state, event_sink, "Pi Runtime 已停止");
+                    break;
+                }
+                continue;
+            }
+        }
         if handle_pi_event(task_id, value, state, event_sink) {
             break;
         }
     }
+}
+
+fn prompt_command(task_id: &str, prompt: &str, attachments: &[RuntimeAttachment]) -> Value {
+    let mut command = json!({ "id": task_id, "type": "prompt", "message": prompt });
+    if !attachments.is_empty() {
+        command["images"] = Value::Array(
+            attachments
+                .iter()
+                .map(|attachment| {
+                    json!({
+                        "type": "image",
+                        "data": attachment.data,
+                        "mimeType": attachment.mime_type,
+                    })
+                })
+                .collect(),
+        );
+    }
+    command
+}
+
+fn validate_attachments(attachments: &[RuntimeAttachment]) -> AppResult<()> {
+    if attachments.len() > 8 {
+        return Err("TOOL_ARGUMENT_INVALID: Agent 视觉附件最多 8 张".into());
+    }
+    let mut total_bytes = 0usize;
+    for attachment in attachments {
+        if !matches!(
+            attachment.mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp"
+        ) {
+            return Err(format!(
+                "TOOL_ARGUMENT_INVALID: 不支持的 Agent 视觉附件类型：{}",
+                attachment.mime_type
+            ));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&attachment.data)
+            .map_err(|_| "TOOL_ARGUMENT_INVALID: Agent 视觉附件不是有效 Base64".to_string())?;
+        if bytes.len() > 20 * 1024 * 1024 {
+            return Err("TOOL_ARGUMENT_INVALID: 单张 Agent 视觉附件不得超过 20MB".into());
+        }
+        total_bytes += bytes.len();
+    }
+    if total_bytes > 60 * 1024 * 1024 {
+        return Err("TOOL_ARGUMENT_INVALID: Agent 视觉附件总大小不得超过 60MB".into());
+    }
+    Ok(())
 }
 
 fn handle_pi_event(

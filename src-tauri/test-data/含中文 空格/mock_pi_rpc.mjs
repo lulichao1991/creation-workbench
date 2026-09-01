@@ -6,13 +6,15 @@ function send(value) {
 }
 
 function handle(command) {
-  if (command.type === "prompt") {
+  if (command.type === "get_state") {
+    send({ id: command.id, type: "response", command: "get_state", success: true, data: { model: { input: ["text", "image"] } } });
+  } else if (command.type === "prompt") {
     send({ id: command.id, type: "response", command: "prompt", success: true });
     const delay = command.message === "slow" ? 2000 : 10;
     timer = setTimeout(() => {
       send({
         type: "message_update",
-        assistantMessageEvent: { type: "text_delta", delta: `围绕${command.message}的只读回答` },
+        assistantMessageEvent: { type: "text_delta", delta: `围绕${command.message}的只读回答${command.images?.length ? `，视觉附件${command.images.length}张` : ""}` },
       });
       send({ type: "agent_end" });
     }, delay);

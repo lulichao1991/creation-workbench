@@ -24,7 +24,7 @@ import type {
   ExpertType,
   RuntimeEvent,
 } from "../features/agent";
-import { runtimeEventName } from "../features/agent/runtime";
+import { runtimeEventName, type RuntimeDiagnostics } from "../features/agent/runtime";
 import {
   buildAgentSelection,
   buildChangeAnalysisSelection,
@@ -96,6 +96,8 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   const [cards, setCards] = useState<AICard[]>([]);
   const [selectedPatchIds, setSelectedPatchIds] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [experts, setExperts] = useState<ExpertDefinition[]>([]);
   const [showTeamBuilder, setShowTeamBuilder] = useState(false);
   const [teamRequest, setTeamRequest] = useState("");
@@ -430,6 +432,17 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     }
   };
 
+  const diagnoseRuntime = async () => {
+    setDiagnosing(true);
+    try {
+      setRuntimeDiagnostics(await api.agentRuntimeDoctor());
+    } catch (error) {
+      onError(error);
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
   if (!flags) return <div className="agent-loading">正在读取 Agent 配置…</div>;
   if (!agentEnabled) {
     return (
@@ -441,6 +454,8 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
           {working ? "正在启用…" : "启用 Agent"}
         </button>
         <small>需要本机安装 Pi，或通过 PI_AGENT_CLI 指定 Runtime。</small>
+        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测 Pi Runtime"}</button>
+        {runtimeDiagnostics && <small>{runtimeDiagnostics.rpcHandshake ? `RPC 正常 · ${runtimeDiagnostics.currentProvider ?? "默认 Provider"} / ${runtimeDiagnostics.currentModel ?? "默认模型"}${runtimeDiagnostics.supportsVision ? " · 支持视觉" : ""}` : runtimeDiagnostics.error}</small>}
       </div>
     );
   }
@@ -459,7 +474,9 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         <small>{activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
         {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
+        {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "Runtime 检测"}</button>}
       </section>
+      {runtimeDiagnostics?.error && <p className="agent-runtime-error"><AlertTriangle size={12} />{runtimeDiagnostics.error}</p>}
 
       <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>

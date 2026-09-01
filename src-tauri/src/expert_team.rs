@@ -444,6 +444,7 @@ fn prepare_member_tasks(
             ),
             &WriteScope::default(),
             &package,
+            None,
         )?;
         conn.execute(
             "UPDATE agent_tasks SET status='queued' WHERE id=?1",
@@ -456,6 +457,7 @@ fn prepare_member_tasks(
                 prompt,
                 provider,
                 model,
+                attachments: Vec::new(),
             },
         });
     }
@@ -752,6 +754,7 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
         prompt,
         provider,
         model,
+        attachments: Vec::new(),
     }))
 }
 

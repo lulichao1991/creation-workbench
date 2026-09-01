@@ -106,6 +106,7 @@ export interface AgentTask {
   id: string;
   sessionId: string;
   taskType: string;
+  interactionMode: AgentMode | "change_analysis";
   agentType: ExpertType | "main";
   selection: SelectionSnapshot;
   readScope: ObjectRef[];

@@ -23,6 +23,7 @@ export interface MemoryRecord {
   scopeType: "project" | "contentUnit" | "global";
   scopeId: string | null;
   category: string;
+  memoryKey: string | null;
   content: string;
   status: MemoryStatus;
   confidence: number;
@@ -43,6 +44,7 @@ export interface CreateMemoryInput {
   scopeType: "project" | "contentUnit" | "global";
   scopeId?: string;
   category: string;
+  memoryKey?: string;
   content: string;
   status: MemoryStatus;
   confidence?: number;
@@ -59,6 +61,7 @@ export interface UpdateMemoryInput {
   memoryId: string;
   content?: string;
   category?: string;
+  memoryKey?: string;
   scopeType?: "project" | "contentUnit" | "global";
   scopeId?: string;
   status?: MemoryStatus;

@@ -3,7 +3,7 @@ use crate::database::{new_id, now, open_database, AppResult};
 use crate::mutation::{execute_mutations_in_transaction, MutationRequest};
 use crate::provider::{load_provider, provider_secret, ProviderConfig};
 use base64::Engine;
-use reqwest::blocking::Client;
+use reqwest::{multipart, Client};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -100,12 +100,20 @@ struct ProviderBatch {
     error: Option<String>,
 }
 
+#[derive(Debug)]
+struct ReferenceImage {
+    bytes: Vec<u8>,
+    file_name: String,
+    mime_type: &'static str,
+}
+
 trait ImageGenerationProvider {
     fn generate(
         &self,
         prompt: &str,
         model: &str,
         options: &ImageOptions,
+        references: &[ReferenceImage],
         cancelled: &AtomicBool,
     ) -> AppResult<ProviderBatch>;
 }
@@ -121,6 +129,7 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
         prompt: &str,
         model: &str,
         options: &ImageOptions,
+        references: &[ReferenceImage],
         cancelled: &AtomicBool,
     ) -> AppResult<ProviderBatch> {
         if cancelled.load(Ordering::SeqCst) {
@@ -130,34 +139,71 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
             .timeout(Duration::from_secs(self.config.timeout_seconds as u64))
             .build()
             .map_err(|e| format!("创建 Provider 客户端失败：{e}"))?;
-        let endpoint = format!(
-            "{}/images/generations",
-            self.config.base_url.trim_end_matches('/')
-        );
-        let response = client
-            .post(endpoint)
-            .bearer_auth(&self.secret)
-            .json(&json!({
-                "model": model,
-                "prompt": prompt,
-                "n": options.count.unwrap_or(1),
-                "size": options.size.as_deref().unwrap_or("1024x1024"),
-                "quality": options.quality.as_deref().unwrap_or("auto"),
-                "background": options.background.as_deref().unwrap_or("auto"),
-                "output_format": "png"
-            }))
-            .send()
-            .map_err(|e| {
-                if e.is_timeout() {
-                    "PROVIDER_TIMEOUT: 生图请求超时".into()
-                } else {
-                    format!("PROVIDER_NETWORK_FAILED: {e}")
+        let base_url = self.config.base_url.trim_end_matches('/');
+        let request = if references.is_empty() {
+            client
+                .post(format!("{base_url}/images/generations"))
+                .bearer_auth(&self.secret)
+                .json(&json!({
+                    "model": model,
+                    "prompt": prompt,
+                    "n": options.count.unwrap_or(1),
+                    "size": options.size.as_deref().unwrap_or("1024x1024"),
+                    "quality": options.quality.as_deref().unwrap_or("auto"),
+                    "background": options.background.as_deref().unwrap_or("auto"),
+                    "response_format": "b64_json",
+                    "output_format": "png"
+                }))
+        } else {
+            let mut form = multipart::Form::new()
+                .text("model", model.to_string())
+                .text("prompt", prompt.to_string())
+                .text("n", options.count.unwrap_or(1).to_string())
+                .text(
+                    "size",
+                    options.size.as_deref().unwrap_or("1024x1024").to_string(),
+                )
+                .text(
+                    "quality",
+                    options.quality.as_deref().unwrap_or("auto").to_string(),
+                )
+                .text("response_format", "b64_json");
+            for reference in references {
+                let part = multipart::Part::bytes(reference.bytes.clone())
+                    .file_name(reference.file_name.clone())
+                    .mime_str(reference.mime_type)
+                    .map_err(|e| format!("参考图 MIME 类型无效：{e}"))?;
+                form = form.part("image", part);
+            }
+            client
+                .post(format!("{base_url}/images/edits"))
+                .bearer_auth(&self.secret)
+                .multipart(form)
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("创建 Provider 异步运行时失败：{e}"))?;
+        let (status, value) = runtime.block_on(async {
+            let response = tokio::select! {
+                response = request.send() => response.map_err(|e| {
+                    if e.is_timeout() {
+                        "PROVIDER_TIMEOUT: 生图请求超时".into()
+                    } else {
+                        format!("PROVIDER_NETWORK_FAILED: {e}")
+                    }
+                })?,
+                _ = wait_for_cancellation(cancelled) => {
+                    return Err("TASK_CANCELLED: 用户已取消生图任务".into());
                 }
-            })?;
-        let status = response.status();
-        let value: Value = response
-            .json()
-            .map_err(|e| format!("Provider 返回了无效 JSON：{e}"))?;
+            };
+            let status = response.status();
+            let value: Value = response
+                .json()
+                .await
+                .map_err(|e| format!("Provider 返回了无效 JSON：{e}"))?;
+            Ok::<_, String>((status, value))
+        })?;
         if !status.is_success() {
             let message = value
                 .pointer("/error/message")
@@ -199,6 +245,12 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
     }
 }
 
+async fn wait_for_cancellation(cancelled: &AtomicBool) {
+    while !cancelled.load(Ordering::SeqCst) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 struct MockProvider;
 
 impl ImageGenerationProvider for MockProvider {
@@ -207,6 +259,7 @@ impl ImageGenerationProvider for MockProvider {
         _prompt: &str,
         _model: &str,
         options: &ImageOptions,
+        _references: &[ReferenceImage],
         cancelled: &AtomicBool,
     ) -> AppResult<ProviderBatch> {
         if cancelled.load(Ordering::SeqCst) || options.mock_mode.as_deref() == Some("cancel") {
@@ -239,6 +292,18 @@ fn valid_image_bytes(bytes: &[u8]) -> bool {
         && (bytes.starts_with(b"\x89PNG\r\n\x1a\n")
             || bytes.starts_with(b"\xff\xd8\xff")
             || (bytes.len() > 12 && &bytes[8..12] == b"WEBP"))
+}
+
+fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 fn validate_options(options: &ImageOptions) -> AppResult<()> {
@@ -299,6 +364,42 @@ fn validate_references(conn: &Connection, project: &Path, references: &[String])
         }
     }
     Ok(())
+}
+
+fn load_reference_images(project: &Path, references: &[String]) -> AppResult<Vec<ReferenceImage>> {
+    let project_root = project
+        .canonicalize()
+        .map_err(|e| format!("读取项目目录失败：{e}"))?;
+    references
+        .iter()
+        .map(|relative| {
+            let absolute = project
+                .join(relative)
+                .canonicalize()
+                .map_err(|e| format!("读取参考图失败（{relative}）：{e}"))?;
+            if !absolute.starts_with(&project_root) {
+                return Err("TOOL_ARGUMENT_INVALID: 参考图必须位于当前项目内".into());
+            }
+            let bytes =
+                fs::read(&absolute).map_err(|e| format!("读取参考图失败（{relative}）：{e}"))?;
+            if !valid_image_bytes(&bytes) {
+                return Err(format!(
+                    "TOOL_ARGUMENT_INVALID: 参考图不是有效的 PNG、JPEG 或 WebP（{relative}）"
+                ));
+            }
+            let mime_type = image_mime_type(&bytes).expect("validated image type");
+            let file_name = absolute
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("reference.png")
+                .to_string();
+            Ok(ReferenceImage {
+                bytes,
+                file_name,
+                mime_type,
+            })
+        })
+        .collect()
 }
 
 fn load_job(conn: &Connection, job_id: &str) -> AppResult<ImageJob> {
@@ -386,7 +487,8 @@ fn run_job(
     } else {
         job.model.clone()
     };
-    let batch = match provider.generate(&job.prompt, &model, &job.options, cancelled) {
+    let references = load_reference_images(project, &job.reference_images)?;
+    let batch = match provider.generate(&job.prompt, &model, &job.options, &references, cancelled) {
         Ok(batch) => batch,
         Err(error) => {
             let cancelled_error =
@@ -804,6 +906,8 @@ pub fn image_update_result_state(
 mod tests {
     use super::*;
     use crate::database::init_database;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     fn setup_asset() -> (tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
@@ -852,6 +956,90 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn openai_compatible_reference_request_uses_multipart_edits_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (body_tx, body_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap();
+            while request.len() - header_end < content_length {
+                let read = stream.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            body_tx.send(request).unwrap();
+            let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+            let body = format!(r#"{{"data":[{{"b64_json":"{png}"}}]}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let provider = OpenAiCompatibleProvider {
+            config: ProviderConfig {
+                id: "local".into(),
+                provider_type: "openai_compatible".into(),
+                display_name: "Local".into(),
+                base_url: format!("http://{address}/v1"),
+                default_model: "gpt-image-test".into(),
+                capabilities: json!({"referenceImages":true}),
+                timeout_seconds: 10,
+                max_concurrency: 1,
+                allow_image_upload: true,
+                status: "configured".into(),
+                has_secret: true,
+                created_at: now(),
+                updated_at: now(),
+            },
+            secret: "test-secret".into(),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        let result = provider
+            .generate(
+                "保持角色一致",
+                "gpt-image-test",
+                &ImageOptions {
+                    size: Some("1024x1024".into()),
+                    quality: Some("high".into()),
+                    count: Some(1),
+                    background: Some("auto".into()),
+                    mock_mode: None,
+                },
+                &[ReferenceImage {
+                    bytes,
+                    file_name: "hero.png".into(),
+                    mime_type: "image/png",
+                }],
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(result.images.len(), 1);
+        let request = String::from_utf8_lossy(&body_rx.recv().unwrap()).to_string();
+        assert!(request.starts_with("POST /v1/images/edits "));
+        assert!(request.contains("name=\"image\""));
+        assert!(request.contains("filename=\"hero.png\""));
+        assert!(request.contains("保持角色一致"));
     }
 
     #[test]
@@ -948,7 +1136,10 @@ mod tests {
     fn references_must_be_explicit_or_formal_and_candidate_states_are_managed() {
         let (temp, target_id) = setup_asset();
         fs::create_dir_all(temp.path().join("references")).unwrap();
-        fs::write(temp.path().join("references/style.png"), b"reference").unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        fs::write(temp.path().join("references/style.png"), png).unwrap();
         let mut valid = input("reference", &target_id, None);
         valid.reference_images = vec!["references/style.png".into()];
         assert_eq!(

@@ -9,11 +9,13 @@ use tauri::{Emitter, Manager};
 
 use crate::app_database::load_feature_flags;
 use crate::database::AppResult;
-use pi::PiRuntimeAdapter;
+use pi::{diagnose_pi_runtime, PiRuntimeAdapter};
 use runtime::AgentRuntime;
 
+pub use runtime::{
+    RuntimeAttachment, RuntimeDiagnostics, RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState,
+};
 pub(crate) use runtime::{RuntimeEvent, RuntimeEventSink};
-pub use runtime::{RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState};
 
 pub const RUNTIME_EVENT_NAME: &str = "agent-runtime-event";
 
@@ -110,6 +112,11 @@ pub fn agent_get_task_state(
         .get_task_state(&task_id)
 }
 
+#[tauri::command]
+pub fn agent_runtime_doctor() -> RuntimeDiagnostics {
+    diagnose_pi_runtime()
+}
+
 pub(crate) fn ensure_agent_core_enabled(app: &tauri::AppHandle) -> AppResult<()> {
     let app_data_dir = app
         .path()
@@ -138,6 +145,7 @@ mod tests {
             prompt: prompt.into(),
             provider: None,
             model: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -184,6 +192,37 @@ mod tests {
         unsafe_input.model = Some("model & calc.exe".into());
         let error = runtime.start_task(unsafe_input, sink).unwrap_err();
         assert!(error.contains("不允许的字符"));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn pi_adapter_checks_vision_capability_and_sends_images() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data")
+            .join("含中文 空格")
+            .join("mock_pi.cmd");
+        let (tx, rx) = mpsc::channel();
+        let sink: RuntimeEventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let mut runtime = PiRuntimeAdapter::new(fixture);
+        let mut visual = input("pi-vision", "检查构图");
+        visual.attachments.push(RuntimeAttachment {
+            name: "构图参考.png".into(),
+            mime_type: "image/png".into(),
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into(),
+        });
+        runtime.start_task(visual, sink).unwrap();
+        let mut text = String::new();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                RuntimeEvent::TextDelta { delta, .. } => text.push_str(&delta),
+                RuntimeEvent::TaskCompleted { .. } => break,
+                RuntimeEvent::TaskFailed { error, .. } => panic!("{error}"),
+                _ => {}
+            }
+        }
+        assert!(text.contains("视觉附件1张"));
     }
 
     #[test]

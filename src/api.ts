@@ -17,6 +17,7 @@ import type {
   RuntimeTaskHandle,
   RuntimeTaskInput,
   RuntimeTaskState,
+  RuntimeDiagnostics,
 } from "./features/agent/runtime";
 import type {
   BuildContextInput,
@@ -92,6 +93,7 @@ export const api = {
     invoke<void>("agent_cancel_task", { taskId }),
   agentGetTaskState: (taskId: string) =>
     invoke<RuntimeTaskState>("agent_get_task_state", { taskId }),
+  agentRuntimeDoctor: () => invoke<RuntimeDiagnostics>("agent_runtime_doctor"),
   contextBuild: (projectPath: string, input: BuildContextInput) =>
     invoke<ContextPackage>("context_build", { projectPath, input }),
   contextSearch: (projectPath: string, query: string, limit = 20) =>

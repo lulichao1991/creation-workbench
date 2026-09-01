@@ -27,6 +27,7 @@ pub struct MemoryRecord {
     scope_type: String,
     scope_id: Option<String>,
     category: String,
+    memory_key: Option<String>,
     content: String,
     status: String,
     confidence: f64,
@@ -62,6 +63,7 @@ pub struct CreateMemoryInput {
     scope_type: String,
     scope_id: Option<String>,
     category: String,
+    memory_key: Option<String>,
     content: String,
     status: String,
     confidence: Option<f64>,
@@ -80,6 +82,7 @@ pub struct UpdateMemoryInput {
     memory_id: String,
     content: Option<String>,
     category: Option<String>,
+    memory_key: Option<String>,
     scope_type: Option<String>,
     scope_id: Option<String>,
     status: Option<String>,
@@ -189,31 +192,49 @@ fn conflicting_ids(
     scope_type: &str,
     scope_id: Option<&str>,
     category: &str,
+    memory_key: Option<&str>,
 ) -> AppResult<Vec<String>> {
+    let Some(memory_key) = memory_key.filter(|value| !value.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
     let sql = format!(
-        "SELECT id FROM {} WHERE id<>?1 AND status='active' AND scope_type=?2 AND scope_id IS ?3 AND category=?4 ORDER BY updated_at DESC, id",
+        "SELECT id FROM {} WHERE id<>?1 AND status='active' AND scope_type=?2 AND scope_id IS ?3 AND category=?4 AND memory_key=?5 ORDER BY updated_at DESC, id",
         spec.table
     );
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map(params![memory_id, scope_type, scope_id, category], |row| {
-            row.get(0)
-        })
+        .query_map(
+            params![memory_id, scope_type, scope_id, category, memory_key],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())
+}
+
+struct ConflictTarget<'a> {
+    scope_type: &'a str,
+    scope_id: Option<&'a str>,
+    category: &'a str,
+    memory_key: Option<&'a str>,
 }
 
 fn activate_with_replacement(
     tx: &Transaction<'_>,
     spec: StoreSpec,
     memory_id: &str,
-    scope_type: &str,
-    scope_id: Option<&str>,
-    category: &str,
+    target: ConflictTarget<'_>,
     supersedes_id: Option<&str>,
 ) -> AppResult<()> {
-    let conflicts = conflicting_ids(tx, spec, memory_id, scope_type, scope_id, category)?;
+    let conflicts = conflicting_ids(
+        tx,
+        spec,
+        memory_id,
+        target.scope_type,
+        target.scope_id,
+        target.category,
+        target.memory_key,
+    )?;
     if conflicts.is_empty() {
         return Ok(());
     }
@@ -224,7 +245,7 @@ fn activate_with_replacement(
         ));
     };
     if !conflicts.iter().any(|id| id == supersedes_id) {
-        return Err("MEMORY_CONFLICT: supersedesId 不是同范围同分类的生效记忆".into());
+        return Err("MEMORY_CONFLICT: supersedesId 不是同范围同冲突键的生效记忆".into());
     }
     let sql = format!(
         "UPDATE {} SET status='superseded', updated_at=?1 WHERE id=?2",
@@ -258,6 +279,12 @@ fn create_in_conn(conn: &mut Connection, input: &CreateMemoryInput) -> AppResult
     }
     let confidence = input.confidence.unwrap_or(1.0).clamp(0.0, 1.0);
     let priority = input.priority.unwrap_or(0).clamp(-100, 100);
+    let memory_key = input
+        .memory_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let source_type = input.source_type.as_deref().unwrap_or("user");
     let timestamp = now();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -266,14 +293,17 @@ fn create_in_conn(conn: &mut Connection, input: &CreateMemoryInput) -> AppResult
             &tx,
             spec,
             &input.request_id,
-            &input.scope_type,
-            input.scope_id.as_deref(),
-            input.category.trim(),
+            ConflictTarget {
+                scope_type: &input.scope_type,
+                scope_id: input.scope_id.as_deref(),
+                category: input.category.trim(),
+                memory_key: memory_key.as_deref(),
+            },
             input.supersedes_id.as_deref(),
         )?;
     }
     let sql = format!(
-        "INSERT INTO {} (id, scope_type, scope_id, category, content, status, confidence, priority, source_type, source_id, supersedes_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+        "INSERT INTO {} (id, scope_type, scope_id, category, memory_key, content, status, confidence, priority, source_type, source_id, supersedes_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
         spec.table
     );
     tx.execute(
@@ -283,6 +313,7 @@ fn create_in_conn(conn: &mut Connection, input: &CreateMemoryInput) -> AppResult
             input.scope_type,
             input.scope_id,
             input.category.trim(),
+            memory_key,
             input.content.trim(),
             input.status,
             confidence,
@@ -329,6 +360,16 @@ fn update_in_conn(conn: &mut Connection, input: &UpdateMemoryInput) -> AppResult
         .unwrap_or(&existing.category)
         .trim()
         .to_string();
+    let memory_key = match input.memory_key.as_deref() {
+        Some(value) => {
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.trim().to_string())
+            }
+        }
+        None => existing.memory_key.clone(),
+    };
     let scope_type = input
         .scope_type
         .as_deref()
@@ -348,20 +389,24 @@ fn update_in_conn(conn: &mut Connection, input: &UpdateMemoryInput) -> AppResult
     let activation_target_changed = existing.status != "active"
         || existing.scope_type != scope_type
         || existing.scope_id != scope_id
-        || existing.category != category;
+        || existing.category != category
+        || existing.memory_key != memory_key;
     if status == "active" && activation_target_changed {
         activate_with_replacement(
             &tx,
             spec,
             &input.memory_id,
-            &scope_type,
-            scope_id.as_deref(),
-            &category,
+            ConflictTarget {
+                scope_type: &scope_type,
+                scope_id: scope_id.as_deref(),
+                category: &category,
+                memory_key: memory_key.as_deref(),
+            },
             input.supersedes_id.as_deref(),
         )?;
     }
     let sql = format!(
-        "UPDATE {} SET scope_type=?1, scope_id=?2, category=?3, content=?4, status=?5, confidence=?6, priority=?7, supersedes_id=COALESCE(?8, supersedes_id), updated_at=?9 WHERE id=?10",
+        "UPDATE {} SET scope_type=?1, scope_id=?2, category=?3, memory_key=?4, content=?5, status=?6, confidence=?7, priority=?8, supersedes_id=COALESCE(?9, supersedes_id), updated_at=?10 WHERE id=?11",
         spec.table
     );
     tx.execute(
@@ -370,6 +415,7 @@ fn update_in_conn(conn: &mut Connection, input: &UpdateMemoryInput) -> AppResult
             scope_type,
             scope_id,
             category,
+            memory_key,
             content,
             status,
             input
@@ -419,7 +465,7 @@ fn load_memory(
     used_by_task_ids: &[String],
 ) -> AppResult<MemoryRecord> {
     let sql = format!(
-        "SELECT id, scope_type, scope_id, category, content, status, confidence, priority, source_type, source_id, supersedes_id, created_at, updated_at FROM {} WHERE id=?1",
+        "SELECT id, scope_type, scope_id, category, memory_key, content, status, confidence, priority, source_type, source_id, supersedes_id, created_at, updated_at FROM {} WHERE id=?1",
         spec.table
     );
     let row = conn
@@ -429,20 +475,29 @@ fn load_memory(
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, f64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, Option<String>>(9)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
                 row.get::<_, Option<String>>(10)?,
-                row.get::<_, String>(11)?,
+                row.get::<_, Option<String>>(11)?,
                 row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
             ))
         })
         .map_err(|_| "OBJECT_NOT_FOUND: 记忆不存在".to_string())?;
-    let conflict_ids = if row.5 == "candidate" {
-        conflicting_ids(conn, spec, &row.0, &row.1, row.2.as_deref(), &row.3)?
+    let conflict_ids = if row.6 == "candidate" {
+        conflicting_ids(
+            conn,
+            spec,
+            &row.0,
+            &row.1,
+            row.2.as_deref(),
+            &row.3,
+            row.4.as_deref(),
+        )?
     } else {
         Vec::new()
     };
@@ -452,15 +507,16 @@ fn load_memory(
         scope_type: row.1,
         scope_id: row.2,
         category: row.3,
-        content: row.4,
-        status: row.5,
-        confidence: row.6,
-        priority: row.7,
-        source_type: row.8,
-        source_id: row.9,
-        supersedes_id: row.10,
-        created_at: row.11,
-        updated_at: row.12,
+        memory_key: row.4,
+        content: row.5,
+        status: row.6,
+        confidence: row.7,
+        priority: row.8,
+        source_type: row.9,
+        source_id: row.10,
+        supersedes_id: row.11,
+        created_at: row.12,
+        updated_at: row.13,
         sources: source_rows(conn, spec, &row.0)?,
         used_by_task_ids: used_by_task_ids.to_vec(),
         conflict_ids,
@@ -727,6 +783,7 @@ pub fn memory_invalidate(
             memory_id,
             content: None,
             category: None,
+            memory_key: None,
             scope_type: None,
             scope_id: None,
             status: Some("invalidated".into()),
@@ -750,6 +807,7 @@ mod tests {
             scope_type: "project".into(),
             scope_id: None,
             category: "style".into(),
+            memory_key: None,
             content: format!("记忆 {id}"),
             status: status.into(),
             confidence: None,
@@ -769,10 +827,12 @@ mod tests {
         let mut conn = open_database(temp.path()).unwrap();
         let mut first = input("first", "active");
         first.scope_id = Some(project.id.clone());
+        first.memory_key = Some("visual_contrast".into());
         assert_eq!(create_in_conn(&mut conn, &first).unwrap().id, "first");
         assert_eq!(create_in_conn(&mut conn, &first).unwrap().id, "first");
         let mut second = input("second", "active");
         second.scope_id = Some(project.id);
+        second.memory_key = Some("visual_contrast".into());
         assert!(create_in_conn(&mut conn, &second)
             .unwrap_err()
             .contains("MEMORY_CONFLICT"));
@@ -783,6 +843,30 @@ mod tests {
                 .unwrap()
                 .status,
             "superseded"
+        );
+    }
+
+    #[test]
+    fn same_category_memories_coexist_without_a_shared_conflict_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "记忆键测试", "short").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        let mut first = input("first-preference", "active");
+        first.scope_id = Some(project.id.clone());
+        first.content = "镜头切换必须带来新信息".into();
+        create_in_conn(&mut conn, &first).unwrap();
+        let mut second = input("second-preference", "active");
+        second.scope_id = Some(project.id);
+        second.content = "减少无意义运镜".into();
+        create_in_conn(&mut conn, &second).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM project_memories WHERE status='active'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            2
         );
     }
 

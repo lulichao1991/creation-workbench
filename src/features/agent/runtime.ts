@@ -3,10 +3,28 @@ export interface RuntimeTaskInput {
   prompt: string;
   provider?: string;
   model?: string;
+  attachments?: RuntimeAttachment[];
+}
+
+export interface RuntimeAttachment {
+  name: string;
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
+  data: string;
 }
 
 export interface RuntimeTaskHandle {
   taskId: string;
+}
+
+export interface RuntimeDiagnostics {
+  found: boolean;
+  executablePath: string | null;
+  version: string | null;
+  rpcHandshake: boolean;
+  currentProvider: string | null;
+  currentModel: string | null;
+  supportsVision: boolean | null;
+  error: string | null;
 }
 
 export type RuntimeTaskState = "running" | "completed" | "cancelled" | "failed";

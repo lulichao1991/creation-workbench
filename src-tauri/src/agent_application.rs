@@ -1,6 +1,6 @@
 use crate::agent_runtime::{
-    ensure_agent_core_enabled, RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput,
-    RUNTIME_EVENT_NAME,
+    ensure_agent_core_enabled, RuntimeAttachment, RuntimeEvent, RuntimeEventSink, RuntimeState,
+    RuntimeTaskInput, RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
@@ -10,9 +10,12 @@ use crate::permission::{
     create_card, propose_patch, CreateCardInput, ObjectRef as PermissionObjectRef, PatchItemInput,
     ProposePatchInput, WriteScope,
 };
+use base64::Engine;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
@@ -177,6 +180,7 @@ pub struct AgentTask {
     pub id: String,
     pub session_id: String,
     pub task_type: String,
+    pub interaction_mode: String,
     pub agent_type: String,
     pub selection: Value,
     pub read_scope: Value,
@@ -217,6 +221,15 @@ pub struct AgentDispatch {
 struct PreparedTask {
     dispatch: AgentDispatch,
     runtime_input: Option<RuntimeTaskInput>,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionWorkingMemory {
+    discussion_goal: Option<String>,
+    recent_messages: Vec<Value>,
+    unresolved_cards: Vec<Value>,
+    pending_patch: Option<Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -485,16 +498,6 @@ fn resolve_intent(input: &ResolveIntentInput) -> ResolvedIntent {
         .filter(|(_, score)| **score == max && max >= 2)
         .map(|(index, _)| EXPERTS[index].expert_type)
         .collect::<Vec<_>>();
-    let task_type = if message.contains("修改")
-        || message.contains("重写")
-        || message.contains("设计")
-        || message.contains("编译")
-        || message.contains("增强")
-    {
-        "edit"
-    } else {
-        "analyze"
-    };
     if winners.len() != 1 {
         return ResolvedIntent {
             task_type: "clarify".into(),
@@ -507,7 +510,7 @@ fn resolve_intent(input: &ResolveIntentInput) -> ResolvedIntent {
         };
     }
     ResolvedIntent {
-        task_type: task_type.into(),
+        task_type: task_intent(input, winners[0]),
         expert_type: Some(winners[0].into()),
         confidence: (max as f32 / 6.0).clamp(0.35, 1.0),
         reason: format!(
@@ -516,6 +519,44 @@ fn resolve_intent(input: &ResolveIntentInput) -> ResolvedIntent {
         ),
         clarification_question: None,
     }
+}
+
+fn task_intent(input: &ResolveIntentInput, expert_type: &str) -> String {
+    let message = input.message.to_lowercase();
+    let center = input.selection.center.as_ref();
+    if center.is_some_and(|reference| {
+        matches!(reference.object_type.as_str(), "project" | "contentUnit")
+    }) && ["规划", "剧集结构", "集结构", "整季", "多季"]
+        .iter()
+        .any(|keyword| message.contains(keyword))
+    {
+        return "project_planning".into();
+    }
+    if center.is_some_and(|reference| {
+        matches!(
+            reference.object_type.as_str(),
+            "storyElement" | "storyElementOccurrence"
+        )
+    }) {
+        return "story_element_analysis".into();
+    }
+    if let Some(reference) = center {
+        if reference.object_type == "shot" {
+            return reference
+                .field
+                .as_deref()
+                .map(|field| format!("shot_{field}"))
+                .unwrap_or_else(|| "shot_analysis".into());
+        }
+        return match reference.object_type.as_str() {
+            "asset" | "assetRequirement" => "asset_visual_definition".into(),
+            "keyframe" => "keyframe_design".into(),
+            "generationTask" => "prompt_compilation".into(),
+            "scene" | "script" => "scene_writing".into(),
+            _ => format!("{expert_type}_analysis"),
+        };
+    }
+    format!("{expert_type}_analysis")
 }
 
 fn score_keywords(message: &str, keywords: &[&str], score: &mut i32) {
@@ -582,7 +623,7 @@ fn prepare_task(
         return Err("TOOL_ARGUMENT_INVALID: Agent mode 无效".into());
     }
     let is_change_analysis = input.mode == "change_analysis";
-    let mut route = if is_change_analysis {
+    let route = if is_change_analysis {
         ResolvedIntent {
             task_type: "change_analysis".into(),
             expert_type: Some("main".into()),
@@ -597,9 +638,6 @@ fn prepare_task(
             selection: input.selection.clone(),
         })
     };
-    if route.expert_type.is_some() && !is_change_analysis {
-        route.task_type.clone_from(&input.mode);
-    }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (project_id, revision): (String, i64) = tx
         .query_row("SELECT id, revision FROM projects LIMIT 1", [], |row| {
@@ -652,8 +690,8 @@ fn prepare_task(
         params![input.request_id, input.session_id, input.message, timestamp],
     ).map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'context_building', ?9, ?10, ?11)",
-        params![task_id, input.session_id, route.task_type, route.expert_type.as_deref().unwrap_or("main"), serde_json::to_string(&input.selection).map_err(|e| e.to_string())?, serde_json::to_string(&input.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&input.write_scope).map_err(|e| e.to_string())?, revision, input.provider, input.model, timestamp],
+        "INSERT INTO agent_tasks (id, session_id, task_type, interaction_mode, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'context_building', ?10, ?11, ?12)",
+        params![task_id, input.session_id, route.task_type, input.mode, route.expert_type.as_deref().unwrap_or("main"), serde_json::to_string(&input.selection).map_err(|e| e.to_string())?, serde_json::to_string(&input.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&input.write_scope).map_err(|e| e.to_string())?, revision, input.provider, input.model, timestamp],
     ).map_err(|e| e.to_string())?;
     tx.execute(
         "UPDATE agent_sessions SET updated_at=?1 WHERE id=?2",
@@ -696,7 +734,7 @@ fn prepare_task(
         &mut conn,
         BuildContextInput {
             task_id: task_id.clone(),
-            selection: input.selection,
+            selection: input.selection.clone(),
             task_intent: route.task_type.clone(),
             expert_type: expert_type.into(),
             token_budget: input.token_budget,
@@ -719,7 +757,13 @@ fn prepare_task(
         params![provider, model, task_id],
     )
     .map_err(|e| e.to_string())?;
-    let prompt = if is_change_analysis {
+    let working_memory = session_working_memory(&conn, &input.session_id, &input.request_id)?;
+    let attachments = if is_change_analysis {
+        Vec::new()
+    } else {
+        visual_attachments(project_path, &conn, expert_type, &input.selection)?
+    };
+    let mut prompt = if is_change_analysis {
         build_change_analysis_prompt(&input.message, &package)?
     } else {
         build_expert_prompt(
@@ -728,8 +772,19 @@ fn prepare_task(
             &input.message,
             &input.write_scope,
             &package,
+            Some(&working_memory),
         )?
     };
+    if !attachments.is_empty() {
+        let names = attachments
+            .iter()
+            .map(|attachment| attachment.name.as_str())
+            .collect::<Vec<_>>();
+        prompt.push_str(&format!(
+            "\n视觉附件（由 Runtime 单独传输，不是可访问路径）：{}。请结合实际画面判断；不得臆造附件中不可见的信息。",
+            serde_json::to_string(&names).map_err(|e| e.to_string())?
+        ));
+    }
     Ok(PreparedTask {
         dispatch: AgentDispatch {
             session_id: input.session_id,
@@ -743,8 +798,138 @@ fn prepare_task(
             prompt,
             provider,
             model,
+            attachments,
         }),
     })
+}
+
+fn visual_attachments(
+    project_path: &Path,
+    conn: &rusqlite::Connection,
+    expert_type: &str,
+    selection: &SelectionSnapshot,
+) -> AppResult<Vec<RuntimeAttachment>> {
+    if !matches!(
+        expert_type,
+        "art" | "keyframe" | "cinematography" | "prompt"
+    ) {
+        return Ok(Vec::new());
+    }
+    let Some(center) = selection.center.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let mut paths = match center.object_type.as_str() {
+        "asset" => query_visual_paths(
+            conn,
+            "SELECT file_path, COALESCE(NULLIF(label,''), file_path) FROM asset_media WHERE asset_id=?1 AND media_type='image' ORDER BY is_primary DESC, sort_order, id",
+            &center.object_id,
+        )?,
+        "assetRequirement" => query_visual_paths(
+            conn,
+            "SELECT am.file_path, COALESCE(NULLIF(am.label,''), am.file_path) FROM asset_media am LEFT JOIN asset_media_requirements amr ON amr.asset_media_id=am.id WHERE am.media_type='image' AND (amr.asset_requirement_id=?1 OR am.asset_id=(SELECT asset_id FROM asset_requirements WHERE id=?1)) ORDER BY am.is_primary DESC, am.sort_order, am.id",
+            &center.object_id,
+        )?,
+        "shot" => shot_visual_paths(conn, &center.object_id)?,
+        "keyframe" => {
+            let shot_id: String = conn
+                .query_row(
+                    "SELECT shot_id FROM keyframes WHERE id=?1",
+                    [&center.object_id],
+                    |row| row.get(0),
+                )
+                .map_err(|_| "OBJECT_NOT_FOUND: 当前关键帧不存在".to_string())?;
+            shot_visual_paths(conn, &shot_id)?
+        }
+        "generationTask" => query_visual_paths(
+            conn,
+            "SELECT am.file_path, COALESCE(NULLIF(am.label,''), am.file_path) FROM generation_task_shots gts JOIN shot_assets sa ON sa.shot_id=gts.shot_id JOIN asset_media am ON am.asset_id=sa.asset_id WHERE gts.generation_task_id=?1 AND am.media_type='image' ORDER BY gts.sort_order, am.is_primary DESC, am.sort_order, am.id",
+            &center.object_id,
+        )?,
+        _ => Vec::new(),
+    };
+    let mut seen = HashSet::new();
+    paths.retain(|(path, _)| seen.insert(path.clone()));
+    paths.truncate(8);
+    encode_visual_attachments(project_path, paths)
+}
+
+fn shot_visual_paths(
+    conn: &rusqlite::Connection,
+    shot_id: &str,
+) -> AppResult<Vec<(String, String)>> {
+    let mut paths = query_visual_paths(
+        conn,
+        "SELECT am.file_path, COALESCE(NULLIF(am.label,''), a.name) FROM shot_assets sa JOIN assets a ON a.id=sa.asset_id JOIN asset_media am ON am.asset_id=a.id WHERE sa.shot_id=?1 AND am.media_type='image' ORDER BY am.is_primary DESC, am.sort_order, am.id",
+        shot_id,
+    )?;
+    paths.extend(query_visual_paths(
+        conn,
+        "SELECT file_path, COALESCE(NULLIF(description,''), type || ' keyframe') FROM keyframes WHERE shot_id=?1 AND file_path IS NOT NULL AND file_path<>'' ORDER BY sort_order, id",
+        shot_id,
+    )?);
+    Ok(paths)
+}
+
+fn query_visual_paths(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    object_id: &str,
+) -> AppResult<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([object_id], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+fn encode_visual_attachments(
+    project_path: &Path,
+    paths: Vec<(String, String)>,
+) -> AppResult<Vec<RuntimeAttachment>> {
+    let project_root = project_path
+        .canonicalize()
+        .map_err(|e| format!("读取项目目录失败：{e}"))?;
+    paths
+        .into_iter()
+        .map(|(relative, label)| {
+            let absolute = project_path
+                .join(&relative)
+                .canonicalize()
+                .map_err(|e| format!("读取正式视觉附件失败（{relative}）：{e}"))?;
+            if !absolute.starts_with(&project_root) {
+                return Err("TOOL_ARGUMENT_INVALID: 正式视觉附件必须位于当前项目内".into());
+            }
+            let bytes = fs::read(&absolute)
+                .map_err(|e| format!("读取正式视觉附件失败（{relative}）：{e}"))?;
+            let mime_type = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                "image/png"
+            } else if bytes.starts_with(b"\xff\xd8\xff") {
+                "image/jpeg"
+            } else if bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+                "image/webp"
+            } else {
+                return Err(format!(
+                    "TOOL_ARGUMENT_INVALID: 正式视觉附件不是有效的 PNG、JPEG 或 WebP（{relative}）"
+                ));
+            };
+            if bytes.len() > 20 * 1024 * 1024 {
+                return Err(format!(
+                    "TOOL_ARGUMENT_INVALID: 正式视觉附件超过 20MB（{relative}）"
+                ));
+            }
+            Ok(RuntimeAttachment {
+                name: if label.trim().is_empty() {
+                    relative
+                } else {
+                    label
+                },
+                mime_type: mime_type.into(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn build_expert_prompt(
@@ -753,6 +938,7 @@ pub(crate) fn build_expert_prompt(
     user_message: &str,
     write_scope: &WriteScope,
     package: &crate::context::ContextPackage,
+    working_memory: Option<&SessionWorkingMemory>,
 ) -> AppResult<String> {
     let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
     let mode_rule = if mode == "edit" {
@@ -761,15 +947,99 @@ pub(crate) fn build_expert_prompt(
         "只读模式：patchProposal 必须为 null，不得申请写入。"
     };
     Ok(format!(
-        "你是{}。{}\n{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 ContextPackage。source=memory 的条目只是偏好或已确认共识，不是事实；它与项目事实冲突时必须以事实为准并明确指出冲突，绝不能用记忆覆盖事实。\n用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
+        "你是{}。{}\n{}\n禁止：{}。不得输出 SQL、文件操作或直接写入命令。只能依据 SessionWorkingMemory 与 ContextPackage。source=memory 的条目只是偏好或已确认共识，不是事实；它与项目事实冲突时必须以事实为准并明确指出冲突，绝不能用记忆覆盖事实。\nSessionWorkingMemory：{}\n当前用户请求：{}\n当前 WriteScope：{}\nContextPackage：{}\n只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项必须包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则 patchProposal 为 null。",
         definition.display_name,
         definition.system_instruction,
         mode_rule,
         definition.prohibited.join("；"),
+        serde_json::to_string(working_memory.unwrap_or(&SessionWorkingMemory::default()))
+            .map_err(|e| e.to_string())?,
         user_message,
         serde_json::to_string(write_scope).map_err(|e| e.to_string())?,
         serde_json::to_string(package).map_err(|e| e.to_string())?,
     ))
+}
+
+fn session_working_memory(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    current_message_id: &str,
+) -> AppResult<SessionWorkingMemory> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT role, content, structured_json FROM agent_messages
+             WHERE session_id=?1 AND id<>?2 ORDER BY rowid DESC LIMIT 8",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![session_id, current_message_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut recent_messages = rows
+        .map(|row| {
+            let (role, content, structured) = row.map_err(|e| e.to_string())?;
+            Ok(json!({
+                "role": role,
+                "content": content,
+                "structured": structured.and_then(|value| serde_json::from_str::<Value>(&value).ok()),
+            }))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    recent_messages.reverse();
+    drop(stmt);
+
+    let discussion_goal = recent_messages.iter().rev().find_map(|message| {
+        (message["role"] == "user")
+            .then(|| message["content"].as_str().map(str::to_string))
+            .flatten()
+    });
+    let mut card_stmt = conn
+        .prepare(
+            "SELECT card.card_type, card.title, card.body FROM ai_cards card
+             JOIN agent_tasks task ON task.id=card.task_id
+             WHERE task.session_id=?1 AND card.status='open'
+             ORDER BY card.rowid DESC LIMIT 8",
+        )
+        .map_err(|e| e.to_string())?;
+    let unresolved_cards = card_stmt
+        .query_map([session_id], |row| {
+            Ok(json!({
+                "type": row.get::<_, String>(0)?,
+                "title": row.get::<_, String>(1)?,
+                "body": row.get::<_, String>(2)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let pending_patch = conn
+        .query_row(
+            "SELECT proposal.id, proposal.title, proposal.status FROM patch_proposals proposal
+             JOIN agent_tasks task ON task.id=proposal.task_id
+             WHERE task.session_id=?1 AND proposal.status IN ('draft','pending','approved')
+             ORDER BY proposal.rowid DESC LIMIT 1",
+            [session_id],
+            |row| {
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "title": row.get::<_, String>(1)?,
+                    "status": row.get::<_, String>(2)?,
+                }))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    Ok(SessionWorkingMemory {
+        discussion_goal,
+        recent_messages,
+        unresolved_cards,
+        pending_patch,
+    })
 }
 
 fn build_change_analysis_prompt(
@@ -862,11 +1132,11 @@ fn handle_runtime_event(project_path: &Path, buffer: &Mutex<String>, event: &Run
 
 fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResult<Value> {
     let conn = open_database(project_path)?;
-    let (session_id, revision, task_type): (String, i64, String) = conn
+    let (session_id, revision, task_type, interaction_mode): (String, i64, String, String) = conn
         .query_row(
-            "SELECT session_id, context_revision, task_type FROM agent_tasks WHERE id=?1",
+            "SELECT session_id, context_revision, task_type, interaction_mode FROM agent_tasks WHERE id=?1",
             [task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string())?;
     let current_revision: i64 = conn
@@ -889,7 +1159,7 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
         .patch_proposal
         .take()
         .filter(|patch| !patch.items.is_empty());
-    if task_type != "edit" && proposed_patch.is_some() {
+    if interaction_mode != "edit" && proposed_patch.is_some() {
         draft.risks.push("只读模式已忽略模型返回的修改提案".into());
     }
     if stale {
@@ -897,7 +1167,7 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
             "分析期间项目已从 revision {revision} 变为 {current_revision}，结果已过期"
         ));
     }
-    let patch_value = if let Some(patch) = proposed_patch.filter(|_| task_type == "edit") {
+    let patch_value = if let Some(patch) = proposed_patch.filter(|_| interaction_mode == "edit") {
         let proposal = propose_patch(
             project_path,
             ProposePatchInput {
@@ -1126,18 +1396,18 @@ fn load_session(conn: &rusqlite::Connection, session_id: &str) -> AppResult<Agen
 
 fn load_task(conn: &rusqlite::Connection, task_id: &str) -> AppResult<AgentTask> {
     conn.query_row(
-        "SELECT id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, result_json, error_json, created_at, started_at, completed_at FROM agent_tasks WHERE id=?1",
+        "SELECT id, session_id, task_type, interaction_mode, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, result_json, error_json, created_at, started_at, completed_at FROM agent_tasks WHERE id=?1",
         [task_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, i64>(7)?, row.get::<_, String>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, String>(13)?, row.get::<_, Option<String>>(14)?, row.get::<_, Option<String>>(15)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, i64>(8)?, row.get::<_, String>(9)?, row.get::<_, Option<String>>(10)?, row.get::<_, Option<String>>(11)?, row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?, row.get::<_, String>(14)?, row.get::<_, Option<String>>(15)?, row.get::<_, Option<String>>(16)?)),
     ).map_err(|_| "OBJECT_NOT_FOUND: AgentTask 不存在".to_string()).and_then(|row| Ok(AgentTask {
-        id: row.0, session_id: row.1, task_type: row.2, agent_type: row.3,
-        selection: serde_json::from_str(&row.4).map_err(|e| e.to_string())?,
-        read_scope: serde_json::from_str(&row.5).map_err(|e| e.to_string())?,
-        write_scope: serde_json::from_str(&row.6).map_err(|e| e.to_string())?,
-        context_revision: row.7, status: row.8, model_provider: row.9, model_name: row.10,
-        result: row.11.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
-        error: row.12.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
-        created_at: row.13, started_at: row.14, completed_at: row.15,
+        id: row.0, session_id: row.1, task_type: row.2, interaction_mode: row.3, agent_type: row.4,
+        selection: serde_json::from_str(&row.5).map_err(|e| e.to_string())?,
+        read_scope: serde_json::from_str(&row.6).map_err(|e| e.to_string())?,
+        write_scope: serde_json::from_str(&row.7).map_err(|e| e.to_string())?,
+        context_revision: row.8, status: row.9, model_provider: row.10, model_name: row.11,
+        result: row.12.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
+        error: row.13.map(|value| serde_json::from_str(&value)).transpose().map_err(|e| e.to_string())?,
+        created_at: row.14, started_at: row.15, completed_at: row.16,
     }))
 }
 
@@ -1285,6 +1555,12 @@ mod tests {
         conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'unit', '正片', ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, composition, created_at, updated_at) VALUES ('shot', 'scene', 0, '镜头04', '旧构图', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO assets (id, project_id, type, name, created_at, updated_at) VALUES ('asset', ?1, 'character', '女主角', ?2, ?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO asset_media (id, asset_id, file_path, label, is_primary, created_at, updated_at) VALUES ('media', 'asset', 'assets/hero.png', '女主角正面设定', 1, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shot_assets (id, shot_id, asset_id, role, created_at, updated_at) VALUES ('shot-asset', 'shot', 'asset', 'subject', ?1, ?1)", [&timestamp]).unwrap();
+        fs::create_dir_all(temp.path().join("assets")).unwrap();
+        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=").unwrap();
+        fs::write(temp.path().join("assets/hero.png"), png).unwrap();
         drop(conn);
         let session = create_session(
             temp.path(),
@@ -1336,6 +1612,8 @@ mod tests {
         let runtime_input = prepared.runtime_input.unwrap();
         assert!(runtime_input.prompt.contains("ContextPackage"));
         assert!(runtime_input.prompt.contains("patchProposal"));
+        assert!(runtime_input.prompt.contains("女主角正面设定"));
+        assert_eq!(runtime_input.attachments.len(), 1);
         let conn = open_database(temp.path()).unwrap();
         assert_eq!(
             conn.query_row(
@@ -1347,7 +1625,7 @@ mod tests {
             1
         );
         drop(conn);
-        let result = complete_agent_task(temp.path(), &prepared.dispatch.task_id, r#"{"summary":"增强前中后景层次","findings":[],"patchProposal":{"title":"构图优化","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"前景遮挡、中景主体、后景纵深","reason":"增强空间层次"}]},"relatedImpacts":[],"permissionRequests":[],"questions":[],"risks":[]}"#).unwrap();
+        let result = complete_agent_task(temp.path(), &prepared.dispatch.task_id, r#"{"summary":"三个方案：方案一增加前景，方案二人物后移，方案三改用高机位","findings":[],"patchProposal":{"title":"构图优化","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"前景遮挡、中景主体、后景纵深","reason":"增强空间层次"}]},"relatedImpacts":[],"permissionRequests":[],"questions":[],"risks":[]}"#).unwrap();
         assert_eq!(result["patchProposal"]["status"], "pending");
         assert_eq!(
             result["patchProposal"]["items"][0]["permissionState"],
@@ -1387,12 +1665,12 @@ mod tests {
             temp.path(),
             SendMessageInput {
                 request_id: "readonly-message".into(),
-                session_id: session.id,
-                message: "只分析构图问题".into(),
+                session_id: session.id.clone(),
+                message: "用第二个，但把人物再往后放一点".into(),
                 workspace: Some("shots".into()),
                 mode: "suggestion".into(),
-                selection: selected,
-                write_scope: scope,
+                selection: selected.clone(),
+                write_scope: scope.clone(),
                 token_budget: 800,
                 provider: None,
                 model: None,
@@ -1400,10 +1678,25 @@ mod tests {
             None,
         )
         .unwrap();
+        let readonly_prompt = readonly.runtime_input.as_ref().unwrap().prompt.clone();
+        assert!(readonly_prompt.contains("方案二人物后移"));
+        assert!(readonly_prompt.contains("用第二个，但把人物再往后放一点"));
+        assert_eq!(readonly.dispatch.route.task_type, "shot_composition");
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT interaction_mode FROM agent_tasks WHERE id=?1",
+                [&readonly.dispatch.task_id],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "suggestion"
+        );
+        drop(conn);
         let readonly_result = complete_agent_task(
             temp.path(),
             &readonly.dispatch.task_id,
-            r#"{"summary":"构图分析","patchProposal":{"title":"不应落库","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"错误修改","reason":"模型越权"}]},"risks":[]}"#,
+            r#"{"summary":"已按方案二理解：人物后移并保留前景层次","patchProposal":{"title":"不应落库","items":[{"objectType":"shot","objectId":"shot","fieldName":"composition","oldValue":"旧构图","newValue":"错误修改","reason":"模型越权"}]},"risks":[]}"#,
         )
         .unwrap();
         assert!(readonly_result["patchProposal"].is_null());
@@ -1421,6 +1714,29 @@ mod tests {
             .unwrap(),
             0
         );
+        drop(conn);
+
+        let third = prepare_task(
+            temp.path(),
+            SendMessageInput {
+                request_id: "third-message".into(),
+                session_id: session.id,
+                message: "继续微调，人物稍向左".into(),
+                workspace: Some("shots".into()),
+                mode: "discussion".into(),
+                selection: selected,
+                write_scope: WriteScope::default(),
+                token_budget: 1_600,
+                provider: None,
+                model: None,
+            },
+            None,
+        )
+        .unwrap();
+        let third_prompt = third.runtime_input.unwrap().prompt;
+        assert!(third_prompt.contains("方案二人物后移"));
+        assert!(third_prompt.contains("人物后移并保留前景层次"));
+        assert!(third_prompt.contains("继续微调，人物稍向左"));
     }
 
     #[test]

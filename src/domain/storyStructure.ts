@@ -55,9 +55,34 @@ function descendantIds(units: ContentUnitRow[], scopeId: string | null): Set<str
 
 export function episodesForScope(units: ContentUnitRow[], scopeId: string | null): ContentUnitRow[] {
   const allowed = descendantIds(units, scopeId);
+  const byId = new Map(units.map((unit) => [unit.id, unit]));
+  const path = (unit: ContentUnitRow) => {
+    const result: Array<[number, string]> = [];
+    let current: ContentUnitRow | undefined = unit;
+    const seen = new Set<string>();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      result.unshift([current.sort_order, current.name]);
+      current = current.parent_id ? byId.get(current.parent_id) : undefined;
+    }
+    return result;
+  };
+  const comparePath = (left: ContentUnitRow, right: ContentUnitRow) => {
+    const a = path(left);
+    const b = path(right);
+    for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+      if (!a[index]) return -1;
+      if (!b[index]) return 1;
+      const order = a[index][0] - b[index][0];
+      if (order) return order;
+      const name = a[index][1].localeCompare(b[index][1], "zh-CN");
+      if (name) return name;
+    }
+    return left.id.localeCompare(right.id);
+  };
   return units
     .filter((unit) => allowed.has(unit.id) && ["episode", "short"].includes(unit.type))
-    .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name, "zh-CN"));
+    .sort(comparePath);
 }
 
 export function elementsForScope(state: ProjectState, scopeId: string | null): StoryElementRow[] {

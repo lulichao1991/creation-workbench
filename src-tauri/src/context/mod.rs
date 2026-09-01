@@ -10,7 +10,7 @@ use crate::app_database::load_feature_flags;
 use crate::database::{new_id, now, open_database, row_to_json, AppResult};
 use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
 
-const CONTEXT_POLICY_VERSION: &str = "context-v2";
+const CONTEXT_POLICY_VERSION: &str = "context-v3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -196,6 +196,14 @@ fn build_context_in_transaction(
         candidates.push(Candidate {
             reference,
             source: "relation",
+            data,
+            memory_id: None,
+        });
+    }
+    for (reference, source, data) in intent_items(conn, &center, &input.task_intent)? {
+        candidates.push(Candidate {
+            reference,
+            source,
             data,
             memory_id: None,
         });
@@ -539,12 +547,20 @@ fn filter_object(
         if field == "path" || field.ends_with("_path") || field == "secret_ref" {
             return Err(format!("敏感本地字段不能进入上下文：{object_type}.{field}"));
         }
-        for key in identity_fields
-            .iter()
-            .chain(std::iter::once(&field.as_str()))
-        {
-            if let Some(value) = object.get(*key) {
-                result.insert((*key).into(), sanitize_value(value.clone()));
+        if compact {
+            for key in identity_fields
+                .iter()
+                .chain(std::iter::once(&field.as_str()))
+            {
+                if let Some(value) = object.get(*key) {
+                    result.insert((*key).into(), sanitize_value(value.clone()));
+                }
+            }
+        } else {
+            for (key, value) in &object {
+                if !key.ends_with("_path") && key != "path" && key != "secret_ref" {
+                    result.insert(key.clone(), sanitize_value(value.clone()));
+                }
             }
         }
         if !object.contains_key(&field) {
@@ -593,6 +609,7 @@ fn compact_fields(object_type: &str) -> &'static [&'static str] {
             "location_text",
             "time_text",
             "summary",
+            "content",
         ],
         "shot" => &[
             "id",
@@ -602,6 +619,17 @@ fn compact_fields(object_type: &str) -> &'static [&'static str] {
             "duration",
             "narrative_purpose",
             "new_information",
+            "shot_size",
+            "camera_height",
+            "camera_direction",
+            "composition",
+            "camera_movement",
+            "subjects",
+            "action",
+            "dialogue",
+            "environment",
+            "start_state",
+            "end_state",
         ],
         "asset" => &[
             "id",
@@ -951,6 +979,132 @@ fn relation_items(
     Ok(items)
 }
 
+fn intent_items(
+    conn: &Connection,
+    center: &ObjectRef,
+    task_intent: &str,
+) -> AppResult<Vec<(ObjectRef, &'static str, Value)>> {
+    let mut items = Vec::new();
+    if task_intent == "project_planning" {
+        let (anchor_sql, anchor_id) = if center.object_type == "contentUnit" {
+            (
+                "SELECT id FROM content_units WHERE id=?1",
+                center.object_id.as_str(),
+            )
+        } else {
+            (
+                "SELECT id FROM content_units WHERE project_id=?1 AND parent_id IS NULL",
+                center.project_id.as_str(),
+            )
+        };
+        let sql = format!(
+            "WITH RECURSIVE tree(id, path) AS (
+               SELECT unit.id, printf('%08d', unit.sort_order) FROM content_units unit
+               WHERE unit.id IN ({anchor_sql})
+               UNION ALL
+               SELECT child.id, tree.path || '.' || printf('%08d', child.sort_order)
+               FROM content_units child JOIN tree ON child.parent_id=tree.id
+             ) SELECT id FROM tree ORDER BY path LIMIT 120"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let ids = stmt
+            .query_map([anchor_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for id in ids {
+            if center.object_type == "contentUnit" && id == center.object_id {
+                continue;
+            }
+            let reference = make_ref(center, "contentUnit", id);
+            items.push((
+                reference.clone(),
+                "descendant",
+                object_value(conn, &reference, true)?,
+            ));
+        }
+        let mut story_stmt = conn
+            .prepare(
+                "SELECT id FROM story_elements WHERE project_id=?1 AND status='active'
+                 ORDER BY type, name, id LIMIT 100",
+            )
+            .map_err(|e| e.to_string())?;
+        let story_ids = story_stmt
+            .query_map([&center.project_id], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for id in story_ids {
+            let reference = make_ref(center, "storyElement", id.clone());
+            items.push((
+                reference.clone(),
+                "story_element",
+                object_value(conn, &reference, true)?,
+            ));
+            let mut occurrence_stmt = conn
+                .prepare(
+                    "SELECT id FROM story_element_occurrences
+                     WHERE story_element_id=?1 ORDER BY sort_order, id LIMIT 200",
+                )
+                .map_err(|e| e.to_string())?;
+            let occurrence_ids = occurrence_stmt
+                .query_map([id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            for occurrence_id in occurrence_ids {
+                let occurrence = make_ref(center, "storyElementOccurrence", occurrence_id);
+                items.push((
+                    occurrence.clone(),
+                    "occurrence",
+                    object_value(conn, &occurrence, true)?,
+                ));
+            }
+        }
+    }
+
+    if task_intent == "story_element_analysis" || center.object_type == "storyElement" {
+        let story_element_id = if center.object_type == "storyElementOccurrence" {
+            conn.query_row(
+                "SELECT story_element_id FROM story_element_occurrences WHERE id=?1",
+                [&center.object_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| e.to_string())?
+        } else {
+            center.object_id.clone()
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, content_unit_id FROM story_element_occurrences
+                 WHERE story_element_id=?1 ORDER BY sort_order, id LIMIT 200",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([story_element_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        for (occurrence_id, unit_id) in rows {
+            let occurrence = make_ref(center, "storyElementOccurrence", occurrence_id);
+            items.push((
+                occurrence.clone(),
+                "occurrence",
+                object_value(conn, &occurrence, true)?,
+            ));
+            let unit = make_ref(center, "contentUnit", unit_id);
+            items.push((
+                unit.clone(),
+                "occurrence_unit",
+                object_value(conn, &unit, true)?,
+            ));
+        }
+    }
+    Ok(items)
+}
+
 fn store_context_package(conn: &Connection, package: &ContextPackage) -> AppResult<()> {
     conn.execute(
         "INSERT INTO context_packages (
@@ -1164,7 +1318,13 @@ mod tests {
             .find(|item| item.source == "center")
             .unwrap();
         assert_eq!(center.data["composition"], "中景低机位");
-        assert!(center.data.get("dialogue").is_none());
+        assert_eq!(center.data["dialogue"], "中心镜头");
+        assert!(first.included_items.iter().any(|item| {
+            item.reference.object_id == "shot-before" && item.data["dialogue"] == "前一个镜头"
+        }));
+        assert!(first.included_items.iter().any(|item| {
+            item.reference.object_id == "scene" && item.data["content"] == "这里只包含当前场事实"
+        }));
 
         let stored: (i64, String) = conn
             .query_row(
@@ -1243,6 +1403,84 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].reference.object_id, "far-20");
         assert!(results[0].snippet.contains("暗号蓝门"));
+    }
+
+    #[test]
+    fn project_planning_loads_ordered_descendants_and_story_occurrences() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Planning Context", "series").unwrap();
+        let mut conn = open_database(temp.path()).unwrap();
+        insert_fixture(&conn, &project.id);
+        let timestamp = now();
+        conn.execute(
+            "INSERT INTO content_units (id, project_id, type, name, summary, sort_order, created_at, updated_at) VALUES ('season', ?1, 'season', '第一季', '季摘要', 1, ?2, ?2)",
+            params![project.id, timestamp],
+        )
+        .unwrap();
+        for index in 0..30 {
+            conn.execute(
+                "INSERT INTO content_units (id, project_id, parent_id, type, name, summary, sort_order, created_at, updated_at) VALUES (?1, ?2, 'season', 'episode', ?3, ?4, ?5, ?6, ?6)",
+                params![format!("episode-{index}"), project.id, format!("EP{:02}", index + 1), format!("第{}集摘要", index + 1), index, timestamp],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO story_elements (id, project_id, type, name, description, status, created_at, updated_at) VALUES ('clue', ?1, 'foreshadowing', '蓝门伏笔', '贯穿整季', 'active', ?2, ?2)",
+            params![project.id, timestamp],
+        )
+        .unwrap();
+        for (id, unit, kind, order) in [
+            ("clue-seed", "episode-0", "seed", 0),
+            ("clue-payoff", "episode-29", "payoff", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO story_element_occurrences (id, story_element_id, content_unit_id, occurrence_type, description, sort_order, created_at, updated_at) VALUES (?1, 'clue', ?2, ?3, ?3, ?4, ?5, ?5)",
+                params![id, unit, kind, order, timestamp],
+            )
+            .unwrap();
+        }
+
+        let package = build_context_with_memories(
+            &mut conn,
+            BuildContextInput {
+                task_id: "task".into(),
+                selection: SelectionSnapshot {
+                    project_id: project.id.clone(),
+                    center: Some(ObjectRef {
+                        project_id: project.id.clone(),
+                        object_type: "project".into(),
+                        object_id: project.id,
+                        field: None,
+                    }),
+                    selected: Vec::new(),
+                    project_revision: 0,
+                },
+                task_intent: "project_planning".into(),
+                expert_type: "writer".into(),
+                token_budget: 100_000,
+            },
+            None,
+        )
+        .unwrap();
+        let descendants = package
+            .included_items
+            .iter()
+            .filter(|item| item.source == "descendant")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            descendants
+                .iter()
+                .filter(|item| item.data["parent_id"] == "season")
+                .count(),
+            30
+        );
+        assert_eq!(descendants[1].data["name"], "第一季");
+        assert!(package.included_items.iter().any(|item| {
+            item.reference.object_id == "clue-seed" && item.source == "occurrence"
+        }));
+        assert!(package.included_items.iter().any(|item| {
+            item.reference.object_id == "clue-payoff" && item.source == "occurrence"
+        }));
     }
 
     #[test]

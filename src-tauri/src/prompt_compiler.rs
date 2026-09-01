@@ -142,9 +142,28 @@ pub struct PromptCompilation {
     pub current_prompt: Option<String>,
     pub source_map: Vec<SourceMapEntry>,
     pub warnings: Vec<PromptWarning>,
+    pub reference_images: Vec<PromptReferenceImage>,
     pub status: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReferenceImage {
+    pub source_type: String,
+    pub source_id: String,
+    pub label: String,
+    pub file_path: String,
+}
+
+#[derive(Debug)]
+struct AssetFact {
+    id: String,
+    name: String,
+    role: String,
+    description: String,
+    references: Vec<PromptReferenceImage>,
 }
 
 #[derive(Debug)]
@@ -161,7 +180,7 @@ struct ShotFact {
     environment: String,
     start_state: String,
     end_state: String,
-    assets: Vec<(String, String, String, bool)>,
+    assets: Vec<AssetFact>,
     keyframes: Vec<(String, String, String)>,
 }
 
@@ -344,8 +363,13 @@ fn load_shots(conn: &Connection, task_id: &str) -> AppResult<Vec<ShotFact>> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     base.into_iter().map(|mut shot| {
-        let mut assets = conn.prepare("SELECT a.id,a.name,sa.role,EXISTS(SELECT 1 FROM asset_media am WHERE am.asset_id=a.id) FROM shot_assets sa JOIN assets a ON a.id=sa.asset_id WHERE sa.shot_id=?1 ORDER BY sa.role,a.name,a.id").map_err(|e|e.to_string())?;
-        shot.assets = assets.query_map([&shot.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get::<_,i64>(3)? != 0))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        let mut assets = conn.prepare("SELECT a.id,a.name,sa.role,a.description FROM shot_assets sa JOIN assets a ON a.id=sa.asset_id WHERE sa.shot_id=?1 ORDER BY sa.role,a.name,a.id").map_err(|e|e.to_string())?;
+        let base_assets = assets.query_map([&shot.id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+        shot.assets = base_assets.into_iter().map(|(id,name,role,description)| {
+            let mut media = conn.prepare("SELECT id,file_path,COALESCE(NULLIF(label,''),?2) FROM asset_media WHERE asset_id=?1 AND media_type='image' ORDER BY is_primary DESC,sort_order,id").map_err(|e|e.to_string())?;
+            let references = media.query_map(params![id,name], |row| Ok(PromptReferenceImage{source_type:"assetMedia".into(),source_id:row.get(0)?,file_path:row.get(1)?,label:row.get(2)?})).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+            Ok(AssetFact{id,name,role,description,references})
+        }).collect::<AppResult<Vec<_>>>()?;
         let mut frames = conn.prepare("SELECT id,type,file_path FROM keyframes WHERE shot_id=?1 AND file_path IS NOT NULL AND status='ready' ORDER BY sort_order,id").map_err(|e|e.to_string())?;
         shot.keyframes = frames.query_map([&shot.id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
         Ok(shot)
@@ -529,13 +553,13 @@ fn compile_prompt(
                 source_id: Some(shot.id.clone()),
             });
         }
-        for (asset_id, name, _, has_media) in &shot.assets {
-            if !has_media {
+        for asset in &shot.assets {
+            if asset.references.is_empty() {
                 warnings.push(PromptWarning {
                     code: "MISSING_ASSET_MEDIA".into(),
                     severity: "warning".into(),
-                    message: format!("资产 {name} 没有正式媒体"),
-                    source_id: Some(asset_id.clone()),
+                    message: format!("资产 {} 没有正式媒体", asset.name),
+                    source_id: Some(asset.id.clone()),
                 });
             }
         }
@@ -561,14 +585,18 @@ fn compile_prompt(
         let assets = shot
             .assets
             .iter()
-            .map(|(_, name, role, has_media)| {
+            .map(|asset| {
+                let visual_definition = if asset.description.trim().is_empty() {
+                    "未填写视觉定义".to_string()
+                } else {
+                    format!("视觉定义：{}", asset.description.trim())
+                };
                 format!(
-                    "{name}({role}{})",
-                    if *has_media {
-                        ",正式媒体"
-                    } else {
-                        ",缺少媒体"
-                    }
+                    "{}({}；{}；{}张正式参考图)",
+                    asset.name,
+                    asset.role,
+                    visual_definition,
+                    asset.references.len()
                 )
             })
             .collect::<Vec<_>>()
@@ -576,7 +604,7 @@ fn compile_prompt(
         let frames = shot
             .keyframes
             .iter()
-            .map(|(_, kind, path)| format!("{kind}:{path}"))
+            .map(|(id, kind, _)| format!("{kind}:参考图[{id}]"))
             .collect::<Vec<_>>()
             .join("、");
         shot_segments.push(Segment {
@@ -630,6 +658,28 @@ fn compile_prompt(
             ("constraints", constraints, constraint_map),
         ],
     );
+    let mut reference_images = Vec::new();
+    for shot in &shots {
+        for asset in &shot.assets {
+            reference_images.extend(asset.references.iter().cloned());
+        }
+        reference_images.extend(shot.keyframes.iter().map(|(id, kind, path)| {
+            PromptReferenceImage {
+                source_type: "keyframe".into(),
+                source_id: id.clone(),
+                label: format!("{} · {}", shot.title, kind),
+                file_path: path.clone(),
+            }
+        }));
+    }
+    reference_images.sort_by(|left, right| {
+        left.source_type
+            .cmp(&right.source_type)
+            .then(left.source_id.cmp(&right.source_id))
+    });
+    reference_images.dedup_by(|left, right| {
+        left.source_type == right.source_type && left.source_id == right.source_id
+    });
     for pattern in &profile.prohibited_patterns {
         if !pattern.is_empty() && compiled_prompt.contains(pattern) {
             warnings.push(PromptWarning {
@@ -641,12 +691,12 @@ fn compile_prompt(
         }
     }
     let timestamp = now();
-    conn.execute("INSERT INTO prompt_compilations (id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,source_map_json,warnings_json,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'compiled',?11,?11)",params![input.request_id,input.generation_task_id,profile.key,profile.version,template.id,template.version,revision,compiled_prompt,json!(source_map).to_string(),json!(warnings).to_string(),timestamp]).map_err(|e|format!("保存提示词编译记录失败：{e}"))?;
+    conn.execute("INSERT INTO prompt_compilations (id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,source_map_json,warnings_json,reference_images_json,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'compiled',?12,?12)",params![input.request_id,input.generation_task_id,profile.key,profile.version,template.id,template.version,revision,compiled_prompt,json!(source_map).to_string(),json!(warnings).to_string(),json!(reference_images).to_string(),timestamp]).map_err(|e|format!("保存提示词编译记录失败：{e}"))?;
     load_compilation(&conn, &input.request_id)
 }
 
 fn load_compilation(conn: &Connection, id: &str) -> AppResult<PromptCompilation> {
-    conn.query_row("SELECT id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,user_override,current_prompt,source_map_json,warnings_json,status,created_at,updated_at FROM prompt_compilations WHERE id=?1",[id],|row|Ok(PromptCompilation{id:row.get(0)?,generation_task_id:row.get(1)?,model_profile_key:row.get(2)?,model_profile_version:row.get(3)?,template_id:row.get(4)?,template_version:row.get(5)?,source_revision:row.get(6)?,compiled_prompt:row.get(7)?,user_override:row.get(8)?,current_prompt:row.get(9)?,source_map:serde_json::from_str(&row.get::<_,String>(10)?).unwrap_or_default(),warnings:serde_json::from_str(&row.get::<_,String>(11)?).unwrap_or_default(),status:row.get(12)?,created_at:row.get(13)?,updated_at:row.get(14)?})).map_err(|_|"OBJECT_NOT_FOUND: 编译记录不存在".to_string())
+    conn.query_row("SELECT id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,user_override,current_prompt,source_map_json,warnings_json,reference_images_json,status,created_at,updated_at FROM prompt_compilations WHERE id=?1",[id],|row|Ok(PromptCompilation{id:row.get(0)?,generation_task_id:row.get(1)?,model_profile_key:row.get(2)?,model_profile_version:row.get(3)?,template_id:row.get(4)?,template_version:row.get(5)?,source_revision:row.get(6)?,compiled_prompt:row.get(7)?,user_override:row.get(8)?,current_prompt:row.get(9)?,source_map:serde_json::from_str(&row.get::<_,String>(10)?).unwrap_or_default(),warnings:serde_json::from_str(&row.get::<_,String>(11)?).unwrap_or_default(),reference_images:serde_json::from_str(&row.get::<_,String>(12)?).unwrap_or_default(),status:row.get(13)?,created_at:row.get(14)?,updated_at:row.get(15)?})).map_err(|_|"OBJECT_NOT_FOUND: 编译记录不存在".to_string())
 }
 
 fn list_compilations(project_path: &Path, task_id: &str) -> AppResult<Vec<PromptCompilation>> {
@@ -779,6 +829,7 @@ mod tests {
     use super::*;
     use crate::database::{init_database, new_id};
     use crate::mutation::{apply_batch_mutation, BatchMutationRequest};
+    use std::fs;
 
     fn request(
         action: &str,
@@ -858,10 +909,15 @@ mod tests {
         let shot_b = new_id();
         let task = new_id();
         let asset = new_id();
+        let missing_asset = new_id();
         apply_batch_mutation(project.path().to_string_lossy().into(),BatchMutationRequest{mutations:vec![
             request("create","contentUnit",Some(&unit),json!({"project_id":descriptor.id,"type":"short","name":"正片","sort_order":0})),request("create","script",Some(&script),json!({"content_unit_id":unit,"title":"正片"})),request("create","scene",Some(&scene),json!({"script_id":script,"title":"场","sort_order":0})),
             request("create","shot",Some(&shot_a),json!({"scene_id":scene,"title":"镜头 A","sort_order":0,"duration":3.0,"subjects":"角色","action":"前进"})),request("create","shot",Some(&shot_b),json!({"scene_id":scene,"title":"镜头 B","sort_order":1,"duration":3.0,"subjects":"角色","action":"停下"})),
-            request("create","asset",Some(&asset),json!({"project_id":descriptor.id,"type":"character","name":"主角"})),request("create","shotAsset",None,json!({"shot_id":shot_a,"asset_id":asset,"role":"subject"})),request("create","generationTask",Some(&task),json!({"content_unit_id":unit,"name":"任务","prompt":"人工原稿"})),request("create","generationTaskShot",None,json!({"generation_task_id":task,"shot_id":shot_a,"sort_order":0})),request("create","generationTaskShot",None,json!({"generation_task_id":task,"shot_id":shot_b,"sort_order":1}))],change_set_id:None,change_set_name:Some("测试数据".into()),source_type:None,source_id:None}).unwrap();
+            request("create","asset",Some(&asset),json!({"project_id":descriptor.id,"type":"character","name":"主角","description":"黑色短发，深蓝风衣，左眉有浅色疤痕"})),request("create","asset",Some(&missing_asset),json!({"project_id":descriptor.id,"type":"prop","name":"旧信封"})),request("create","shotAsset",None,json!({"shot_id":shot_a,"asset_id":asset,"role":"subject"})),request("create","shotAsset",None,json!({"shot_id":shot_a,"asset_id":missing_asset,"role":"prop"})),request("create","generationTask",Some(&task),json!({"content_unit_id":unit,"name":"任务","prompt":"人工原稿"})),request("create","generationTaskShot",None,json!({"generation_task_id":task,"shot_id":shot_a,"sort_order":0})),request("create","generationTaskShot",None,json!({"generation_task_id":task,"shot_id":shot_b,"sort_order":1}))],change_set_id:None,change_set_name:Some("测试数据".into()),source_type:None,source_id:None}).unwrap();
+        fs::create_dir_all(project.path().join("assets")).unwrap();
+        fs::write(project.path().join("assets/hero.png"), b"formal-reference").unwrap();
+        let conn = open_database(project.path()).unwrap();
+        conn.execute("INSERT INTO asset_media (id,asset_id,file_path,label,is_primary,created_at,updated_at) VALUES ('hero-media',?1,'assets/hero.png','主角标准设定',1,?2,?2)", params![asset,now()]).unwrap();
         (app, project, task)
     }
 
@@ -905,6 +961,12 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.code == "MISSING_ASSET_MEDIA"));
+        assert!(first
+            .compiled_prompt
+            .contains("黑色短发，深蓝风衣，左眉有浅色疤痕"));
+        assert!(!first.compiled_prompt.contains("assets/hero.png"));
+        assert_eq!(first.reference_images.len(), 1);
+        assert_eq!(first.reference_images[0].file_path, "assets/hero.png");
         for entry in &first.source_map {
             assert!(!first.compiled_prompt[entry.start..entry.end].is_empty());
         }

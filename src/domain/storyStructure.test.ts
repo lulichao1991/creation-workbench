@@ -17,6 +17,18 @@ describe("advanced story structure", () => {
     expect(episodesForScope(units, "season")[29].id).toBe("ep-29");
   });
 
+  it("orders project episodes by the full season and episode path", () => {
+    const units = [
+      row("season-2", null, "season", 1),
+      row("s2e2", "season-2", "episode", 1),
+      row("s2e1", "season-2", "episode", 0),
+      row("season-1", null, "season", 0),
+      row("s1e2", "season-1", "episode", 1),
+      row("s1e1", "season-1", "episode", 0),
+    ];
+    expect(episodesForScope(units, null).map((unit) => unit.id)).toEqual(["s1e1", "s1e2", "s2e1", "s2e2"]);
+  });
+
   it("inherits a season story element when an episode is the current scope", () => {
     const state = baseState();
     state.contentUnits = [row("season", null, "season", 0), row("ep", "season", "episode", 0)];

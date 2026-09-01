@@ -60,9 +60,17 @@ export interface PromptCompilation {
   currentPrompt: string | null;
   sourceMap: PromptSourceMapEntry[];
   warnings: PromptWarning[];
+  referenceImages: PromptReferenceImage[];
   status: "compiled" | "current" | "stale";
   createdAt: string;
   updatedAt: string;
+}
+
+export interface PromptReferenceImage {
+  sourceType: "assetMedia" | "keyframe";
+  sourceId: string;
+  label: string;
+  filePath: string;
 }
 
 export const defaultModelProfile: SaveModelProfileInput = {

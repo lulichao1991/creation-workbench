@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 9;
+pub const CURRENT_SCHEMA_VERSION: i64 = 10;
 
 pub const AGENT_TABLES: &[&str] = &[
     "expert_team_members",
@@ -129,6 +129,7 @@ pub fn init_database(
         .map_err(|e| format!("初始化提示词编译结构失败：{e}"))?;
     conn.execute_batch(MIGRATION_V9)
         .map_err(|e| format!("初始化专家团结构失败：{e}"))?;
+    migrate_v10(&conn).map_err(|e| format!("初始化 V2 beta 修复结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -204,6 +205,9 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
         tx.execute_batch(MIGRATION_V9)
             .map_err(|e| format!("迁移到数据库版本 9 失败：{e}"))?;
     }
+    if version < 10 {
+        migrate_v10(&tx).map_err(|e| format!("迁移到数据库版本 10 失败：{e}"))?;
+    }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("更新数据库版本失败：{e}"))?;
@@ -228,6 +232,41 @@ fn verify_database(conn: &Connection) -> AppResult<()> {
         return Err(format!("数据库完整性检查失败：{integrity}"));
     }
     Ok(())
+}
+
+fn migrate_v10(conn: &Connection) -> AppResult<()> {
+    for (table, column, definition) in [
+        (
+            "agent_tasks",
+            "interaction_mode",
+            "TEXT NOT NULL DEFAULT 'edit'",
+        ),
+        ("project_memories", "memory_key", "TEXT"),
+        (
+            "prompt_compilations",
+            "reference_images_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        ),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_project_memories_conflict_key
+         ON project_memories(scope_type, scope_id, category, memory_key, status, updated_at);",
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn descriptor_from_conn(

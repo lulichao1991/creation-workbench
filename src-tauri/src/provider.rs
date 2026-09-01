@@ -170,7 +170,8 @@ pub fn provider_save(app: tauri::AppHandle, input: SaveProviderInput) -> AppResu
     };
     let timestamp = now();
     let created_at = existing.map(|(created_at, _)| created_at);
-    let supports_references = input.provider_type == "mock";
+    let supports_references =
+        input.provider_type == "mock" || input.allow_image_upload.unwrap_or(false);
     let capabilities = json!({
         "textToImage": true,
         "imageToImage": supports_references,

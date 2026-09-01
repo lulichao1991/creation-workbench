@@ -3,7 +3,7 @@ import { promptForEditing, type PromptCompilation } from "./promptCompiler";
 
 const compilation = (patch: Partial<PromptCompilation> = {}): PromptCompilation => ({
   id: "c", generationTaskId: "t", modelProfileKey: "m", modelProfileVersion: "1", templateId: "p", templateVersion: "1", sourceRevision: 1,
-  compiledPrompt: "编译稿", userOverride: null, currentPrompt: null, sourceMap: [], warnings: [], status: "compiled", createdAt: "", updatedAt: "", ...patch,
+  compiledPrompt: "编译稿", userOverride: null, currentPrompt: null, sourceMap: [], warnings: [], referenceImages: [], status: "compiled", createdAt: "", updatedAt: "", ...patch,
 });
 
 describe("prompt compiler presentation", () => {

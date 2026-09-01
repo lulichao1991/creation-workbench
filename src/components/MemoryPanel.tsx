@@ -34,6 +34,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
   const [storage, setStorage] = useState<MemoryStorage>("project");
   const [scope, setScope] = useState<"project" | "contentUnit">("project");
   const [category, setCategory] = useState("preference");
+  const [memoryKey, setMemoryKey] = useState("");
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<"candidate" | "active">("candidate");
 
@@ -86,19 +87,21 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
     return { scopeType: "project" as const, scopeId: project.id };
   };
 
-  const matchingConflict = (targetStorage: MemoryStorage, scopeType: string, scopeId: string | undefined, targetCategory: string, exceptId?: string) =>
-    memories.find((memory) => memory.id !== exceptId
+  const matchingConflict = (targetStorage: MemoryStorage, scopeType: string, scopeId: string | undefined, targetCategory: string, targetMemoryKey: string | null, exceptId?: string) =>
+    targetMemoryKey ? memories.find((memory) => memory.id !== exceptId
       && memory.storage === targetStorage
       && memory.status === "active"
       && memory.scopeType === scopeType
       && memory.scopeId === (scopeId ?? null)
-      && memory.category === targetCategory);
+      && memory.category === targetCategory
+      && memory.memoryKey === targetMemoryKey) : undefined;
 
   const create = async () => {
     if (!content.trim() || !category.trim()) return;
     const target = selectedScope();
+    const conflictKey = memoryKey.trim() || null;
     const conflict = status === "active"
-      ? matchingConflict(storage, target.scopeType, target.scopeId, category.trim())
+      ? matchingConflict(storage, target.scopeType, target.scopeId, category.trim(), conflictKey)
       : undefined;
     if (conflict && !window.confirm(`同范围“${category.trim()}”已有生效记忆。明确替代它吗？`)) return;
     if (storage === "global" && status === "active" && !window.confirm("确认将这条内容设为跨项目长期记忆？")) return;
@@ -107,6 +110,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
       storage,
       ...target,
       category: category.trim(),
+      memoryKey: conflictKey ?? undefined,
       content: content.trim(),
       status,
       sourceType: "user",
@@ -118,6 +122,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
     try {
       await api.memoryCreate(project.path, input);
       setContent("");
+      setMemoryKey("");
       setCreating(false);
       await refresh();
     } catch (error) {
@@ -144,7 +149,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
   };
 
   const activate = async (memory: MemoryRecord) => {
-    const conflict = matchingConflict(memory.storage, memory.scopeType, memory.scopeId ?? undefined, memory.category, memory.id);
+    const conflict = matchingConflict(memory.storage, memory.scopeType, memory.scopeId ?? undefined, memory.category, memory.memoryKey, memory.id);
     if (conflict && !window.confirm(`激活会明确替代“${conflict.content}”。继续吗？`)) return;
     if (memory.storage === "global" && !window.confirm("确认激活这条跨项目长期记忆？")) return;
     await update(memory, { status: "active", supersedesId: conflict?.id, confirmed: true });
@@ -161,7 +166,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
     if (toUnit && !currentUnitId) return;
     const scopeType = toUnit ? "contentUnit" : "project";
     const scopeId = toUnit ? currentUnitId! : project.id;
-    const conflict = matchingConflict("project", scopeType, scopeId, memory.category, memory.id);
+    const conflict = matchingConflict("project", scopeType, scopeId, memory.category, memory.memoryKey, memory.id);
     if (conflict && !window.confirm(`变更范围会明确替代“${conflict.content}”。继续吗？`)) return;
     await update(memory, {
       scopeType,
@@ -183,6 +188,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
         scopeType: memory.scopeType,
         scopeId: memory.scopeId ?? undefined,
         category: memory.category,
+        memoryKey: memory.memoryKey ?? undefined,
         content: replacement,
         status: "active",
         sourceType: "user",
@@ -238,6 +244,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
               <textarea aria-label="记忆内容" value={content} placeholder="需要明确记住的偏好或共识" onChange={(event) => setContent(event.target.value)} />
               <div>
                 <input aria-label="记忆分类" value={category} placeholder="分类" onChange={(event) => setCategory(event.target.value)} />
+                <input aria-label="记忆冲突键" value={memoryKey} placeholder="冲突键（可选；同键才互斥）" onChange={(event) => setMemoryKey(event.target.value)} />
                 <select aria-label="存储位置" value={storage} onChange={(event) => setStorage(event.target.value as MemoryStorage)}>
                   <option value="project">当前项目</option><option value="global">跨项目长期</option>
                 </select>
@@ -251,7 +258,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
             {!memories.length && <small className="memory-empty">暂无匹配记忆</small>}
             {memories.map((memory) => (
               <article className={`memory-card ${memory.status}`} key={`${memory.storage}:${memory.id}`}>
-                <header><span>{memory.storage === "global" ? "长期" : memory.scopeType === "contentUnit" ? "当前单元" : "项目"}</span><strong>{memory.category}</strong><em>{statusLabels[memory.status]}</em></header>
+                <header><span>{memory.storage === "global" ? "长期" : memory.scopeType === "contentUnit" ? "当前单元" : "项目"}</span><strong>{memory.category}{memory.memoryKey ? ` · ${memory.memoryKey}` : ""}</strong><em>{statusLabels[memory.status]}</em></header>
                 <p>{memory.content}</p>
                 <small>来源：{memory.sourceType}{memory.sources[0]?.excerpt ? ` · ${memory.sources[0].excerpt}` : ""}</small>
                 {memory.usedByTaskIds.length > 0 && <small>已用于任务：{memory.usedByTaskIds.join("、")}</small>}

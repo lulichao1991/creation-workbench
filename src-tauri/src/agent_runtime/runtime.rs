@@ -13,12 +13,35 @@ pub struct RuntimeTaskInput {
     pub prompt: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<RuntimeAttachment>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAttachment {
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskHandle {
     pub task_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDiagnostics {
+    pub found: bool,
+    pub executable_path: Option<String>,
+    pub version: Option<String>,
+    pub rpc_handshake: bool,
+    pub current_provider: Option<String>,
+    pub current_model: Option<String>,
+    pub supports_vision: Option<bool>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
