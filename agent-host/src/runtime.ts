@@ -87,6 +87,12 @@ export class WorkbenchAgentHost {
     switch (request.type) {
       case "doctor":
         return this.doctor();
+      case "get_models":
+        return this.getModels();
+      case "login_provider":
+        return this.loginProvider(request);
+      case "logout_provider":
+        return this.logoutProvider(request);
       case "create_session":
         return this.createSession(request);
       case "send_message":
@@ -113,6 +119,43 @@ export class WorkbenchAgentHost {
       entry.session.dispose();
     }
     this.sessions.clear();
+  }
+
+  private getModels(): Record<string, unknown> {
+    return {
+      providers: this.modelRuntime.getProviders().map((provider) => {
+        const auth = this.modelRuntime.getProviderAuthStatus(provider.id);
+        return {
+          id: provider.id,
+          name: provider.name,
+          authConfigured: auth.configured,
+          authSource: auth.source,
+          authLabel: auth.label,
+          models: this.modelRuntime.getModels(provider.id).map((model) => ({
+            id: model.id,
+            name: model.name,
+            supportsVision: model.input.includes("image"),
+            reasoning: model.reasoning,
+            contextWindow: model.contextWindow,
+            maxTokens: model.maxTokens,
+          })),
+        };
+      }),
+    };
+  }
+
+  private async loginProvider(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = requiredString(request, "providerId");
+    if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
+    await this.modelRuntime.setRuntimeApiKey(providerId, requiredString(request, "apiKey"));
+    return { providerId, authConfigured: true };
+  }
+
+  private async logoutProvider(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = requiredString(request, "providerId");
+    if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
+    await this.modelRuntime.logout(providerId);
+    return { providerId, authConfigured: false };
   }
 
   private async createSession(request: HostRequest): Promise<Record<string, unknown>> {

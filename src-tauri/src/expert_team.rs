@@ -3,6 +3,7 @@ use crate::agent_application::{
     visual_attachments,
 };
 use crate::agent_gateway::{expert_tool_names, professional_system_prompt};
+use crate::agent_models::model_choice_for_role;
 use crate::agent_runtime::{
     use_pi_sdk_runtime, RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput,
     RUNTIME_EVENT_NAME,
@@ -128,9 +129,18 @@ fn default_token_budget() -> usize {
 pub fn expert_team_request(
     app: tauri::AppHandle,
     project_path: String,
-    input: RequestExpertTeamInput,
+    mut input: RequestExpertTeamInput,
 ) -> AppResult<ExpertTeamConsultation> {
     ensure_expert_team_enabled(&app)?;
+    if use_pi_sdk_runtime() {
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+        let choice = model_choice_for_role(&app_data_dir, "main")?;
+        input.provider = input.provider.or(choice.provider);
+        input.model = input.model.or(choice.model);
+    }
     request_consultation(Path::new(&project_path), input)
 }
 
@@ -478,13 +488,26 @@ fn prepare_member_tasks(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|e| e.to_string())?;
+        let app_choice = if pi_sdk_runtime {
+            app_data_dir
+                .map(|path| model_choice_for_role(path, &member.expert_type))
+                .transpose()?
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
         let (provider, model) = expert_model_override(
             &conn,
             &project_id,
             &member.expert_type,
-            request_provider,
-            request_model,
+            app_choice.provider.or(request_provider),
+            app_choice.model.or(request_model),
         )?;
+        let thinking_level = if pi_sdk_runtime {
+            app_choice.thinking_level.or_else(|| Some("medium".into()))
+        } else {
+            None
+        };
         let timestamp = now();
         if pi_sdk_runtime {
             conn.execute(
@@ -632,7 +655,7 @@ fn prepare_member_tasks(
                 provider,
                 model,
                 system_prompt,
-                thinking_level: pi_sdk_runtime.then(|| "medium".into()),
+                thinking_level,
                 allowed_tools,
                 allow_call_expert: pi_sdk_runtime.then_some(false),
                 attachments,

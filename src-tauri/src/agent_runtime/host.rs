@@ -9,8 +9,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::runtime::{
-    AgentRuntime, RuntimeDiagnostics, RuntimeEvent, RuntimeEventSink, RuntimeTaskHandle,
-    RuntimeTaskInput, RuntimeTaskState,
+    AgentModelCatalog, AgentRuntime, RuntimeDiagnostics, RuntimeEvent, RuntimeEventSink,
+    RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState,
 };
 use crate::agent_gateway::{execute_tool, ToolGatewayRequest};
 use crate::database::{new_id, AppResult};
@@ -338,6 +338,25 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
             .get(task_id)
             .map(|task| task.state.clone())
             .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))
+    }
+
+    fn get_models(&mut self) -> AppResult<AgentModelCatalog> {
+        let value = self.process()?.request("get_models", json!({}))?;
+        serde_json::from_value(value).map_err(|error| format!("解析模型目录失败：{error}"))
+    }
+
+    fn login_provider(&mut self, provider_id: &str, api_key: &str) -> AppResult<()> {
+        self.process()?.request(
+            "login_provider",
+            json!({ "providerId": provider_id, "apiKey": api_key }),
+        )?;
+        Ok(())
+    }
+
+    fn logout_provider(&mut self, provider_id: &str) -> AppResult<()> {
+        self.process()?
+            .request("logout_provider", json!({ "providerId": provider_id }))?;
+        Ok(())
     }
 
     fn dispose(&mut self) -> AppResult<()> {

@@ -18,6 +18,8 @@ import type {
   RuntimeTaskInput,
   RuntimeTaskState,
   RuntimeDiagnostics,
+  AgentModelConfiguration,
+  AgentModelSettings,
 } from "./features/agent/runtime";
 import type {
   BuildContextInput,
@@ -102,6 +104,13 @@ export const api = {
   agentGetTaskState: (taskId: string) =>
     invoke<RuntimeTaskState>("agent_get_task_state", { taskId }),
   agentRuntimeDoctor: () => invoke<RuntimeDiagnostics>("agent_runtime_doctor"),
+  agentModelSettingsGet: () => invoke<AgentModelConfiguration>("agent_model_settings_get"),
+  agentModelSettingsSave: (settings: AgentModelSettings) =>
+    invoke<AgentModelSettings>("agent_model_settings_save", { settings }),
+  agentProviderLogin: (providerId: string, apiKey: string) =>
+    invoke<void>("agent_provider_login", { input: { providerId, apiKey } }),
+  agentProviderLogout: (providerId: string) =>
+    invoke<void>("agent_provider_logout", { providerId }),
   contextBuild: (projectPath: string, input: BuildContextInput) =>
     invoke<ContextPackage>("context_build", { projectPath, input }),
   contextSearch: (projectPath: string, query: string, limit = 20) =>

@@ -1,3 +1,4 @@
+use crate::agent_models::model_choice_for_role;
 use crate::agent_runtime::{
     ensure_agent_core_enabled, use_pi_sdk_runtime, RuntimeAttachment, RuntimeEvent,
     RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
@@ -368,12 +369,31 @@ pub fn agent_send_message(
         None
     };
     let prepared = prepare_task(Path::new(&project_path), input, global_memories.as_deref())?;
+    let role = prepared
+        .dispatch
+        .route
+        .expert_type
+        .as_deref()
+        .unwrap_or("main")
+        .to_string();
+    let task_id = prepared.dispatch.task_id.clone();
     let Some(mut runtime_input) = prepared.runtime_input else {
         return Ok(prepared.dispatch);
     };
+    if use_pi_sdk_runtime() {
+        let choice = model_choice_for_role(&app_data_dir, &role)?;
+        runtime_input.provider = runtime_input.provider.or(choice.provider);
+        runtime_input.model = runtime_input.model.or(choice.model);
+        runtime_input.thinking_level = runtime_input.thinking_level.or(choice.thinking_level);
+        open_database(Path::new(&project_path))?
+            .execute(
+                "UPDATE agent_tasks SET model_provider=?1, model_name=?2 WHERE id=?3",
+                params![runtime_input.provider, runtime_input.model, task_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     runtime_input.project_path = Some(project_path.clone());
     runtime_input.app_data_dir = Some(app_data_dir.to_string_lossy().into_owned());
-    let task_id = prepared.dispatch.task_id.clone();
     let buffer = Arc::new(Mutex::new(String::new()));
     let sink_buffer = Arc::clone(&buffer);
     let sink_path = PathBuf::from(&project_path);

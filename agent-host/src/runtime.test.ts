@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -418,6 +418,30 @@ test("runs three independent professional AgentSessions in parallel with distinc
     assert.equal(faux.state.callCount, 6);
   } finally {
     host.dispose();
+  }
+});
+
+test("lists ModelRuntime capabilities and manages provider API-key login", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-model-runtime-"));
+  const host = await WorkbenchAgentHost.create(dataDir, () => {});
+  try {
+    const before = await host.handle({ id: "models-before", type: "get_models" });
+    const providers = (before as { providers: Array<{ id: string; models: Array<{ supportsVision: boolean }> }> }).providers;
+    assert.ok(providers.length > 0);
+    assert.ok(providers.some((provider) => provider.models.length > 0));
+    assert.ok(providers.flatMap((provider) => provider.models).every((model) => typeof model.supportsVision === "boolean"));
+
+    const provider = providers.find((candidate) => candidate.id === "anthropic") ?? providers[0];
+    await host.handle({ id: "login", type: "login_provider", providerId: provider.id, apiKey: "test-api-key" });
+    const loggedIn = await host.handle({ id: "models-after", type: "get_models" });
+    assert.equal(
+      (loggedIn as { providers: Array<{ id: string; authConfigured: boolean }> }).providers.find((candidate) => candidate.id === provider.id)?.authConfigured,
+      true,
+    );
+    await host.handle({ id: "logout", type: "logout_provider", providerId: provider.id });
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

@@ -204,6 +204,20 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .agent-session-row { min-height: 36px; display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
 .agent-session-row select { min-width: 0; height: 26px; padding: 0 6px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; font-size: 9px; }
 .agent-session-row button { min-height: 26px; padding: 0 7px; font-size: 8px; }
+.agent-model-settings { border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.agent-model-settings > summary { display: flex; align-items: center; gap: 5px; padding: 7px 9px; color: var(--muted); cursor: pointer; font-size: 9px; }
+.agent-model-settings-body { display: grid; gap: 8px; padding: 0 9px 9px; }
+.agent-model-grid { display: grid; grid-template-columns: 1fr 1.3fr .7fr; gap: 6px; }
+.agent-model-grid label { display: grid; gap: 3px; color: var(--muted); font-size: 8px; }
+.agent-model-grid select, .agent-model-override select, .agent-provider-auth input { min-width: 0; height: 27px; padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--text); background: var(--surface-1); font-size: 8px; }
+.agent-model-capabilities { margin: 0; color: var(--muted); font-size: 8px; }
+.agent-provider-auth { display: grid; grid-template-columns: minmax(110px,.7fr) minmax(150px,1.3fr) auto auto; align-items: end; gap: 6px; }
+.agent-provider-auth div { display: grid; gap: 2px; }
+.agent-provider-auth small { color: var(--muted); font-size: 7px; }
+.agent-model-overrides { display: grid; gap: 4px; }
+.agent-model-overrides > strong { font-size: 8px; }
+.agent-model-override { display: grid; grid-template-columns: 68px minmax(0,1fr) 78px; align-items: center; gap: 5px; color: var(--muted); font-size: 8px; }
+.agent-model-save { justify-self: end; }
 .agent-context-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
 .agent-context-strip > div { min-width: 0; display: grid; gap: 3px; padding: 8px 10px; background: var(--surface-2); }
 .agent-context-strip > div:first-child { grid-column: 1/-1; }

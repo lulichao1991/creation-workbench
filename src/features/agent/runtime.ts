@@ -33,6 +33,40 @@ export interface RuntimeDiagnostics {
   error: string | null;
 }
 
+export interface AgentModel {
+  id: string;
+  name: string;
+  supportsVision: boolean;
+  reasoning: boolean;
+  contextWindow: number;
+  maxTokens: number;
+}
+
+export interface AgentModelProvider {
+  id: string;
+  name: string;
+  authConfigured: boolean;
+  authSource: string | null;
+  authLabel: string | null;
+  models: AgentModel[];
+}
+
+export interface AgentModelChoice {
+  provider: string | null;
+  model: string | null;
+  thinkingLevel: string | null;
+}
+
+export interface AgentModelSettings {
+  defaultModel: AgentModelChoice;
+  professionalOverrides: Record<string, AgentModelChoice>;
+}
+
+export interface AgentModelConfiguration {
+  catalog: { providers: AgentModelProvider[] };
+  settings: AgentModelSettings;
+}
+
 export type RuntimeTaskState = "running" | "completed" | "cancelled" | "failed";
 
 export type RuntimeEvent =

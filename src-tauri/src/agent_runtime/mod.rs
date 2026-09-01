@@ -15,7 +15,8 @@ use pi::{diagnose_pi_runtime, PiRuntimeAdapter};
 use runtime::AgentRuntime;
 
 pub use runtime::{
-    RuntimeAttachment, RuntimeDiagnostics, RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState,
+    AgentModelCatalog, RuntimeAttachment, RuntimeDiagnostics, RuntimeTaskHandle, RuntimeTaskInput,
+    RuntimeTaskState,
 };
 pub(crate) use runtime::{RuntimeEvent, RuntimeEventSink};
 
@@ -63,6 +64,27 @@ impl RuntimeState {
             .lock()
             .map_err(|_| "Runtime 状态锁损坏".to_string())?
             .close_session(session_id)
+    }
+
+    pub(crate) fn get_models(&self) -> AppResult<AgentModelCatalog> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .get_models()
+    }
+
+    pub(crate) fn login_provider(&self, provider_id: &str, api_key: &str) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .login_provider(provider_id, api_key)
+    }
+
+    pub(crate) fn logout_provider(&self, provider_id: &str) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .logout_provider(provider_id)
     }
 
     #[cfg(test)]

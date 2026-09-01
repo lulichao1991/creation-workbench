@@ -1,5 +1,6 @@
 mod agent_application;
 mod agent_gateway;
+mod agent_models;
 mod agent_runtime;
 mod app_database;
 mod commands;
@@ -18,6 +19,10 @@ use agent_application::{
     agent_close_session, agent_create_session, agent_get_task, agent_list_experts,
     agent_list_messages, agent_list_sessions, agent_resolve_intent, agent_resume_session,
     agent_send_message,
+};
+use agent_models::{
+    agent_model_settings_get, agent_model_settings_save, agent_provider_login,
+    agent_provider_logout,
 };
 use agent_runtime::{
     agent_cancel_task, agent_get_task_state, agent_runtime_doctor, agent_runtime_follow_up,
@@ -90,6 +95,10 @@ pub fn run() {
             agent_runtime_follow_up,
             agent_cancel_task,
             agent_get_task_state,
+            agent_model_settings_get,
+            agent_model_settings_save,
+            agent_provider_login,
+            agent_provider_logout,
             context_build,
             context_search,
             memory_list,

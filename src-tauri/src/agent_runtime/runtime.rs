@@ -61,6 +61,34 @@ pub struct RuntimeDiagnostics {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelCatalog {
+    pub providers: Vec<AgentModelProvider>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelProvider {
+    pub id: String,
+    pub name: String,
+    pub auth_configured: bool,
+    pub auth_source: Option<String>,
+    pub auth_label: Option<String>,
+    pub models: Vec<AgentModel>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModel {
+    pub id: String,
+    pub name: String,
+    pub supports_vision: bool,
+    pub reasoning: bool,
+    pub context_window: usize,
+    pub max_tokens: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeTaskState {
@@ -123,5 +151,14 @@ pub trait AgentRuntime: Send {
     fn cancel_task(&mut self, task_id: &str) -> AppResult<()>;
     fn close_session(&mut self, session_id: &str) -> AppResult<()>;
     fn get_task_state(&self, task_id: &str) -> AppResult<RuntimeTaskState>;
+    fn get_models(&mut self) -> AppResult<AgentModelCatalog> {
+        Err("当前 Runtime 不支持应用内模型配置".into())
+    }
+    fn login_provider(&mut self, _provider_id: &str, _api_key: &str) -> AppResult<()> {
+        Err("当前 Runtime 不支持应用内 Provider 登录".into())
+    }
+    fn logout_provider(&mut self, _provider_id: &str) -> AppResult<()> {
+        Err("当前 Runtime 不支持应用内 Provider 注销".into())
+    }
     fn dispose(&mut self) -> AppResult<()>;
 }

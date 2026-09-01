@@ -38,6 +38,7 @@ import type { FeatureFlags } from "../features/featureFlags";
 import type { AICard, PatchProposal } from "../features/permission";
 import { useSelectionStore } from "../stores/selectionStore";
 import type { ProjectDescriptor, Workspace } from "../types";
+import { AgentModelSettingsPanel } from "./AgentModelSettingsPanel";
 
 interface Props {
   project: ProjectDescriptor;
@@ -585,6 +586,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
           结束讨论
         </button>
       </section>
+      <AgentModelSettingsPanel disabled={Boolean(taskRunning) || teamRunning || working} onError={onError} />
       <section className="agent-context-strip">
         <div><span>当前对象</span><strong>{displayRef(agentSelection.center)}</strong></div>
         <div><span>模式 / revision</span><strong>{modeLabels[mode]} · r{revision}</strong></div>
