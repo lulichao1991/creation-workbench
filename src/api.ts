@@ -21,6 +21,8 @@ import type {
   ProviderConnectionTest,
   AgentModelConfiguration,
   AgentModelSettings,
+  AgentAuthFlow,
+  SaveAgentCustomProviderInput,
 } from "./features/agent/runtime";
 import type {
   BuildContextInput,
@@ -115,6 +117,20 @@ export const api = {
     invoke<void>("agent_provider_login", { input: { providerId, apiKey } }),
   agentProviderLogout: (providerId: string) =>
     invoke<void>("agent_provider_logout", { providerId }),
+  agentProviderAuthStart: (providerId: string, authType: "oauth" | "api_key") =>
+    invoke<{ flowId: string }>("agent_provider_auth_start", { providerId, authType }),
+  agentProviderAuthGet: (flowId: string) =>
+    invoke<AgentAuthFlow>("agent_provider_auth_get", { flowId }),
+  agentProviderAuthRespond: (flowId: string, promptId: string, value: string) =>
+    invoke<void>("agent_provider_auth_respond", { input: { flowId, promptId, value } }),
+  agentProviderAuthCancel: (flowId: string) =>
+    invoke<AgentAuthFlow>("agent_provider_auth_cancel", { flowId }),
+  agentCustomProviderSave: (input: SaveAgentCustomProviderInput) =>
+    invoke<void>("agent_custom_provider_save", { input }),
+  agentCustomProviderDelete: (providerId: string) =>
+    invoke<void>("agent_custom_provider_delete", { providerId }),
+  agentModelsRefresh: (providerId?: string) =>
+    invoke<{ refreshed: boolean; errors: Array<{ providerId: string; message: string }> }>("agent_models_refresh", { providerId }),
   contextBuild: (projectPath: string, input: BuildContextInput) =>
     invoke<ContextPackage>("context_build", { projectPath, input }),
   contextSearch: (projectPath: string, query: string, limit = 20) =>

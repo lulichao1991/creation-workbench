@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Provider } from "@earendil-works/pi-ai";
 
 import { WorkbenchAgentHost } from "./runtime.js";
 
@@ -591,6 +591,123 @@ test("lists ModelRuntime capabilities and manages provider API-key login", async
   }
 });
 
+test("maps Pi OAuth notify and prompt channels without mixing them", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-oauth-flow-"));
+  const faux = fauxProvider({ provider: "workbench-oauth", tokensPerSecond: 0 });
+  const provider: Provider = {
+    ...faux.provider,
+    auth: {
+      oauth: {
+        name: "Workbench subscription",
+        loginLabel: "登录 Workbench",
+        isSubscription: true,
+        async login(interaction) {
+          interaction.notify({ type: "auth_url", url: "https://example.com/oauth", instructions: "在浏览器中继续" });
+          const code = await interaction.prompt({ type: "manual_code", message: "粘贴授权码" });
+          assert.equal(code, "approved-code");
+          return { type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 3_600_000 };
+        },
+        async refresh(credential) { return credential; },
+        async toAuth(credential) { return { apiKey: credential.access }; },
+      },
+    },
+  };
+  const host = await WorkbenchAgentHost.create(dataDir, () => {}, (runtime) => runtime.registerNativeProvider(provider));
+  try {
+    const catalog = await host.handle({ id: "catalog", type: "get_models" }) as { providers: Array<{ id: string; authMethods: Array<{ type: string; interactive: boolean; subscription?: boolean }> }> };
+    assert.deepEqual(catalog.providers.find((item) => item.id === provider.id)?.authMethods, [{
+      type: "oauth",
+      interactive: true,
+      label: "登录 Workbench",
+      subscription: true,
+    }]);
+    const started = await host.handle({ id: "start", type: "auth_start", providerId: provider.id, authType: "oauth" }) as { flowId: string };
+    const waiting = await waitForAuth(host, started.flowId, (flow) => Boolean(flow.prompt));
+    assert.equal(waiting.notifications[0]?.type, "auth_url");
+    assert.equal(waiting.prompt?.type, "manual_code");
+    await host.handle({ id: "respond", type: "auth_respond", flowId: started.flowId, promptId: waiting.prompt!.id, value: "approved-code" });
+    const completed = await waitForAuth(host, started.flowId, (flow) => flow.status === "completed");
+    assert.equal(completed.status, "completed");
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("closes an OAuth prompt when Pi cancels that prompt after an out-of-band callback", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-oauth-prompt-cancel-"));
+  const faux = fauxProvider({ provider: "workbench-oauth-prompt-cancel", tokensPerSecond: 0 });
+  const provider: Provider = {
+    ...faux.provider,
+    auth: {
+      oauth: {
+        name: "Workbench callback race",
+        async login(interaction) {
+          const promptAbort = new AbortController();
+          setTimeout(() => promptAbort.abort(new Error("浏览器回调已完成")), 20);
+          await assert.rejects(
+            interaction.prompt({ type: "manual_code", message: "粘贴授权码", signal: promptAbort.signal }),
+            { name: "AbortError" },
+          );
+          return { type: "oauth", access: "callback-access", refresh: "callback-refresh", expires: Date.now() + 3_600_000 };
+        },
+        async refresh(credential) { return credential; },
+        async toAuth(credential) { return { apiKey: credential.access }; },
+      },
+    },
+  };
+  const host = await WorkbenchAgentHost.create(dataDir, () => {}, (runtime) => runtime.registerNativeProvider(provider));
+  try {
+    const started = await host.handle({ id: "start", type: "auth_start", providerId: provider.id, authType: "oauth" }) as { flowId: string };
+    const waiting = await waitForAuth(host, started.flowId, (flow) => Boolean(flow.prompt));
+    const promptId = waiting.prompt!.id;
+    const completed = await waitForAuth(host, started.flowId, (flow) => flow.status === "completed");
+    assert.equal(completed.prompt, null);
+    assert.deepEqual(completed.cancelledPromptIds, [promptId]);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("writes private Pi models.json and reloads custom providers locally", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-models-json-"));
+  let host = await WorkbenchAgentHost.create(dataDir, () => {});
+  try {
+    await host.handle({
+      id: "save-custom",
+      type: "save_custom_provider",
+      providerId: "custom-local-test",
+      provider: {
+        name: "Local Test",
+        baseUrl: "http://127.0.0.1:11434/v1",
+        api: "openai-completions",
+        apiKey: "workbench-local",
+        authHeader: false,
+        models: [{ id: "local-model", name: "Local Model", reasoning: false, input: ["text"] }],
+      },
+    });
+    const config = JSON.parse(await readFile(path.join(dataDir, "models.json"), "utf8"));
+    assert.equal(config.providers["custom-local-test"].apiKey, "workbench-local");
+    const catalog = await host.handle({ id: "models", type: "get_models" }) as { providers: Array<{ id: string; custom: boolean; models: Array<{ supportedThinkingLevels: string[] }> }> };
+    const custom = catalog.providers.find((provider) => provider.id === "custom-local-test");
+    assert.equal(custom?.custom, true);
+    assert.deepEqual(custom?.models[0]?.supportedThinkingLevels, ["off"]);
+
+    host.dispose();
+    host = await WorkbenchAgentHost.create(dataDir, () => {});
+    const afterRestart = await host.handle({ id: "models-after-restart", type: "get_models" }) as { providers: Array<{ id: string; authConfigured: boolean }> };
+    assert.equal(afterRestart.providers.find((provider) => provider.id === "custom-local-test")?.authConfigured, true);
+
+    await host.handle({ id: "delete-custom", type: "delete_custom_provider", providerId: "custom-local-test" });
+    const after = await host.handle({ id: "models-after-delete", type: "get_models" }) as { providers: Array<{ id: string }> };
+    assert.equal(after.providers.some((provider) => provider.id === "custom-local-test"), false);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 async function waitForEvent(events: Record<string, unknown>[], eventName: string, taskId: string): Promise<void> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {
@@ -598,4 +715,25 @@ async function waitForEvent(events: Record<string, unknown>[], eventName: string
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(`未收到 ${taskId} 的 ${eventName}`);
+}
+
+interface AuthSnapshot {
+  status: string;
+  notifications: Array<{ type: string }>;
+  prompt: { id: string; type: string } | null;
+  cancelledPromptIds: string[];
+}
+
+async function waitForAuth(
+  host: WorkbenchAgentHost,
+  flowId: string,
+  predicate: (flow: AuthSnapshot) => boolean,
+): Promise<AuthSnapshot> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const flow = await host.handle({ id: crypto.randomUUID(), type: "auth_flow_get", flowId }) as AuthSnapshot;
+    if (predicate(flow)) return flow;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail("认证流程未进入预期状态");
 }

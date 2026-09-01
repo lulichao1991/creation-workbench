@@ -21,8 +21,10 @@ use agent_application::{
     agent_send_message,
 };
 use agent_models::{
-    agent_model_settings_get, agent_model_settings_save, agent_provider_login,
-    agent_provider_logout,
+    agent_custom_provider_delete, agent_custom_provider_save, agent_model_settings_get,
+    agent_model_settings_save, agent_models_refresh, agent_provider_auth_cancel,
+    agent_provider_auth_get, agent_provider_auth_respond, agent_provider_auth_start,
+    agent_provider_login, agent_provider_logout,
 };
 use agent_runtime::{
     agent_cancel_task, agent_get_task_state, agent_provider_test, agent_runtime_doctor,
@@ -104,6 +106,13 @@ pub fn run() {
             agent_model_settings_save,
             agent_provider_login,
             agent_provider_logout,
+            agent_provider_auth_start,
+            agent_provider_auth_get,
+            agent_provider_auth_respond,
+            agent_provider_auth_cancel,
+            agent_custom_provider_save,
+            agent_custom_provider_delete,
+            agent_models_refresh,
             context_build,
             context_search,
             memory_list,

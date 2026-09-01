@@ -47,8 +47,38 @@ export interface AgentModel {
   name: string;
   supportsVision: boolean;
   reasoning: boolean;
+  supportedThinkingLevels: string[];
   contextWindow: number;
   maxTokens: number;
+}
+
+export interface AgentProviderAuthMethod {
+  type: "oauth" | "api_key";
+  interactive: boolean;
+  label: string;
+  subscription?: boolean;
+  source?: string | null;
+}
+
+export type AgentCustomProviderApi = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
+
+export interface AgentCustomModelConfig {
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  input?: Array<"text" | "image">;
+  contextWindow?: number;
+  maxTokens?: number;
+}
+
+export interface AgentCustomProviderConfig {
+  name: string;
+  baseUrl: string;
+  api: AgentCustomProviderApi;
+  apiKey?: string;
+  authHeader?: boolean;
+  headers?: Record<string, string>;
+  models: AgentCustomModelConfig[];
 }
 
 export interface AgentModelProvider {
@@ -57,7 +87,41 @@ export interface AgentModelProvider {
   authConfigured: boolean;
   authSource: string | null;
   authLabel: string | null;
+  authMethods: AgentProviderAuthMethod[];
+  custom: boolean;
+  customConfig?: AgentCustomProviderConfig;
   models: AgentModel[];
+}
+
+export type AgentAuthNotification =
+  | { id: string; type: "info" | "progress"; message: string }
+  | { id: string; type: "auth_url"; url: string; instructions?: string }
+  | { id: string; type: "device_code"; userCode: string; verificationUri: string; intervalSeconds?: number; expiresInSeconds?: number };
+
+export type AgentAuthPrompt = {
+  id: string;
+  message: string;
+  placeholder?: string;
+} & (
+  | { type: "text" | "secret" | "manual_code" }
+  | { type: "select"; options: Array<{ id: string; label: string; description?: string }> }
+);
+
+export interface AgentAuthFlow {
+  flowId: string;
+  providerId: string;
+  authType: "oauth" | "api_key";
+  status: "running" | "completed" | "failed" | "cancelled";
+  notifications: AgentAuthNotification[];
+  prompt: AgentAuthPrompt | null;
+  cancelledPromptIds: string[];
+  error: string | null;
+}
+
+export interface SaveAgentCustomProviderInput {
+  providerId: string;
+  previousProviderId?: string;
+  provider: AgentCustomProviderConfig;
 }
 
 export interface AgentModelChoice {

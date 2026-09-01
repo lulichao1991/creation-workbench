@@ -81,6 +81,76 @@ impl RuntimeState {
             .login_provider(provider_id, api_key)
     }
 
+    pub(crate) fn start_provider_auth(
+        &self,
+        provider_id: &str,
+        auth_type: &str,
+    ) -> AppResult<serde_json::Value> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .start_provider_auth(provider_id, auth_type)
+    }
+
+    pub(crate) fn get_provider_auth_flow(&self, flow_id: &str) -> AppResult<serde_json::Value> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .get_provider_auth_flow(flow_id)
+    }
+
+    pub(crate) fn respond_provider_auth(
+        &self,
+        flow_id: &str,
+        prompt_id: &str,
+        value: &str,
+    ) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .respond_provider_auth(flow_id, prompt_id, value)
+    }
+
+    pub(crate) fn cancel_provider_auth(&self, flow_id: &str) -> AppResult<serde_json::Value> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .cancel_provider_auth(flow_id)
+    }
+
+    pub(crate) fn save_custom_provider(
+        &self,
+        provider_id: &str,
+        previous_provider_id: Option<&str>,
+        provider: serde_json::Value,
+    ) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .save_custom_provider(provider_id, previous_provider_id, provider)
+    }
+
+    pub(crate) fn delete_custom_provider(&self, provider_id: &str) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .delete_custom_provider(provider_id)
+    }
+
+    pub(crate) fn refresh_models(&self, provider_id: Option<&str>) -> AppResult<serde_json::Value> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .refresh_models(provider_id)
+    }
+
+    pub(crate) fn import_legacy_api_keys(&self, keys: serde_json::Value) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .import_legacy_api_keys(keys)
+    }
+
     pub(crate) fn logout_provider(&self, provider_id: &str) -> AppResult<()> {
         self.runtime
             .lock()

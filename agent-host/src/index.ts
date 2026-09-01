@@ -2,6 +2,7 @@ import path from "node:path";
 import os from "node:os";
 
 import { encodeJsonLine, failure, parseRequest, response, splitJsonLines, type HostEvent } from "./protocol.js";
+import { EncryptedFileCredentialStore } from "./credentials.js";
 import { WorkbenchAgentHost } from "./runtime.js";
 import type { ToolGateway } from "./tools.js";
 
@@ -30,7 +31,7 @@ const gateway: ToolGateway = (request, signal) => new Promise((resolve, reject) 
   write({ id, type: "tool_request", ...request });
 });
 
-const host = await WorkbenchAgentHost.create(dataDir, (event: HostEvent) => write(event), undefined, gateway);
+let host: WorkbenchAgentHost | undefined;
 let buffer = "";
 let queue = Promise.resolve();
 
@@ -51,6 +52,21 @@ process.stdin.on("data", (chunk: Buffer) => {
           else pending.reject(new Error(typeof request.error === "string" ? request.error : "Tool Gateway 请求失败"));
           return;
         }
+        if (request.type === "initialize") {
+          if (host) throw new Error("Agent Host 已初始化");
+          const masterKey = request.credentialMasterKey;
+          if (typeof masterKey !== "string" || !masterKey) throw new Error("Agent Host 缺少凭据主密钥");
+          host = await WorkbenchAgentHost.create(
+            dataDir,
+            (event: HostEvent) => write(event),
+            undefined,
+            gateway,
+            EncryptedFileCredentialStore.fromBase64(dataDir, masterKey),
+          );
+          write(response(id, { initialized: true }));
+          return;
+        }
+        host ??= await WorkbenchAgentHost.create(dataDir, (event: HostEvent) => write(event), undefined, gateway);
         const result = await host.handle(request);
         write(response(id, result));
         if (request.type === "shutdown") process.exitCode = 0;
@@ -64,10 +80,10 @@ process.stdin.on("data", (chunk: Buffer) => {
 process.stdin.on("end", () => {
   for (const pending of pendingGateway.values()) pending.reject(new Error("工作台已断开"));
   pendingGateway.clear();
-  host.dispose();
+  host?.dispose();
 });
 
 process.on("SIGTERM", () => {
-  host.dispose();
+  host?.dispose();
   process.exit(0);
 });

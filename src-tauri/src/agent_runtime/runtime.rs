@@ -103,7 +103,25 @@ pub struct AgentModelProvider {
     pub auth_configured: bool,
     pub auth_source: Option<String>,
     pub auth_label: Option<String>,
+    #[serde(default)]
+    pub auth_methods: Vec<AgentProviderAuthMethod>,
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default)]
+    pub custom_config: Option<Value>,
     pub models: Vec<AgentModel>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentProviderAuthMethod {
+    pub r#type: String,
+    pub interactive: bool,
+    pub label: String,
+    #[serde(default)]
+    pub subscription: Option<bool>,
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -113,6 +131,8 @@ pub struct AgentModel {
     pub name: String,
     pub supports_vision: bool,
     pub reasoning: bool,
+    #[serde(default)]
+    pub supported_thinking_levels: Vec<String>,
     pub context_window: usize,
     pub max_tokens: usize,
 }
@@ -188,6 +208,40 @@ pub trait AgentRuntime: Send {
     }
     fn login_provider(&mut self, _provider_id: &str, _api_key: &str) -> AppResult<()> {
         Err("当前 Runtime 不支持应用内 Provider 登录".into())
+    }
+    fn start_provider_auth(&mut self, _provider_id: &str, _auth_type: &str) -> AppResult<Value> {
+        Err("当前 Runtime 不支持 Provider 认证流程".into())
+    }
+    fn get_provider_auth_flow(&mut self, _flow_id: &str) -> AppResult<Value> {
+        Err("当前 Runtime 不支持 Provider 认证流程".into())
+    }
+    fn respond_provider_auth(
+        &mut self,
+        _flow_id: &str,
+        _prompt_id: &str,
+        _value: &str,
+    ) -> AppResult<()> {
+        Err("当前 Runtime 不支持 Provider 认证输入".into())
+    }
+    fn cancel_provider_auth(&mut self, _flow_id: &str) -> AppResult<Value> {
+        Err("当前 Runtime 不支持取消 Provider 认证".into())
+    }
+    fn save_custom_provider(
+        &mut self,
+        _provider_id: &str,
+        _previous_provider_id: Option<&str>,
+        _provider: Value,
+    ) -> AppResult<()> {
+        Err("当前 Runtime 不支持自定义 Provider".into())
+    }
+    fn delete_custom_provider(&mut self, _provider_id: &str) -> AppResult<()> {
+        Err("当前 Runtime 不支持自定义 Provider".into())
+    }
+    fn refresh_models(&mut self, _provider_id: Option<&str>) -> AppResult<Value> {
+        Err("当前 Runtime 不支持刷新模型目录".into())
+    }
+    fn import_legacy_api_keys(&mut self, _keys: Value) -> AppResult<()> {
+        Err("当前 Runtime 不支持迁移旧凭据".into())
     }
     fn logout_provider(&mut self, _provider_id: &str) -> AppResult<()> {
         Err("当前 Runtime 不支持应用内 Provider 注销".into())

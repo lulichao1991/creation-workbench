@@ -22,6 +22,7 @@ struct HostCommand {
     args: Vec<String>,
     current_dir: Option<PathBuf>,
     display: String,
+    initialize: bool,
 }
 
 struct HostTask {
@@ -121,7 +122,7 @@ impl HostProcess {
                 }
             }
         });
-        Ok(Self {
+        let process = Self {
             stdin,
             child,
             pending,
@@ -130,7 +131,14 @@ impl HostProcess {
             request_id: AtomicU64::new(1),
             reader: Some(reader),
             stderr_reader: Some(stderr_reader),
-        })
+        };
+        if command.initialize {
+            process.request(
+                "initialize",
+                json!({ "credentialMasterKey": crate::agent_models::credential_master_key()? }),
+            )?;
+        }
+        Ok(process)
     }
 
     fn request(&self, request_type: &str, mut body: Value) -> AppResult<Value> {
@@ -160,7 +168,7 @@ impl HostProcess {
             }
             return Err(error);
         }
-        rx.recv_timeout(Duration::from_secs(10))
+        rx.recv_timeout(Duration::from_secs(30))
             .map_err(|_| format!("Agent Host 请求超时：{request_type}"))?
     }
 
@@ -485,6 +493,68 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
         Ok(())
     }
 
+    fn start_provider_auth(&mut self, provider_id: &str, auth_type: &str) -> AppResult<Value> {
+        self.management_request(
+            "auth_start",
+            json!({ "providerId": provider_id, "authType": auth_type }),
+        )
+    }
+
+    fn get_provider_auth_flow(&mut self, flow_id: &str) -> AppResult<Value> {
+        self.management_request("auth_flow_get", json!({ "flowId": flow_id }))
+    }
+
+    fn respond_provider_auth(
+        &mut self,
+        flow_id: &str,
+        prompt_id: &str,
+        value: &str,
+    ) -> AppResult<()> {
+        self.management_request(
+            "auth_respond",
+            json!({ "flowId": flow_id, "promptId": prompt_id, "value": value }),
+        )?;
+        Ok(())
+    }
+
+    fn cancel_provider_auth(&mut self, flow_id: &str) -> AppResult<Value> {
+        self.management_request("auth_cancel", json!({ "flowId": flow_id }))
+    }
+
+    fn save_custom_provider(
+        &mut self,
+        provider_id: &str,
+        previous_provider_id: Option<&str>,
+        provider: Value,
+    ) -> AppResult<()> {
+        self.management_request(
+            "save_custom_provider",
+            json!({
+                "providerId": provider_id,
+                "previousProviderId": previous_provider_id,
+                "provider": provider,
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn delete_custom_provider(&mut self, provider_id: &str) -> AppResult<()> {
+        self.management_request(
+            "delete_custom_provider",
+            json!({ "providerId": provider_id }),
+        )?;
+        Ok(())
+    }
+
+    fn refresh_models(&mut self, provider_id: Option<&str>) -> AppResult<Value> {
+        self.management_request("refresh_models", json!({ "providerId": provider_id }))
+    }
+
+    fn import_legacy_api_keys(&mut self, keys: Value) -> AppResult<()> {
+        self.management_request("import_legacy_api_keys", json!({ "keys": keys }))?;
+        Ok(())
+    }
+
     fn logout_provider(&mut self, provider_id: &str) -> AppResult<()> {
         self.management_request("logout_provider", json!({ "providerId": provider_id }))?;
         Ok(())
@@ -761,14 +831,18 @@ fn remember_terminal_task(
 
 fn resolve_host_command() -> HostCommand {
     if let Some(configured) = std::env::var_os("WORKBENCH_AGENT_HOST").map(PathBuf::from) {
-        return command_for_path(configured);
+        let mut command = command_for_path(configured);
+        command.initialize = true;
+        return command;
     }
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("agent-host")
         .join("dist")
         .join("index.js");
-    command_for_path(script)
+    let mut command = command_for_path(script);
+    command.initialize = true;
+    command
 }
 
 fn bundled_host_command(resource_dir: &std::path::Path) -> HostCommand {
@@ -780,6 +854,7 @@ fn bundled_host_command(resource_dir: &std::path::Path) -> HostCommand {
         program,
         args: vec![script.to_string_lossy().into_owned()],
         current_dir: Some(host_dir),
+        initialize: true,
     }
 }
 
@@ -793,6 +868,7 @@ fn command_for_path(path: PathBuf) -> HostCommand {
             args: vec![path.to_string_lossy().into_owned()],
             current_dir: None,
             display: format!("node {}", path.display()),
+            initialize: false,
         }
     } else if cfg!(windows)
         && matches!(
@@ -810,6 +886,7 @@ fn command_for_path(path: PathBuf) -> HostCommand {
             ],
             current_dir: None,
             display: path.display().to_string(),
+            initialize: false,
         }
     } else {
         HostCommand {
@@ -817,6 +894,7 @@ fn command_for_path(path: PathBuf) -> HostCommand {
             args: Vec::new(),
             current_dir: None,
             display: path.display().to_string(),
+            initialize: false,
         }
     }
 }
@@ -955,6 +1033,7 @@ mod tests {
             ],
             current_dir: None,
             display: "flaky fixture".into(),
+            initialize: false,
         });
 
         assert_eq!(

@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use base64::Engine;
 use chrono::Utc;
-use keyring::v1::Entry;
+use keyring::v1::{Entry, Error as KeyringError};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::Manager;
 
 use crate::agent_application::expert;
@@ -15,8 +17,8 @@ use crate::database::AppResult;
 const SETTINGS_KEY: &str = "agent_model_settings";
 const CREDENTIAL_PROVIDERS_KEY: &str = "agent_credential_providers";
 const CREDENTIAL_SERVICE: &str = "com.lu.workbench.agent-provider";
-const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
+const CREDENTIAL_MASTER_SERVICE: &str = "com.lu.workbench.agent-credential-master";
+const CREDENTIAL_MASTER_ACCOUNT: &str = "master";
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentModelChoice {
@@ -58,6 +60,22 @@ pub struct AgentModelConfiguration {
 pub struct ProviderLoginInput {
     pub provider_id: String,
     pub api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderAuthResponseInput {
+    pub flow_id: String,
+    pub prompt_id: String,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomProviderSaveInput {
+    pub provider_id: String,
+    pub previous_provider_id: Option<String>,
+    pub provider: Value,
 }
 
 pub(crate) fn load_agent_model_settings(app_data_dir: &Path) -> AppResult<AgentModelSettings> {
@@ -103,6 +121,40 @@ fn credential_entry(provider_id: &str) -> AppResult<Entry> {
         .map_err(|error| format!("打开系统密钥库失败：{error}"))
 }
 
+pub(crate) fn credential_master_key() -> AppResult<String> {
+    let entry = Entry::new(CREDENTIAL_MASTER_SERVICE, CREDENTIAL_MASTER_ACCOUNT)
+        .map_err(|error| format!("打开 Workbench 凭据主密钥失败：{error}"))?;
+    match entry.get_password() {
+        Ok(encoded) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|error| format!("Workbench 凭据主密钥损坏：{error}"))?;
+            if decoded.len() != 32 {
+                return Err("Workbench 凭据主密钥长度无效".into());
+            }
+            return Ok(encoded);
+        }
+        Err(KeyringError::NoEntry) => {
+            let encrypted_credentials = dirs::data_local_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join("creation-workbench")
+                .join("agent-host")
+                .join("credentials.enc");
+            if encrypted_credentials.is_file() {
+                return Err("Workbench 凭据主密钥缺失，无法解密已有凭据".into());
+            }
+        }
+        Err(error) => return Err(format!("读取 Workbench 凭据主密钥失败：{error}")),
+    }
+    let mut key = [0_u8; 32];
+    getrandom::fill(&mut key).map_err(|error| format!("生成 Workbench 凭据主密钥失败：{error}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(key);
+    entry
+        .set_password(&encoded)
+        .map_err(|error| format!("保存 Workbench 凭据主密钥失败：{error}"))?;
+    Ok(encoded)
+}
+
 fn credential_provider_ids(app_data_dir: &Path) -> AppResult<BTreeSet<String>> {
     let conn = open_app_database(app_data_dir)?;
     let value: Option<String> = conn
@@ -144,19 +196,22 @@ pub(crate) fn restore_agent_credentials(
     app_data_dir: &Path,
     runtime: &RuntimeState,
 ) -> AppResult<()> {
-    let known_providers = runtime
-        .get_models()?
-        .providers
-        .into_iter()
-        .map(|provider| provider.id)
-        .collect::<BTreeSet<_>>();
-    for provider_id in credential_provider_ids(app_data_dir)? {
-        if known_providers.contains(&provider_id) {
-            if let Ok(api_key) = credential_entry(&provider_id)?.get_password() {
-                runtime.login_provider(&provider_id, &api_key)?;
-            }
+    let provider_ids = credential_provider_ids(app_data_dir)?;
+    let mut keys = Vec::new();
+    for provider_id in &provider_ids {
+        match credential_entry(provider_id)?.get_password() {
+            Ok(api_key) => keys.push(json!({ "providerId": provider_id, "apiKey": api_key })),
+            Err(KeyringError::NoEntry) => {}
+            Err(error) => return Err(format!("读取旧 Agent 凭据失败：{error}")),
         }
     }
+    if !keys.is_empty() {
+        runtime.import_legacy_api_keys(Value::Array(keys))?;
+    }
+    for provider_id in &provider_ids {
+        let _ = credential_entry(provider_id)?.delete_credential();
+    }
+    save_credential_provider_ids(app_data_dir, &BTreeSet::new())?;
     Ok(())
 }
 
@@ -205,7 +260,6 @@ pub fn agent_model_settings_save(
 
 #[tauri::command]
 pub fn agent_provider_login(
-    app: tauri::AppHandle,
     runtime: tauri::State<'_, RuntimeState>,
     input: ProviderLoginInput,
 ) -> AppResult<()> {
@@ -221,17 +275,77 @@ pub fn agent_provider_login(
     {
         return Err(format!("Provider 不存在：{provider_id}"));
     }
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
-    credential_entry(provider_id)?
-        .set_password(input.api_key.trim())
-        .map_err(|error| format!("写入系统密钥库失败：{error}"))?;
-    let mut provider_ids = credential_provider_ids(&app_data_dir)?;
-    provider_ids.insert(provider_id.to_string());
-    save_credential_provider_ids(&app_data_dir, &provider_ids)?;
     runtime.login_provider(provider_id, input.api_key.trim())
+}
+
+#[tauri::command]
+pub fn agent_provider_auth_start(
+    runtime: tauri::State<'_, RuntimeState>,
+    provider_id: String,
+    auth_type: String,
+) -> AppResult<Value> {
+    runtime.start_provider_auth(provider_id.trim(), auth_type.trim())
+}
+
+#[tauri::command]
+pub fn agent_provider_auth_get(
+    runtime: tauri::State<'_, RuntimeState>,
+    flow_id: String,
+) -> AppResult<Value> {
+    runtime.get_provider_auth_flow(flow_id.trim())
+}
+
+#[tauri::command]
+pub fn agent_provider_auth_respond(
+    runtime: tauri::State<'_, RuntimeState>,
+    input: ProviderAuthResponseInput,
+) -> AppResult<()> {
+    runtime.respond_provider_auth(
+        input.flow_id.trim(),
+        input.prompt_id.trim(),
+        input.value.trim(),
+    )
+}
+
+#[tauri::command]
+pub fn agent_provider_auth_cancel(
+    runtime: tauri::State<'_, RuntimeState>,
+    flow_id: String,
+) -> AppResult<Value> {
+    runtime.cancel_provider_auth(flow_id.trim())
+}
+
+#[tauri::command]
+pub fn agent_custom_provider_save(
+    runtime: tauri::State<'_, RuntimeState>,
+    input: CustomProviderSaveInput,
+) -> AppResult<()> {
+    runtime.save_custom_provider(
+        input.provider_id.trim(),
+        input.previous_provider_id.as_deref().map(str::trim),
+        input.provider,
+    )
+}
+
+#[tauri::command]
+pub fn agent_custom_provider_delete(
+    runtime: tauri::State<'_, RuntimeState>,
+    provider_id: String,
+) -> AppResult<()> {
+    runtime.delete_custom_provider(provider_id.trim())
+}
+
+#[tauri::command]
+pub fn agent_models_refresh(
+    runtime: tauri::State<'_, RuntimeState>,
+    provider_id: Option<String>,
+) -> AppResult<Value> {
+    runtime.refresh_models(
+        provider_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    )
 }
 
 #[tauri::command]
@@ -270,31 +384,30 @@ fn validate_choice(
     catalog: &AgentModelCatalog,
     required: bool,
 ) -> AppResult<()> {
-    if choice
-        .thinking_level
-        .as_deref()
-        .is_some_and(|level| !THINKING_LEVELS.contains(&level))
-    {
-        return Err(format!("{label} 的 thinking level 无效"));
-    }
     match (choice.provider.as_deref(), choice.model.as_deref()) {
         (None, None) if !required => Ok(()),
         (Some(provider), Some(model)) => {
-            let exists = catalog
+            let selected = catalog
                 .providers
                 .iter()
                 .find(|candidate| candidate.id == provider)
-                .is_some_and(|candidate| {
+                .and_then(|candidate| {
                     candidate
                         .models
                         .iter()
-                        .any(|candidate| candidate.id == model)
-                });
-            if exists {
-                Ok(())
-            } else {
-                Err(format!("{label} 的模型不存在：{provider}/{model}"))
+                        .find(|candidate| candidate.id == model)
+                })
+                .ok_or_else(|| format!("{label} 的模型不存在：{provider}/{model}"))?;
+            if let Some(level) = choice.thinking_level.as_deref() {
+                if !selected
+                    .supported_thinking_levels
+                    .iter()
+                    .any(|supported| supported == level)
+                {
+                    return Err(format!("{label} 的模型不支持推理强度：{level}"));
+                }
             }
+            Ok(())
         }
         (None, None) => Err(format!("{label} 必须选择 Provider 和模型")),
         _ => Err(format!("{label} 的 Provider 和模型必须同时设置")),
@@ -367,6 +480,45 @@ mod tests {
             )
             .unwrap();
         assert!(!stored.to_ascii_lowercase().contains("api_key"));
+    }
+
+    #[test]
+    fn validates_thinking_level_against_the_selected_pi_model() {
+        let catalog: AgentModelCatalog = serde_json::from_value(json!({
+            "providers": [{
+                "id": "custom-local",
+                "name": "Local",
+                "authConfigured": true,
+                "authSource": "configured API key",
+                "authLabel": "API key",
+                "authMethods": [{ "type": "api_key", "interactive": true, "label": "API key" }],
+                "custom": true,
+                "customConfig": { "apiKey": "workbench-local", "authHeader": false },
+                "models": [{
+                    "id": "local-model",
+                    "name": "Local Model",
+                    "supportsVision": false,
+                    "reasoning": false,
+                    "supportedThinkingLevels": ["off"],
+                    "contextWindow": 128000,
+                    "maxTokens": 16384
+                }]
+            }]
+        }))
+        .unwrap();
+        let valid = AgentModelChoice {
+            provider: Some("custom-local".into()),
+            model: Some("local-model".into()),
+            thinking_level: Some("off".into()),
+        };
+        assert!(validate_choice("主 Agent", &valid, &catalog, true).is_ok());
+        let invalid = AgentModelChoice {
+            thinking_level: Some("high".into()),
+            ..valid
+        };
+        assert!(validate_choice("主 Agent", &invalid, &catalog, true)
+            .unwrap_err()
+            .contains("不支持推理强度"));
     }
 
     #[cfg(windows)]

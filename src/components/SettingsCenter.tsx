@@ -18,7 +18,7 @@ interface Props {
 }
 
 const tabs: Array<[SettingsTab, string, typeof Bot]> = [
-  ["agent", "Agent 与模型", Bot],
+  ["agent", "AI 模型", Bot],
   ["images", "图片生成", Image],
   ["data", "数据与存储", Database],
   ["about", "关于与诊断", Info],
@@ -53,7 +53,7 @@ export function SettingsCenter({ rootPath, disabled, onRootChange, onClose, onEr
             {tabs.map(([value, label, Icon]) => <button className={tab === value ? "active" : ""} onClick={() => setTab(value)} key={value}><Icon size={16} />{label}</button>)}
           </nav>
           <main className="settings-content">
-            {tab === "agent" && <><div className="settings-intro"><span className="label">AI 服务</span><h2>Agent 与模型</h2><p>分别确认运行环境、账号认证和默认模型。未配置时不影响手动创作。</p></div><AgentModelSettingsPanel disabled={disabled} expanded onError={onError} /></>}
+            {tab === "agent" && <><div className="settings-intro"><span className="label">AI 服务</span><h2>AI 模型</h2><p>连接你使用的 AI 服务，并为新讨论选择默认模型。</p></div><AgentModelSettingsPanel disabled={disabled} onError={onError} /></>}
             {tab === "images" && <><div className="settings-intro"><span className="label">核心效率工具</span><h2>图片生成</h2><p>图片生成会贯穿角色、场景、道具、分镜和关键帧；服务配置全局复用。</p></div><ImageProviderSettingsPanel disabled={disabled} onError={onError} /></>}
             {tab === "data" && <><div className="settings-intro"><span className="label">本地优先</span><h2>数据与存储</h2><p>项目数据库、正式素材和历史记录都保存在项目目录中。</p></div><section className="settings-section"><label>项目根目录<code className="settings-path">{rootPath}</code></label><button className="secondary" disabled={disabled} onClick={() => void chooseRoot()}>更改项目目录</button><p className="settings-note">更改目录不会移动已有项目，只会改变首页默认扫描和新建项目的位置。</p></section></>}
             {tab === "about" && <><div className="settings-intro"><span className="label">软件信息</span><h2>关于与诊断</h2></div><section className="settings-section about-grid"><div><span>应用</span><strong>创作工作台</strong></div><div><span>版本</span><strong>{version}</strong></div><div><span>数据策略</span><strong>项目事实本地保存</strong></div><div><span>凭据策略</span><strong>Windows 系统密钥库</strong></div><button className="secondary" onClick={onRestartOnboarding}>重新运行首次使用引导</button></section></>}

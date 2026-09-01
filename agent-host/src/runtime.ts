@@ -1,5 +1,14 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+import {
+  getSupportedThinkingLevels,
+  InMemoryCredentialStore,
+  type AuthEvent,
+  type AuthPrompt,
+  type AuthType,
+  type CredentialStore,
+} from "@earendil-works/pi-ai";
 
 import {
   createAgentSession,
@@ -32,6 +41,24 @@ interface ImageInput {
   mimeType: string;
 }
 
+interface AuthFlow {
+  id: string;
+  providerId: string;
+  authType: AuthType;
+  status: "running" | "completed" | "failed" | "cancelled";
+  notifications: Array<AuthEvent & { id: string }>;
+  cancelledPromptIds: string[];
+  prompt?: AuthPrompt & { id: string };
+  promptResolve?: (value: string) => void;
+  promptReject?: (error: Error) => void;
+  abort: AbortController;
+  error?: string;
+}
+
+interface ModelsJsonConfig {
+  providers: Record<string, Record<string, unknown>>;
+}
+
 const MAIN_SYSTEM_PROMPT = `你是创作工作台的主创作 Agent，定位接近制片人和创作总协调者。
 你不拥有项目事实，也不能直接修改项目。项目事实只能通过工作台工具读取。
 先根据用户问题调用必要的读取工具；信息不足时继续调用工具，不要猜测项目事实。
@@ -46,11 +73,15 @@ const unavailableGateway: ToolGateway = async () => {
 export class WorkbenchAgentHost {
   readonly sdkVersion = VERSION;
   private readonly sessions = new Map<string, SessionEntry>();
+  private readonly authFlows = new Map<string, AuthFlow>();
+  private authSequence = 0;
 
   private constructor(
     private readonly dataDir: string,
     private readonly sessionDir: string,
+    private readonly modelsPath: string,
     private readonly modelRuntime: ModelRuntime,
+    private readonly credentials: CredentialStore,
     private readonly emit: Emit,
     private readonly gateway: ToolGateway,
     private readonly toolGatewayHealthy: boolean,
@@ -61,18 +92,22 @@ export class WorkbenchAgentHost {
     emit: Emit,
     configureRuntime?: (runtime: ModelRuntime) => void,
     gateway: ToolGateway = unavailableGateway,
+    credentials: CredentialStore = new InMemoryCredentialStore(),
   ): Promise<WorkbenchAgentHost> {
     await mkdir(dataDir, { recursive: true });
     const sessionDir = path.join(dataDir, "sessions");
     await mkdir(sessionDir, { recursive: true });
+    const modelsPath = path.join(dataDir, "models.json");
     const modelRuntime = await ModelRuntime.create({
-      authPath: path.join(dataDir, "auth.json"),
-      modelsPath: null,
+      credentials,
+      modelsPath,
+      modelsStorePath: path.join(dataDir, "models-store.json"),
       allowModelNetwork: false,
       refreshOnCreate: false,
     });
     configureRuntime?.(modelRuntime);
-    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit, gateway, gateway !== unavailableGateway);
+    await modelRuntime.refresh({ allowNetwork: false });
+    return new WorkbenchAgentHost(dataDir, sessionDir, modelsPath, modelRuntime, credentials, emit, gateway, gateway !== unavailableGateway);
   }
 
   doctor(): Record<string, unknown> {
@@ -106,10 +141,26 @@ export class WorkbenchAgentHost {
         return this.getModels();
       case "login_provider":
         return this.loginProvider(request);
+      case "auth_start":
+        return this.startAuth(request);
+      case "auth_flow_get":
+        return this.getAuthFlow(request);
+      case "auth_respond":
+        return this.respondToAuth(request);
+      case "auth_cancel":
+        return this.cancelAuth(request);
       case "test_provider":
         return this.testProvider(request);
       case "logout_provider":
         return this.logoutProvider(request);
+      case "save_custom_provider":
+        return this.saveCustomProvider(request);
+      case "delete_custom_provider":
+        return this.deleteCustomProvider(request);
+      case "refresh_models":
+        return this.refreshModels(request);
+      case "import_legacy_api_keys":
+        return this.importLegacyApiKeys(request);
       case "create_session":
         return this.createSession(request);
       case "send_message":
@@ -131,6 +182,8 @@ export class WorkbenchAgentHost {
   }
 
   dispose(): void {
+    for (const flow of this.authFlows.values()) flow.abort.abort(new Error("Agent Host 已关闭"));
+    this.authFlows.clear();
     for (const entry of this.sessions.values()) {
       entry.unsubscribe();
       entry.session.dispose();
@@ -138,21 +191,40 @@ export class WorkbenchAgentHost {
     this.sessions.clear();
   }
 
-  private getModels(): Record<string, unknown> {
+  private async getModels(): Promise<Record<string, unknown>> {
+    const customProviders = (await this.readModelsConfig()).providers;
     return {
       providers: this.modelRuntime.getProviders().map((provider) => {
         const auth = this.modelRuntime.getProviderAuthStatus(provider.id);
+        const customConfig = customProviders[provider.id];
         return {
           id: provider.id,
           name: provider.name,
           authConfigured: auth.configured,
           authSource: auth.source,
           authLabel: auth.label,
+          authMethods: [
+            provider.auth.oauth && {
+              type: "oauth",
+              interactive: true,
+              label: provider.auth.oauth.loginLabel ?? provider.auth.oauth.name,
+              subscription: provider.auth.oauth.isSubscription === true,
+            },
+            provider.auth.apiKey && {
+              type: "api_key",
+              interactive: typeof provider.auth.apiKey.login === "function",
+              label: provider.auth.apiKey.name,
+              source: auth.source,
+            },
+          ].filter(Boolean),
+          custom: customConfig !== undefined,
+          customConfig: customConfig ? sanitizeCustomProviderConfig(customConfig) : undefined,
           models: this.modelRuntime.getModels(provider.id).map((model) => ({
             id: model.id,
             name: model.name,
             supportsVision: model.input.includes("image"),
             reasoning: model.reasoning,
+            supportedThinkingLevels: getSupportedThinkingLevels(model),
             contextWindow: model.contextWindow,
             maxTokens: model.maxTokens,
           })),
@@ -164,8 +236,127 @@ export class WorkbenchAgentHost {
   private async loginProvider(request: HostRequest): Promise<Record<string, unknown>> {
     const providerId = requiredString(request, "providerId");
     if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
-    await this.modelRuntime.setRuntimeApiKey(providerId, requiredString(request, "apiKey"));
+    const apiKey = requiredString(request, "apiKey");
+    await this.modelRuntime.login(providerId, "api_key", {
+      prompt: async (prompt) => prompt.type === "secret" || prompt.type === "text" ? apiKey : (() => { throw new Error("此 Provider 需要交互式配置"); })(),
+      notify: () => {},
+    });
     return { providerId, authConfigured: true };
+  }
+
+  private startAuth(request: HostRequest): Record<string, unknown> {
+    const providerId = requiredString(request, "providerId");
+    const authType = requiredAuthType(request);
+    const provider = this.modelRuntime.getProvider(providerId);
+    if (!provider) throw new Error(`Provider 不存在：${providerId}`);
+    const method = authType === "oauth" ? provider.auth.oauth : provider.auth.apiKey;
+    if (!method) throw new Error(`${provider.name} 不支持此认证方式`);
+    if (authType === "api_key" && !provider.auth.apiKey?.login) throw new Error(`${provider.name} 只支持读取环境凭据，不能在应用内配置`);
+    const id = `auth-${Date.now()}-${++this.authSequence}`;
+    const flow: AuthFlow = {
+      id,
+      providerId,
+      authType,
+      status: "running",
+      notifications: [],
+      cancelledPromptIds: [],
+      abort: new AbortController(),
+    };
+    this.authFlows.set(id, flow);
+    void this.runAuthFlow(flow);
+    return { flowId: id };
+  }
+
+  private async runAuthFlow(flow: AuthFlow): Promise<void> {
+    try {
+      await this.modelRuntime.login(flow.providerId, flow.authType, {
+        signal: flow.abort.signal,
+        notify: (event) => {
+          flow.notifications.push({ ...event, id: `${flow.id}-notify-${flow.notifications.length + 1}` });
+        },
+        prompt: (prompt) => this.waitForAuthPrompt(flow, prompt),
+      });
+      const refresh = await this.modelRuntime.refresh({
+        allowNetwork: true,
+        force: true,
+        providers: [flow.providerId],
+        signal: AbortSignal.timeout(20_000),
+      });
+      const refreshError = refresh.errors.get(flow.providerId);
+      if (refreshError) {
+        flow.notifications.push({
+          id: `${flow.id}-notify-${flow.notifications.length + 1}`,
+          type: "info",
+          message: `账号已连接，但模型列表刷新失败：${refreshError.message}`,
+        });
+      }
+      flow.status = "completed";
+    } catch (error) {
+      flow.status = flow.abort.signal.aborted ? "cancelled" : "failed";
+      flow.error = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.clearAuthPrompt(flow);
+      this.trimAuthFlows();
+    }
+  }
+
+  private waitForAuthPrompt(flow: AuthFlow, prompt: AuthPrompt): Promise<string> {
+    if (flow.prompt) return Promise.reject(new Error("认证流程同时请求了多个输入"));
+    if (flow.abort.signal.aborted || prompt.signal?.aborted) {
+      return Promise.reject(abortError(prompt.signal?.reason ?? flow.abort.signal.reason));
+    }
+    const promptId = `${flow.id}-prompt-${Date.now()}`;
+    flow.prompt = { ...prompt, id: promptId };
+    return new Promise((resolve, reject) => {
+      flow.promptResolve = resolve;
+      flow.promptReject = reject;
+      const cancel = () => {
+        if (flow.prompt?.id !== promptId) return;
+        flow.cancelledPromptIds.push(promptId);
+        this.clearAuthPrompt(flow);
+        reject(abortError(prompt.signal?.reason));
+      };
+      prompt.signal?.addEventListener("abort", cancel, { once: true });
+      flow.abort.signal.addEventListener("abort", cancel, { once: true });
+    });
+  }
+
+  private getAuthFlow(request: HostRequest): Record<string, unknown> {
+    return authFlowSnapshot(this.requiredAuthFlow(requiredString(request, "flowId")));
+  }
+
+  private respondToAuth(request: HostRequest): Record<string, unknown> {
+    const flow = this.requiredAuthFlow(requiredString(request, "flowId"));
+    const promptId = requiredString(request, "promptId");
+    if (flow.prompt?.id !== promptId || !flow.promptResolve) throw new Error("认证输入已失效");
+    const value = requiredString(request, "value");
+    const resolve = flow.promptResolve;
+    this.clearAuthPrompt(flow);
+    resolve(value);
+    return { accepted: true };
+  }
+
+  private cancelAuth(request: HostRequest): Record<string, unknown> {
+    const flow = this.requiredAuthFlow(requiredString(request, "flowId"));
+    if (flow.status === "running") flow.abort.abort(new Error("用户取消了登录"));
+    return authFlowSnapshot(flow);
+  }
+
+  private requiredAuthFlow(flowId: string): AuthFlow {
+    const flow = this.authFlows.get(flowId);
+    if (!flow) throw new Error("认证流程不存在或已结束");
+    return flow;
+  }
+
+  private clearAuthPrompt(flow: AuthFlow): void {
+    flow.prompt = undefined;
+    flow.promptResolve = undefined;
+    flow.promptReject = undefined;
+  }
+
+  private trimAuthFlows(): void {
+    const terminal = [...this.authFlows.values()].filter((flow) => flow.status !== "running");
+    for (const flow of terminal.slice(0, Math.max(0, terminal.length - 20))) this.authFlows.delete(flow.id);
   }
 
   private async testProvider(request: HostRequest): Promise<Record<string, unknown>> {
@@ -182,6 +373,93 @@ export class WorkbenchAgentHost {
     if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
     await this.modelRuntime.logout(providerId);
     return { providerId, authConfigured: false };
+  }
+
+  private async saveCustomProvider(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = requiredString(request, "providerId");
+    if (!/^custom-[a-z0-9][a-z0-9-]{1,62}$/.test(providerId)) throw new Error("自定义 AI 服务标识无效");
+    const provider = requiredRecord(request, "provider");
+    validateCustomProvider(provider);
+    const previousProviderId = optionalString(request, "previousProviderId");
+    const before = await this.readModelsConfig();
+    if (!previousProviderId && before.providers[providerId]) throw new Error("已存在同名的自定义 AI 服务");
+    const next = structuredClone(before);
+    if (previousProviderId && previousProviderId !== providerId) delete next.providers[previousProviderId];
+    next.providers[providerId] = structuredClone(provider);
+    await this.writeModelsConfig(next);
+    await this.modelRuntime.refresh({ allowNetwork: false });
+    const error = this.modelRuntime.getError();
+    if (error) {
+      await this.writeModelsConfig(before);
+      await this.modelRuntime.refresh({ allowNetwork: false });
+      throw new Error(error);
+    }
+    return { providerId };
+  }
+
+  private async deleteCustomProvider(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = requiredString(request, "providerId");
+    const config = await this.readModelsConfig();
+    if (!(providerId in config.providers)) throw new Error("自定义 AI 服务不存在");
+    await this.modelRuntime.logout(providerId).catch(() => {});
+    delete config.providers[providerId];
+    await this.writeModelsConfig(config);
+    await this.modelRuntime.refresh({ allowNetwork: false });
+    return { providerId, deleted: true };
+  }
+
+  private async refreshModels(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = optionalString(request, "providerId");
+    if (providerId && !this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
+    const result = await this.modelRuntime.refresh({
+      allowNetwork: true,
+      force: true,
+      providers: providerId ? [providerId] : undefined,
+      signal: AbortSignal.timeout(20_000),
+    });
+    return {
+      refreshed: true,
+      errors: [...result.errors].map(([id, error]) => ({ providerId: id, message: error.message })),
+    };
+  }
+
+  private async importLegacyApiKeys(request: HostRequest): Promise<Record<string, unknown>> {
+    const keys = request.keys;
+    if (!Array.isArray(keys)) throw new Error("旧凭据列表无效");
+    const imported: string[] = [];
+    for (const item of keys) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("旧凭据条目无效");
+      const providerId = requiredRecordString(item as Record<string, unknown>, "providerId");
+      const apiKey = requiredRecordString(item as Record<string, unknown>, "apiKey");
+      await this.credentials.modify(providerId, async (current) => current ?? { type: "api_key", key: apiKey });
+      imported.push(providerId);
+    }
+    if (imported.length) await this.modelRuntime.refresh({ allowNetwork: false, providers: imported });
+    return { imported };
+  }
+
+  private async readModelsConfig(): Promise<ModelsJsonConfig> {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(this.modelsPath, "utf8"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("models.json 根节点无效");
+      const providers = (parsed as Record<string, unknown>).providers;
+      if (!providers || typeof providers !== "object" || Array.isArray(providers)) throw new Error("models.json 缺少 providers");
+      return { providers: providers as Record<string, Record<string, unknown>> };
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return { providers: {} };
+      throw error;
+    }
+  }
+
+  private async writeModelsConfig(config: ModelsJsonConfig): Promise<void> {
+    await mkdir(path.dirname(this.modelsPath), { recursive: true });
+    const temporaryPath = `${this.modelsPath}.${process.pid}.tmp`;
+    try {
+      await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+      await rename(temporaryPath, this.modelsPath);
+    } finally {
+      await unlink(temporaryPath).catch(() => {});
+    }
   }
 
   private async createSession(request: HostRequest): Promise<Record<string, unknown>> {
@@ -526,6 +804,18 @@ function requiredString(value: HostRequest, key: string): string {
   return field;
 }
 
+function requiredRecord(value: HostRequest, key: string): Record<string, unknown> {
+  const field = value[key];
+  if (!field || typeof field !== "object" || Array.isArray(field)) throw new Error(`${key} 必须是对象`);
+  return field as Record<string, unknown>;
+}
+
+function requiredAuthType(value: HostRequest): AuthType {
+  const type = requiredString(value, "authType");
+  if (type !== "oauth" && type !== "api_key") throw new Error("认证方式无效");
+  return type;
+}
+
 function optionalString(value: HostRequest, key: string): string | undefined {
   const field = value[key];
   if (field === undefined || field === null || field === "") return undefined;
@@ -575,4 +865,53 @@ function imageInputs(value: unknown): ImageInput[] | undefined {
     if (typeof image.data !== "string" || typeof image.mimeType !== "string") throw new Error("图片缺少 data 或 mimeType");
     return { type: "image", data: image.data, mimeType: image.mimeType };
   });
+}
+
+function authFlowSnapshot(flow: AuthFlow): Record<string, unknown> {
+  const prompt = flow.prompt
+    ? Object.fromEntries(Object.entries(flow.prompt).filter(([key]) => key !== "signal"))
+    : null;
+  return {
+    flowId: flow.id,
+    providerId: flow.providerId,
+    authType: flow.authType,
+    status: flow.status,
+    notifications: structuredClone(flow.notifications),
+    prompt,
+    cancelledPromptIds: [...flow.cancelledPromptIds],
+    error: flow.error ?? null,
+  };
+}
+
+function abortError(reason: unknown): Error {
+  const error = reason instanceof Error ? reason : new Error("认证输入已取消");
+  error.name = "AbortError";
+  return error;
+}
+
+function sanitizeCustomProviderConfig(provider: Record<string, unknown>): Record<string, unknown> {
+  const copy = structuredClone(provider);
+  if (copy.apiKey !== "workbench-local") delete copy.apiKey;
+  return copy;
+}
+
+function validateCustomProvider(provider: Record<string, unknown>): void {
+  const name = provider.name;
+  const baseUrl = provider.baseUrl;
+  const api = provider.api;
+  const models = provider.models;
+  if (typeof name !== "string" || !name.trim()) throw new Error("自定义 AI 服务名称不能为空");
+  if (typeof baseUrl !== "string") throw new Error("自定义 AI 服务地址不能为空");
+  const url = new URL(baseUrl);
+  const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) throw new Error("远程 AI 服务必须使用 HTTPS；本机服务可使用 HTTP");
+  const supportedApis = ["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"];
+  if (typeof api !== "string" || !supportedApis.includes(api)) throw new Error("自定义 AI 服务协议不受支持");
+  if (provider.apiKey !== undefined && provider.apiKey !== "workbench-local") throw new Error("API Key 不能写入 models.json");
+  if (!Array.isArray(models) || models.length === 0) throw new Error("至少添加一个模型");
+  for (const model of models) {
+    if (!model || typeof model !== "object" || Array.isArray(model)) throw new Error("模型配置无效");
+    const id = (model as Record<string, unknown>).id;
+    if (typeof id !== "string" || !id.trim()) throw new Error("模型 ID 不能为空");
+  }
 }
