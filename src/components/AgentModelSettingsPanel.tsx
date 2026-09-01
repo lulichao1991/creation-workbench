@@ -2,6 +2,8 @@ import { Check, KeyRound, LogOut, Settings2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api";
+import { toUserErrorMessage } from "../domain/userError";
+import { withTimeout } from "../domain/async";
 import type {
   AgentModelChoice,
   AgentModelConfiguration,
@@ -22,23 +24,30 @@ const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max
 interface Props {
   disabled: boolean;
   onError: (error: unknown) => void;
+  expanded?: boolean;
 }
 
-export function AgentModelSettingsPanel({ disabled, onError }: Props) {
+export function AgentModelSettingsPanel({ disabled, onError, expanded = false }: Props) {
   const [configuration, setConfiguration] = useState<AgentModelConfiguration | null>(null);
   const [draft, setDraft] = useState<AgentModelSettings | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [working, setWorking] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const load = async () => {
-    const next = await api.agentModelSettingsGet();
-    setConfiguration(next);
-    setDraft(withDefaultModel(next));
+    setLoadError(null);
+    try {
+      const next = await withTimeout(api.agentModelSettingsGet(), 10000, "读取模型配置超时，请重试。");
+      setConfiguration(next);
+      setDraft(withDefaultModel(next));
+    } catch (error) {
+      setLoadError(toUserErrorMessage(error));
+    }
   };
 
   useEffect(() => {
-    void load().catch(onError);
-  }, [onError]);
+    void load();
+  }, []);
 
   const providers = configuration?.catalog.providers.filter((provider) => provider.models.length > 0) ?? [];
   const selectedProvider = providers.find((provider) => provider.id === draft?.defaultModel.provider) ?? null;
@@ -89,11 +98,11 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
   };
 
   if (!configuration || !draft) {
-    return <details className="agent-model-settings"><summary><Settings2 size={12} />AI 模型设置</summary><p>正在读取 Pi ModelRuntime…</p></details>;
+    return <details className="agent-model-settings" open={expanded || undefined}><summary><Settings2 size={12} />AI 模型设置</summary>{loadError ? <div className="agent-model-load-error"><p>{loadError}</p><button className="ghost" onClick={() => void load()}>重试</button></div> : <p>正在读取模型配置…</p>}</details>;
   }
 
   return (
-    <details className="agent-model-settings">
+    <details className="agent-model-settings" open={expanded || undefined}>
       <summary><Settings2 size={12} />AI 模型设置</summary>
       {providers.length === 0 ? <p className="agent-runtime-error">Pi ModelRuntime 没有可用模型。</p> : (
         <div className="agent-model-settings-body">

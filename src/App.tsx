@@ -4,6 +4,7 @@ import "./App.css";
 import { ProjectHome } from "./components/ProjectHome";
 import { Workbench } from "./components/Workbench";
 import { useSelectionStore } from "./stores/selectionStore";
+import { toUserErrorMessage } from "./domain/userError";
 import type {
   BatchMutationRequest,
   BatchMutationResponse,
@@ -22,6 +23,7 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [activeChangeSetId, setActiveChangeSetId] = useState<string | null>(null);
   const clearSelection = useSelectionStore((selection) => selection.clear);
+  const saveState = useSelectionStore((selection) => selection.saveState);
 
   useEffect(() => {
     void initialize();
@@ -175,8 +177,7 @@ function App() {
   };
 
   const handleError = (reason: unknown) => {
-    const message = reason instanceof Error ? reason.message : String(reason);
-    setError(message);
+    setError(toUserErrorMessage(reason));
     window.setTimeout(() => setError(null), 7000);
   };
 
@@ -187,6 +188,7 @@ function App() {
           project={activeProject}
           state={state}
           busy={busy}
+          saveState={saveState}
           onBack={() => {
             setActiveProject(null);
             setState(null);

@@ -19,6 +19,7 @@ import type {
   StoryElementType,
 } from "../types";
 import { useSelectionStore } from "../stores/selectionStore";
+import { useAppDialog } from "./AppDialog";
 
 type ViewType = "timeline" | "graph" | "episodes";
 type FocusMode = "all" | "character" | "foreshadow" | "unreturned" | "affected" | "inconsistent";
@@ -35,6 +36,7 @@ const elementTypes = Object.entries(storyElementLabels) as Array<[StoryElementTy
 
 export function AdvancedStructure({ project, state, currentUnit, onMutate, onMutateBatch }: Props) {
   const selection = useSelectionStore();
+  const dialog = useAppDialog();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [view, setView] = useState<ViewType>("timeline");
   const [focus, setFocus] = useState<FocusMode>("all");
@@ -98,13 +100,13 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
   };
 
   const createElement = async () => {
-    const type = window.prompt(`结构元素类型：${elementTypes.map(([value]) => value).join(" / ")}`, "mainline")?.trim() as StoryElementType | undefined;
+    const type = await dialog.prompt("新建故事元素", { label: "元素类型", options: elementTypes.map(([value, label]) => ({ value, label })) }) as StoryElementType | null;
     if (!type || !storyElementLabels[type]) return;
-    const name = window.prompt("结构元素名称", type === "foreshadow" ? "新伏笔" : "新故事线")?.trim();
+    const name = await dialog.prompt("命名故事元素", { label: "名称", defaultValue: type === "foreshadow" ? "新伏笔" : "新故事线" });
     if (!name) return;
     const elementId = crypto.randomUUID();
     const firstUnit = graph.units[0];
-    const addFirst = firstUnit && window.confirm(`同时在“${firstUnit.name}”建立第一个节点？`);
+    const addFirst = Boolean(firstUnit && await dialog.confirm(`是否同时在“${firstUnit.name}”建立第一个节点？`, { title: "建立起始节点", confirmLabel: "同时建立" }));
     const mutations: MutationRequest[] = [{
       action: "create",
       entityType: "storyElement",
@@ -171,11 +173,12 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
 }
 
 function StructureTimeline({ elements, units, state, onMutate, onChoose }: { elements: StoryElementRow[]; units: ContentUnitRow[]; state: ProjectState; onMutate: Props["onMutate"]; onChoose: (element: StoryElementRow) => void }) {
+  const dialog = useAppDialog();
   const addOccurrence = async (element: StoryElementRow, unit: ContentUnitRow) => {
     const options = occurrenceOptions[element.type];
-    const occurrenceType = window.prompt(`节点语义：${options.join(" / ")}`, options[0])?.trim();
+    const occurrenceType = await dialog.prompt("添加故事节点", { label: "节点语义", options: options.map((value) => ({ value, label: value })) });
     if (!occurrenceType || !options.includes(occurrenceType)) return;
-    const description = window.prompt("节点说明（可留空）", "") ?? "";
+    const description = await dialog.prompt("补充节点说明", { label: "说明", optional: true, multiline: true, placeholder: "可留空" }) ?? "";
     const count = state.storyElementOccurrences.filter((item) => item.story_element_id === element.id).length;
     await onMutate({ action: "create", entityType: "storyElementOccurrence", values: { story_element_id: element.id, content_unit_id: unit.id, occurrence_type: occurrenceType, description, sort_order: count }, changeSetName: "添加故事节点" });
   };
@@ -225,17 +228,18 @@ function StructureGraphView({ elements, units, state, relations, truncated, onCh
 }
 
 function EpisodeStructureTable({ units, elements, state, onMutate }: { units: ContentUnitRow[]; elements: StoryElementRow[]; state: ProjectState; onMutate: Props["onMutate"] }) {
+  const dialog = useAppDialog();
   const occurrenceText = (unitId: string, type: StoryElementType) => state.storyElementOccurrences
     .filter((item) => item.content_unit_id === unitId && elements.find((element) => element.id === item.story_element_id)?.type === type)
     .map((item) => `${elements.find((element) => element.id === item.story_element_id)?.name}·${item.occurrence_type}`).join("；");
   const addProgress = async (unit: ContentUnitRow, type: StoryElementType) => {
     const candidates = elements.filter((element) => element.type === type);
     if (!candidates.length) return;
-    const name = window.prompt(`选择${storyElementLabels[type]}：${candidates.map((element) => element.name).join(" / ")}`, candidates[0].name)?.trim();
-    const element = candidates.find((item) => item.name === name);
+    const elementId = await dialog.prompt(`选择${storyElementLabels[type]}`, { label: "故事元素", options: candidates.map((element) => ({ value: element.id, label: element.name })) });
+    const element = candidates.find((item) => item.id === elementId);
     if (!element) return;
     const options = occurrenceOptions[type];
-    const occurrenceType = window.prompt(`节点语义：${options.join(" / ")}`, options[0])?.trim();
+    const occurrenceType = await dialog.prompt("更新剧集故事进度", { label: "节点语义", options: options.map((value) => ({ value, label: value })) });
     if (!occurrenceType || !options.includes(occurrenceType)) return;
     await onMutate({ action: "create", entityType: "storyElementOccurrence", values: { story_element_id: element.id, content_unit_id: unit.id, occurrence_type: occurrenceType, sort_order: state.storyElementOccurrences.filter((item) => item.story_element_id === element.id).length }, changeSetName: "更新剧集故事进度" });
   };

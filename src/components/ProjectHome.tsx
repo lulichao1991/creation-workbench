@@ -2,6 +2,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { ArrowUpRight, Copy, Film, FolderCog, FolderOpen, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ProjectDescriptor } from "../types";
+import { useAppDialog } from "./AppDialog";
 
 interface Props {
   rootPath: string;
@@ -34,6 +35,7 @@ export function ProjectHome({
 }: Props) {
   const [name, setName] = useState("");
   const [structureType, setStructureType] = useState("single-season");
+  const dialog = useAppDialog();
 
   const chooseRoot = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -52,7 +54,7 @@ export function ProjectHome({
           <span className="brand-mark"><Film size={21} strokeWidth={1.8} /></span>
           <div>
             <strong>创作工作台</strong>
-            <small>LOCAL CREATION SYSTEM</small>
+            <small>本地创作系统</small>
           </div>
         </div>
         <button className="secondary" onClick={chooseProject} disabled={busy}>
@@ -61,9 +63,9 @@ export function ProjectHome({
       </header>
 
       <section className="home-hero">
-        <p className="eyebrow">STORY PRODUCTION, LOCAL FIRST</p>
+        <p className="eyebrow">从故事到成片，全程本地管理</p>
         <h1>从故事构想到<br /><span>每一个镜头。</span></h1>
-        <p className="subtitle">在一个本地工作区里管理剧本、分镜、资产、关键帧与生成任务。创作事实只保存在你的电脑上。</p>
+        <p className="subtitle">在一个本地工作区里管理剧本、分镜、资产、关键帧与制作批次。创作事实只保存在你的电脑上。</p>
       </section>
 
       <section className="root-path-bar">
@@ -79,7 +81,7 @@ export function ProjectHome({
 
       <section className="create-panel">
         <div>
-          <p className="eyebrow">NEW PROJECT</p>
+          <p className="eyebrow">新建项目</p>
           <h2>开始一个作品</h2>
         </div>
         <input
@@ -102,6 +104,7 @@ export function ProjectHome({
         <button
           className="primary"
           disabled={busy || !name.trim()}
+          title={busy ? "正在处理上一项操作" : name.trim() ? "创建并打开项目" : "请先输入项目名称"}
           onClick={() => void onCreate(name, structureType).then(() => setName(""))}
         >
           <Plus size={17} />创建项目
@@ -111,7 +114,7 @@ export function ProjectHome({
       <section className="project-section">
         <div className="section-heading">
           <div>
-            <p className="eyebrow">RECENT PROJECTS</p>
+            <p className="eyebrow">最近项目</p>
             <h2>本地项目</h2>
           </div>
           <span className="count-badge">{projects.length}</span>
@@ -136,17 +139,17 @@ export function ProjectHome({
                 <div className="card-actions">
                   <button
                     className="ghost"
-                    onClick={() => {
-                      const copyName = window.prompt("项目副本名称", `${project.name} 副本`);
-                      if (copyName?.trim()) void onCopy(project, copyName);
+                    onClick={async () => {
+                      const copyName = await dialog.prompt("复制项目", { label: "项目副本名称", defaultValue: `${project.name} 副本`, confirmLabel: "创建副本" });
+                      if (copyName) void onCopy(project, copyName);
                     }}
                   >
                     <Copy size={14} />复制
                   </button>
                   <button
                     className="danger-text"
-                    onClick={() => {
-                      if (window.confirm(`确认删除“${project.name}”？项目目录及其中数据将被永久删除。`)) {
+                    onClick={async () => {
+                      if (await dialog.confirm("项目目录及其中全部数据将被永久删除。此操作无法撤销。", { title: `删除“${project.name}”？`, confirmLabel: "永久删除", danger: true })) {
                         void onDelete(project);
                       }
                     }}

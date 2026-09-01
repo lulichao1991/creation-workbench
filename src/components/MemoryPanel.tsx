@@ -8,6 +8,7 @@ import type {
   UpdateMemoryInput,
 } from "../features/memory";
 import type { ProjectDescriptor } from "../types";
+import { useAppDialog } from "./AppDialog";
 
 interface Props {
   project: ProjectDescriptor;
@@ -25,6 +26,7 @@ const statusLabels: Record<MemoryRecord["status"], string> = {
 };
 
 export function MemoryPanel({ project, currentUnitId, onError }: Props) {
+  const dialog = useAppDialog();
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -33,7 +35,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
   const [memories, setMemories] = useState<MemoryRecord[]>([]);
   const [storage, setStorage] = useState<MemoryStorage>("project");
   const [scope, setScope] = useState<"project" | "contentUnit">("project");
-  const [category, setCategory] = useState("preference");
+  const [category, setCategory] = useState("偏好");
   const [memoryKey, setMemoryKey] = useState("");
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<"candidate" | "active">("candidate");
@@ -103,8 +105,8 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
     const conflict = status === "active"
       ? matchingConflict(storage, target.scopeType, target.scopeId, category.trim(), conflictKey)
       : undefined;
-    if (conflict && !window.confirm(`同范围“${category.trim()}”已有生效记忆。明确替代它吗？`)) return;
-    if (storage === "global" && status === "active" && !window.confirm("确认将这条内容设为跨项目长期记忆？")) return;
+    if (conflict && !await dialog.confirm(`同范围“${category.trim()}”已有生效记忆。新内容会替代旧内容。`, { title: "替代现有记忆？", confirmLabel: "替代" })) return;
+    if (storage === "global" && status === "active" && !await dialog.confirm("它会在其他项目中也生效。", { title: "设为跨项目长期记忆？", confirmLabel: "设为长期记忆" })) return;
     const input: CreateMemoryInput = {
       requestId: crypto.randomUUID(),
       storage,
@@ -150,13 +152,13 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
 
   const activate = async (memory: MemoryRecord) => {
     const conflict = matchingConflict(memory.storage, memory.scopeType, memory.scopeId ?? undefined, memory.category, memory.memoryKey, memory.id);
-    if (conflict && !window.confirm(`激活会明确替代“${conflict.content}”。继续吗？`)) return;
-    if (memory.storage === "global" && !window.confirm("确认激活这条跨项目长期记忆？")) return;
+    if (conflict && !await dialog.confirm(`激活后会替代“${conflict.content}”。`, { title: "激活并替代？", confirmLabel: "激活" })) return;
+    if (memory.storage === "global" && !await dialog.confirm("它会在其他项目中也生效。", { title: "激活跨项目长期记忆？", confirmLabel: "激活" })) return;
     await update(memory, { status: "active", supersedesId: conflict?.id, confirmed: true });
   };
 
   const edit = async (memory: MemoryRecord) => {
-    const next = window.prompt("编辑记忆内容", memory.content)?.trim();
+    const next = await dialog.prompt("编辑记忆", { label: "记忆内容", defaultValue: memory.content, multiline: true });
     if (next && next !== memory.content) await update(memory, { content: next, confirmed: true });
   };
 
@@ -167,7 +169,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
     const scopeType = toUnit ? "contentUnit" : "project";
     const scopeId = toUnit ? currentUnitId! : project.id;
     const conflict = matchingConflict("project", scopeType, scopeId, memory.category, memory.memoryKey, memory.id);
-    if (conflict && !window.confirm(`变更范围会明确替代“${conflict.content}”。继续吗？`)) return;
+    if (conflict && !await dialog.confirm(`变更范围后会替代“${conflict.content}”。`, { title: "变更记忆范围？", confirmLabel: "变更范围" })) return;
     await update(memory, {
       scopeType,
       scopeId,
@@ -177,9 +179,9 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
   };
 
   const supersede = async (memory: MemoryRecord) => {
-    const replacement = window.prompt("输入替代后的新记忆", memory.content)?.trim();
+    const replacement = await dialog.prompt("替代记忆", { label: "新的记忆内容", defaultValue: memory.content, multiline: true, confirmLabel: "替代" });
     if (!replacement || replacement === memory.content) return;
-    if (memory.storage === "global" && !window.confirm("确认以新内容替代这条跨项目长期记忆？")) return;
+    if (memory.storage === "global" && !await dialog.confirm("新内容会作为跨项目长期记忆生效。", { title: "替代长期记忆？", confirmLabel: "替代" })) return;
     setBusy(true);
     try {
       await api.memoryCreate(project.path, {
@@ -205,7 +207,7 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
   };
 
   const invalidate = async (memory: MemoryRecord) => {
-    if (!window.confirm("确认让这条记忆失效？历史记录仍会保留。")) return;
+    if (!await dialog.confirm("历史记录会保留，但此内容不再影响后续创作。", { title: "让这条记忆失效？", confirmLabel: "设为失效", danger: true })) return;
     setBusy(true);
     try {
       await api.memoryInvalidate(project.path, memory.storage, memory.id);
@@ -251,22 +253,22 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
                 {storage === "project" && <select aria-label="记忆范围" value={scope} onChange={(event) => setScope(event.target.value as typeof scope)}><option value="project">整个项目</option><option value="contentUnit" disabled={!currentUnitId}>当前内容单元</option></select>}
                 <select aria-label="初始状态" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="candidate">候选</option><option value="active">生效</option></select>
               </div>
-              <button className="primary" disabled={busy || !content.trim()} onClick={() => void create()}>保存记忆</button>
+              <button className="primary" disabled={busy || !content.trim()} title={busy ? "正在保存" : content.trim() ? "保存这条明确记忆" : "请先填写记忆内容"} onClick={() => void create()}>保存记忆</button>
             </div>
           )}
           <div className="memory-list">
             {!memories.length && <small className="memory-empty">暂无匹配记忆</small>}
             {memories.map((memory) => (
               <article className={`memory-card ${memory.status}`} key={`${memory.storage}:${memory.id}`}>
-                <header><span>{memory.storage === "global" ? "长期" : memory.scopeType === "contentUnit" ? "当前单元" : "项目"}</span><strong>{memory.category}{memory.memoryKey ? ` · ${memory.memoryKey}` : ""}</strong><em>{statusLabels[memory.status]}</em></header>
+                <header><span>{memory.storage === "global" ? "长期" : memory.scopeType === "contentUnit" ? "当前单元" : "项目"}</span><strong>{memoryCategoryLabel(memory.category)}{memory.memoryKey ? ` · ${memory.memoryKey}` : ""}</strong><em>{statusLabels[memory.status]}</em></header>
                 <p>{memory.content}</p>
-                <small>来源：{memory.sourceType}{memory.sources[0]?.excerpt ? ` · ${memory.sources[0].excerpt}` : ""}</small>
-                {memory.usedByTaskIds.length > 0 && <small>已用于任务：{memory.usedByTaskIds.join("、")}</small>}
+                <small>来源：{memorySourceLabel(memory.sourceType)}{memory.sources[0]?.excerpt ? ` · ${memory.sources[0].excerpt}` : ""}</small>
+                {memory.usedByTaskIds.length > 0 && <small>已用于 {memory.usedByTaskIds.length} 次 Agent 任务</small>}
                 {memory.conflictIds.length > 0 && <small className="memory-conflict">与 {memory.conflictIds.length} 条生效记忆冲突，激活时需明确替代</small>}
                 <footer>
                   {memory.status === "candidate" && <button onClick={() => void activate(memory)}>激活</button>}
                   {(memory.status === "candidate" || memory.status === "active") && <button onClick={() => void edit(memory)}>编辑</button>}
-                  {memory.storage === "project" && (memory.status === "candidate" || memory.status === "active") && <button disabled={!currentUnitId && memory.scopeType === "project"} onClick={() => void changeScope(memory)}>{memory.scopeType === "project" ? "限当前单元" : "改为项目"}</button>}
+                  {memory.storage === "project" && (memory.status === "candidate" || memory.status === "active") && <button disabled={!currentUnitId && memory.scopeType === "project"} title={!currentUnitId && memory.scopeType === "project" ? "请先在左侧选择一个内容单元" : "调整记忆生效范围"} onClick={() => void changeScope(memory)}>{memory.scopeType === "project" ? "限当前单元" : "改为项目"}</button>}
                   {memory.status === "active" && <button onClick={() => void supersede(memory)}>替代</button>}
                   {(memory.status === "candidate" || memory.status === "active") && <button className="danger" onClick={() => void invalidate(memory)}>失效</button>}
                 </footer>
@@ -277,4 +279,12 @@ export function MemoryPanel({ project, currentUnitId, onError }: Props) {
       )}
     </section>
   );
+}
+
+function memoryCategoryLabel(category: string) {
+  return ({ preference: "偏好", decision: "创作决策", constraint: "约束", style: "风格", character: "角色设定", workflow: "工作方式" } as Record<string, string>)[category] ?? category;
+}
+
+function memorySourceLabel(source: string) {
+  return ({ user: "用户明确创建", agent: "Agent 建议", imported: "导入内容", system: "系统记录" } as Record<string, string>)[source] ?? "已记录来源";
 }

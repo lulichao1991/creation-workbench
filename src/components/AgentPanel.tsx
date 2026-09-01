@@ -26,25 +26,25 @@ import type {
   RuntimeEvent,
 } from "../features/agent";
 import { runtimeEventName, type RuntimeDiagnostics } from "../features/agent/runtime";
+import { toUserErrorMessage } from "../domain/userError";
 import {
   buildAgentSelection,
   buildChangeAnalysisSelection,
   buildWriteScope,
   canRequestExpertTeam,
-  displayRef,
   isExpertTeamRunning,
 } from "../features/agent/panelState";
 import type { FeatureFlags } from "../features/featureFlags";
 import type { AICard, PatchProposal } from "../features/permission";
 import { useSelectionStore } from "../stores/selectionStore";
 import type { ProjectDescriptor, Workspace } from "../types";
-import { AgentModelSettingsPanel } from "./AgentModelSettingsPanel";
 
 interface Props {
   project: ProjectDescriptor;
   revision: number;
   workspace: Workspace;
   currentUnitId: string | null;
+  contextLabel: string;
   activeChangeCount: number;
   activeChangeSetId: string | null;
   hasActiveChangeSet: boolean;
@@ -88,14 +88,17 @@ const modeLabels: Record<AgentMode, string> = {
   edit: "编辑",
 };
 
-export function AgentPanel({ project, revision, workspace, currentUnitId, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
+export function AgentPanel({ project, revision, workspace, currentUnitId, contextLabel, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
   const selection = useSelectionStore();
   const [flags, setFlags] = useState<FeatureFlags | null>(null);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
-  const [mode, setMode] = useState<AgentMode>("edit");
+  const [mode, setMode] = useState<AgentMode>(() => {
+    const saved = localStorage.getItem("workbench.agentMode") as AgentMode | null;
+    return saved && saved in modeLabels ? saved : "discussion";
+  });
   const [attachSelection, setAttachSelection] = useState(true);
   const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
   const [activeExpert, setActiveExpert] = useState<ExpertType | "main">("main");
@@ -133,6 +136,10 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   );
   const taskRunning = activeTask && ["created", "context_building", "queued", "running"].includes(activeTask.status);
   const teamRunning = isExpertTeamRunning(consultation?.status);
+
+  useEffect(() => {
+    localStorage.setItem("workbench.agentMode", mode);
+  }, [mode]);
 
   const openSession = useCallback(async (session: AgentSession) => {
     setSessionId(session.id);
@@ -567,9 +574,9 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         <button className="primary full" disabled={working} onClick={() => void enableAgent()}>
           {working ? "正在启用…" : "启用 Agent"}
         </button>
-        <small>Pi SDK Agent Host 已随工作台内置；启用后可直接配置 Provider 与模型。</small>
-        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测 Agent Host"}</button>
-        {runtimeDiagnostics && <small>{runtimeDiagnostics.healthy ? `Agent Host 正常 · Pi SDK ${runtimeDiagnostics.sdkVersion ?? "未知"} · ${runtimeDiagnostics.modelCount} 个模型` : runtimeDiagnostics.error}</small>}
+        <small>Agent 运行环境已内置；启用后可在顶部设置中配置模型与账号。</small>
+        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测运行环境"}</button>
+        {runtimeDiagnostics && <small>{runtimeDiagnostics.healthy ? `运行环境正常 · ${runtimeDiagnostics.modelCount} 个可用模型` : toUserErrorMessage(runtimeDiagnostics.error)}</small>}
       </div>
     );
   }
@@ -590,17 +597,16 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
             </option>
           ))}
         </select>
-        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning || working} onClick={() => void newDiscussion()}>
+        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning || working} title={taskRunning || teamRunning || working ? "请等待当前任务结束" : "建立新的独立讨论"} onClick={() => void newDiscussion()}>
           新建讨论
         </button>
-        <button className="ghost" disabled={!sessionId || Boolean(taskRunning) || teamRunning || working} onClick={() => void closeDiscussion()}>
+        <button className="ghost" disabled={!sessionId || Boolean(taskRunning) || teamRunning || working} title={!sessionId ? "当前没有讨论" : taskRunning || teamRunning || working ? "请等待当前任务结束" : "结束当前讨论，记录仍会保留"} onClick={() => void closeDiscussion()}>
           结束讨论
         </button>
       </section>
-      <AgentModelSettingsPanel disabled={Boolean(taskRunning) || teamRunning || working} onError={onError} />
       <section className="agent-context-strip">
-        <div><span>当前对象</span><strong>{displayRef(agentSelection.center)}</strong></div>
-        <div><span>模式 / revision</span><strong>{modeLabels[mode]} · r{revision}</strong></div>
+        <div><span>当前对象</span><strong>{contextLabel}</strong></div>
+        <div><span>模式 / 修订</span><strong>{modeLabels[mode]} · 第 {revision} 版</strong></div>
         <div><span>写入 / 保护</span><strong>{writeScope.refs.length} / {writeScope.protectedRefs.length} 字段</strong></div>
       </section>
 
@@ -610,10 +616,10 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         <small>{activeToolName ? `正在读取：${activeToolName}` : activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
         {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
-        {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "Runtime 检测"}</button>}
+        {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "环境检测"}</button>}
       </section>
       {runtimeDiagnostics?.error && <p className="agent-runtime-error"><AlertTriangle size={12} />{runtimeDiagnostics.error}</p>}
-      {runtimeDiagnostics?.healthy && <p className="agent-runtime-ok">Pi SDK {runtimeDiagnostics.sdkVersion} · ModelRuntime {runtimeDiagnostics.modelRuntimeHealthy ? "正常" : "异常"} · Provider 已登录 {runtimeDiagnostics.providerAuth.filter((item) => item.configured).length}/{runtimeDiagnostics.providerCount} · Session {runtimeDiagnostics.sessionHealth.active} · Tool Gateway {runtimeDiagnostics.toolGatewayHealthy ? "正常" : "异常"}</p>}
+      {runtimeDiagnostics?.healthy && <p className="agent-runtime-ok">模型服务{runtimeDiagnostics.modelRuntimeHealthy ? "正常" : "异常"} · 已登录服务 {runtimeDiagnostics.providerAuth.filter((item) => item.configured).length}/{runtimeDiagnostics.providerCount} · 活跃讨论 {runtimeDiagnostics.sessionHealth.active} · 工具连接{runtimeDiagnostics.toolGatewayHealthy ? "正常" : "异常"}</p>}
 
       <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>
@@ -688,7 +694,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         )}
         {Boolean(activeTask?.error) && (
           <p className="agent-runtime-error" role="alert">
-            <AlertTriangle size={13} />{taskErrorMessage(activeTask?.error)} 请在 AI 模型设置中检查 Provider 登录与模型配置后重试。
+            <AlertTriangle size={13} />{taskErrorMessage(activeTask?.error)} 请在模型设置中检查账号登录与模型配置后重试。
           </p>
         )}
         {activeTask?.status === "stale" && (
@@ -748,7 +754,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         />
         <div className="agent-composer-footer">
           <label><input type="checkbox" checked={attachSelection} onChange={(event) => setAttachSelection(event.target.checked)} />附加当前选区</label>
-          <button className="primary" disabled={!input.trim() || !sessionId || Boolean(taskRunning) || teamRunning || working} onClick={() => void sendMessage()}>
+          <button className="primary" disabled={!input.trim() || !sessionId || Boolean(taskRunning) || teamRunning || working} title={!sessionId ? "请先新建或选择讨论" : !input.trim() ? "请输入消息" : taskRunning || teamRunning || working ? "请等待当前任务结束" : "发送给主 Agent"} onClick={() => void sendMessage()}>
             <Send size={13} />发送
           </button>
         </div>
@@ -802,7 +808,7 @@ function ExpertTeamView({ consultation, disabled, onConfirm, onCancel }: {
         </div>
       )}
       {consultation.status === "cancelled" && <p className="expert-team-progress">会诊已取消，没有写入项目事实。</p>}
-      {consultation.status === "failed" && <p className="agent-runtime-error"><AlertTriangle size={12} />会诊未完成，请检查 Runtime 配置后重新申请。</p>}
+      {consultation.status === "failed" && <p className="agent-runtime-error"><AlertTriangle size={12} />会诊未完成，请检查模型与运行环境后重新申请。</p>}
       {consultation.status === "stale" && <p className="stale-warning"><AlertTriangle size={12} />项目已从 r{consultation.baseRevision} 发生变化，请重新申请会诊。</p>}
       {(actionable || cancellable) && (
         <div className="expert-team-actions">
@@ -834,7 +840,7 @@ function AgentMessageView({ message, onExpertTeamSuggestion }: {
       <header>{message.role === "user" ? <span>你</span> : <Bot size={13} />}<strong>{message.role === "user" ? "用户" : "主 Agent"}</strong></header>
       <p>{message.content}</p>
       {structured?.findings?.length ? <ul>{structured.findings.map((finding, index) => <li key={index}>{displayValue(finding)}</li>)}</ul> : null}
-      {structured?.affectedObjects?.length ? <p className="agent-impact-list">受影响对象：{structured.affectedObjects.map((reference) => `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`).join("、")}</p> : null}
+      {structured?.affectedObjects?.length ? <p className="agent-impact-list">受影响对象：{structured.affectedObjects.map((reference) => `${objectTypeLabel(reference.objectType)}${reference.field ? ` · ${fieldLabel(reference.field)}` : ""}`).join("、")}</p> : null}
       {structured?.recommendedReviewScope?.length ? <p className="agent-impact-list">建议复查：{structured.recommendedReviewScope.join("、")}</p> : null}
       {structured?.deepAnalysisRequiresConfirmation && <p className="agent-question">跨剧集深度分析需要你确认后才能继续。</p>}
       {structured?.expertTeamSuggestion && <section className="agent-team-suggestion"><strong>建议专家团复核</strong><p>{structured.expertTeamSuggestion.reason}</p><small>{structured.expertTeamSuggestion.members.map((member) => expertLabels[member]).join(" · ")}</small><button className="secondary" onClick={() => void onExpertTeamSuggestion(structured.expertTeamSuggestion!)}><Users size={11} />建立申请并确认成本</button></section>}
@@ -867,7 +873,7 @@ function PatchDiff({ proposal, selectedIds, onToggle, onApplySelected, onApplyAl
             disabled={!actionable || item.permissionState === "denied"}
             onChange={() => onToggle(item.id)}
           />
-          <span className="patch-field">{item.objectType}:{item.objectId}.{item.fieldName}</span>
+          <span className="patch-field">{objectTypeLabel(item.objectType)} · {fieldLabel(item.fieldName)}</span>
           <span className={`permission-badge ${item.permissionState}`}>{permissionLabel(item.permissionState)}</span>
           <div className="patch-values"><del>{displayValue(item.oldValue)}</del><ins>{displayValue(item.newValue)}</ins></div>
           <small>{item.reason}</small>
@@ -891,7 +897,7 @@ function PermissionCardDetails({ card }: { card: AICard }) {
   return (
     <div className="permission-details">
       <small>当前授权：{options.currentWriteScope?.refs?.length ?? 0} 项</small>
-      {options.requestedScope?.map((request, index) => <code key={index}>{request.objectType}:{request.objectId}.{request.field} · {request.reason}</code>)}
+      {options.requestedScope?.map((request, index) => <code key={index}>{objectTypeLabel(request.objectType)} · {fieldLabel(request.field ?? "field")} · {request.reason}</code>)}
       <small>{options.oneTimeOnly ? "仅限本次" : "持续授权"} · {options.impact}</small>
     </div>
   );
@@ -908,14 +914,14 @@ function AnalysisCardDetails({ card }: { card: AICard }) {
   };
   return (
     <div className="analysis-card-details">
-      {card.relatedRef && <code>{displayRef(card.relatedRef)}</code>}
+      {card.relatedRef && <code>关联对象：{objectTypeLabel(card.relatedRef.objectType)}{card.relatedRef.field ? ` · ${fieldLabel(card.relatedRef.field)}` : ""}</code>}
       {options.evidence?.map((evidence, index) => <small key={index}>依据：{displayValue(evidence)}</small>)}
       {options.affectedObjects?.length ? (
-        <small>影响：{options.affectedObjects.map((reference) => `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`).join("、")}</small>
+        <small>影响：{options.affectedObjects.map((reference) => `${objectTypeLabel(reference.objectType)}${reference.field ? ` · ${fieldLabel(reference.field)}` : ""}`).join("、")}</small>
       ) : null}
       {options.recommendedReviewScope?.length ? <small>建议复查：{options.recommendedReviewScope.join("、")}</small> : null}
       {options.deepAnalysisRequiresConfirmation && <small>跨剧集深度分析需要你确认后才能继续。</small>}
-      {card.cardType === "stale" && options.baseRevision !== undefined && <small>r{options.baseRevision} → r{options.currentRevision}</small>}
+      {card.cardType === "stale" && options.baseRevision !== undefined && <small>第 {options.baseRevision} 版 → 第 {options.currentRevision} 版</small>}
     </div>
   );
 }
@@ -935,7 +941,18 @@ function latestProposal(messages: AgentMessage[]): PatchProposal | null {
 function displayValue(value: unknown): string {
   if (typeof value === "string") return value || "（空）";
   if (value === null || value === undefined) return "（空）";
-  return JSON.stringify(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(displayValue).join("；") || "（空）";
+  if (typeof value === "object") return Object.entries(value as Record<string, unknown>).map(([key, entry]) => `${fieldLabel(key)}：${displayValue(entry)}`).join("；");
+  return String(value);
+}
+
+function objectTypeLabel(type?: string) {
+  return ({ project: "项目", contentUnit: "内容单元", script: "剧本", scene: "场景", shot: "镜头", asset: "资产", assetRequirement: "资产需求", keyframe: "关键帧", generationTask: "制作批次", relation: "关系", storyElement: "故事元素", storyElementOccurrence: "故事节点", projectMemory: "项目记忆", longTermMemory: "长期记忆", changeSet: "变更集" } as Record<string, string>)[type ?? ""] ?? "相关对象";
+}
+
+function fieldLabel(field: string) {
+  return ({ title: "标题", name: "名称", summary: "摘要", content: "内容", description: "描述", prompt: "提示词", prompt_draft: "提示词草稿", duration: "时长", composition: "构图", action: "动作", dialogue: "对白", maturity: "成熟度", status: "状态", objectType: "对象类型", objectId: "对象", field: "字段", reason: "原因", evidence: "依据" } as Record<string, string>)[field] ?? field.replace(/_/g, " ");
 }
 
 function permissionLabel(state: string): string {
@@ -955,6 +972,5 @@ function memberStatusLabel(status: string): string {
 }
 
 function taskErrorMessage(error: unknown): string {
-  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  return "Agent 任务失败。";
+  return toUserErrorMessage(error);
 }

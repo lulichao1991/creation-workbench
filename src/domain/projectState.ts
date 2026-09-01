@@ -51,3 +51,36 @@ export function shotIdForSelection(state: ShotNavigationState, objectType: strin
   if (objectType === "keyframe") return state.keyframes.find((item) => item.id === objectId)?.shot_id ?? null;
   return null;
 }
+
+type WorkspaceSelectionState = Pick<ProjectState, "scripts" | "scenes" | "shots" | "assets" | "keyframes" | "generationTasks">;
+
+export function defaultObjectForWorkspace(
+  state: WorkspaceSelectionState,
+  unitId: string | null,
+  workspace: Workspace,
+): { objectType: string; objectId: string } | null {
+  if (!unitId) return null;
+  if (workspace === "script") {
+    const script = state.scripts.find((item) => item.content_unit_id === unitId);
+    const scene = script && state.scenes.filter((item) => item.script_id === script.id).sort((a, b) => a.sort_order - b.sort_order)[0];
+    return scene ? { objectType: "scene", objectId: scene.id } : script ? { objectType: "script", objectId: script.id } : { objectType: "contentUnit", objectId: unitId };
+  }
+  if (workspace === "shots") {
+    const shot = orderedShotsForUnit(state, unitId)[0];
+    return shot ? { objectType: "shot", objectId: shot.id } : { objectType: "contentUnit", objectId: unitId };
+  }
+  if (workspace === "assets") {
+    const asset = state.assets.find((item) => item.type === "character") ?? state.assets[0];
+    return asset ? { objectType: "asset", objectId: asset.id } : { objectType: "contentUnit", objectId: unitId };
+  }
+  if (workspace === "keyframes") {
+    const shot = orderedShotsForUnit(state, unitId)[0];
+    const frame = shot && state.keyframes.filter((item) => item.shot_id === shot.id).sort((a, b) => a.sort_order - b.sort_order)[0];
+    return frame ? { objectType: "keyframe", objectId: frame.id } : shot ? { objectType: "shot", objectId: shot.id } : { objectType: "contentUnit", objectId: unitId };
+  }
+  if (workspace === "generation") {
+    const task = state.generationTasks.find((item) => item.content_unit_id === unitId);
+    return task ? { objectType: "generationTask", objectId: task.id } : { objectType: "contentUnit", objectId: unitId };
+  }
+  return { objectType: "contentUnit", objectId: unitId };
+}

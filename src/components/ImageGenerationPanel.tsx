@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { useAppDialog } from "./AppDialog";
 import {
   generationCostNotice,
   terminalImageStatuses,
@@ -44,6 +45,7 @@ const initialProvider: SaveProviderInput = {
 };
 
 export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt, referenceImages = [], onSelected, onError }: Props) {
+  const dialog = useAppDialog();
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
@@ -162,7 +164,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
   };
 
   const updateState = async (result: ImageResult, state: "rejected" | "archived" | "deleted") => {
-    if (state === "deleted" && !window.confirm("永久删除此候选文件？此操作不可撤销。")) return;
+    if (state === "deleted" && !await dialog.confirm("候选文件会从本地永久移除，此操作无法撤销。", { title: "永久删除候选图片？", confirmLabel: "永久删除", danger: true })) return;
     try {
       await api.imageUpdateResultState(projectPath, result.id, state);
       await refresh();

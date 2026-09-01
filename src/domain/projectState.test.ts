@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assetIdForSelection, orderedShotsForUnit, shotIdForSelection, supportsWorkspace } from "./projectState";
+import { assetIdForSelection, defaultObjectForWorkspace, orderedShotsForUnit, shotIdForSelection, supportsWorkspace } from "./projectState";
 import type { ContentUnitRow, ProjectState, SceneRow, ScriptRow, ShotRow } from "../types";
 
 const base = { created_at: "", updated_at: "" };
@@ -37,5 +37,22 @@ describe("project state derivations", () => {
   it("keeps the parent shot selected while editing a keyframe", () => {
     const state = { keyframes: [{ id: "frame-5", shot_id: "shot-5" }] } as unknown as Pick<ProjectState, "keyframes">;
     expect(shotIdForSelection(state, "keyframe", "frame-5")).toBe("shot-5");
+  });
+
+  it("centers each workspace on the object it visibly opens", () => {
+    const state = {
+      scripts: [script],
+      scenes: [scene("scene-01", 0)],
+      shots: [shot("shot-01", "scene-01", 0)],
+      assets: [{ id: "asset-01", type: "character" }],
+      keyframes: [{ id: "frame-01", shot_id: "shot-01", sort_order: 0 }],
+      generationTasks: [{ id: "task-01", content_unit_id: "episode" }],
+    } as unknown as ProjectState;
+
+    expect(defaultObjectForWorkspace(state, "episode", "script")).toEqual({ objectType: "scene", objectId: "scene-01" });
+    expect(defaultObjectForWorkspace(state, "episode", "shots")).toEqual({ objectType: "shot", objectId: "shot-01" });
+    expect(defaultObjectForWorkspace(state, "episode", "assets")).toEqual({ objectType: "asset", objectId: "asset-01" });
+    expect(defaultObjectForWorkspace(state, "episode", "keyframes")).toEqual({ objectType: "keyframe", objectId: "frame-01" });
+    expect(defaultObjectForWorkspace(state, "episode", "generation")).toEqual({ objectType: "generationTask", objectId: "task-01" });
   });
 });
