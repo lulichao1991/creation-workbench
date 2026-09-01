@@ -25,7 +25,7 @@ import type {
   ExpertType,
   RuntimeEvent,
 } from "../features/agent";
-import { runtimeEventName, type RuntimeDiagnostics } from "../features/agent/runtime";
+import { runtimeEventName } from "../features/agent/runtime";
 import { toUserErrorMessage } from "../domain/userError";
 import {
   buildAgentSelection,
@@ -108,8 +108,6 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
   const [cards, setCards] = useState<AICard[]>([]);
   const [selectedPatchIds, setSelectedPatchIds] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState(false);
-  const [diagnosing, setDiagnosing] = useState(false);
-  const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [experts, setExperts] = useState<ExpertDefinition[]>([]);
   const [showTeamBuilder, setShowTeamBuilder] = useState(false);
   const [teamRequest, setTeamRequest] = useState("");
@@ -553,17 +551,6 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
     }
   };
 
-  const diagnoseRuntime = async () => {
-    setDiagnosing(true);
-    try {
-      setRuntimeDiagnostics(await api.agentRuntimeDoctor());
-    } catch (error) {
-      onError(error);
-    } finally {
-      setDiagnosing(false);
-    }
-  };
-
   if (!flags) return <div className="agent-loading">正在读取 Agent 配置…</div>;
   if (!agentEnabled) {
     return (
@@ -574,9 +561,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
         <button className="primary full" disabled={working} onClick={() => void enableAgent()}>
           {working ? "正在启用…" : "启用 Agent"}
         </button>
-        <small>Agent 运行环境已内置；启用后可在顶部设置中配置模型与账号。</small>
-        <button className="ghost full" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "正在检测…" : "检测运行环境"}</button>
-        {runtimeDiagnostics && <small>{runtimeDiagnostics.healthy ? `运行环境正常 · ${runtimeDiagnostics.modelCount} 个可用模型` : toUserErrorMessage(runtimeDiagnostics.error)}</small>}
+        <small>Agent 功能已内置；启用后可在顶部设置中连接 AI 服务。</small>
       </div>
     );
   }
@@ -616,10 +601,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
         <small>{activeToolName ? `正在读取：${activeToolName}` : activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
         {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
-        {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "环境检测"}</button>}
       </section>
-      {runtimeDiagnostics?.error && <p className="agent-runtime-error"><AlertTriangle size={12} />{runtimeDiagnostics.error}</p>}
-      {runtimeDiagnostics?.healthy && <p className="agent-runtime-ok">模型服务{runtimeDiagnostics.modelRuntimeHealthy ? "正常" : "异常"} · 已登录服务 {runtimeDiagnostics.providerAuth.filter((item) => item.configured).length}/{runtimeDiagnostics.providerCount} · 活跃讨论 {runtimeDiagnostics.sessionHealth.active} · 工具连接{runtimeDiagnostics.toolGatewayHealthy ? "正常" : "异常"}</p>}
 
       <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>
@@ -787,7 +769,7 @@ function ExpertTeamView({ consultation, disabled, onConfirm, onCancel }: {
         <>
           <section className="expert-team-application">
             <strong>会诊申请</strong>
-            <small>每位专家使用独立 Pi AgentSession 按需读取事实，并且互不查看彼此意见。</small>
+            <small>每位专家会独立核对项目事实，并且互不查看彼此意见。</small>
           </section>
           <section className="expert-team-cost">
             <Coins size={13} />
@@ -808,7 +790,7 @@ function ExpertTeamView({ consultation, disabled, onConfirm, onCancel }: {
         </div>
       )}
       {consultation.status === "cancelled" && <p className="expert-team-progress">会诊已取消，没有写入项目事实。</p>}
-      {consultation.status === "failed" && <p className="agent-runtime-error"><AlertTriangle size={12} />会诊未完成，请检查模型与运行环境后重新申请。</p>}
+      {consultation.status === "failed" && <p className="agent-runtime-error"><AlertTriangle size={12} />会诊未完成，请检查 AI 服务和模型后重新申请。</p>}
       {consultation.status === "stale" && <p className="stale-warning"><AlertTriangle size={12} />项目已从 r{consultation.baseRevision} 发生变化，请重新申请会诊。</p>}
       {(actionable || cancellable) && (
         <div className="expert-team-actions">

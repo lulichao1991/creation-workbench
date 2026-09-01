@@ -25,6 +25,7 @@ export interface RuntimeTaskHandle {
 
 export interface RuntimeDiagnostics {
   healthy: boolean;
+  localDatabaseHealthy: boolean;
   agentHostHealthy: boolean;
   sdkVersion: string | null;
   modelRuntimeHealthy: boolean;

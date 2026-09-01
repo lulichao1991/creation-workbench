@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Provider } from "@earendil-works/pi-ai";
 
+import { EncryptedFileCredentialStore } from "./credentials.js";
 import { WorkbenchAgentHost } from "./runtime.js";
 
 test("creates an isolated real Pi SDK session without builtin tools", async () => {
@@ -664,6 +665,119 @@ test("closes an OAuth prompt when Pi cancels that prompt after an out-of-band ca
     const completed = await waitForAuth(host, started.flowId, (flow) => flow.status === "completed");
     assert.equal(completed.prompt, null);
     assert.deepEqual(completed.cancelledPromptIds, [promptId]);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("cancels an OAuth login and closes its pending prompt", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-oauth-user-cancel-"));
+  const faux = fauxProvider({ provider: "workbench-oauth-user-cancel", tokensPerSecond: 0 });
+  const provider: Provider = {
+    ...faux.provider,
+    auth: {
+      oauth: {
+        name: "Workbench cancellable login",
+        async login(interaction) {
+          await interaction.prompt({ type: "manual_code", message: "粘贴授权码" });
+          return { type: "oauth", access: "unused", refresh: "unused", expires: Date.now() + 3_600_000 };
+        },
+        async refresh(credential) { return credential; },
+        async toAuth(credential) { return { apiKey: credential.access }; },
+      },
+    },
+  };
+  const host = await WorkbenchAgentHost.create(dataDir, () => {}, (runtime) => runtime.registerNativeProvider(provider));
+  try {
+    const started = await host.handle({ id: "start", type: "auth_start", providerId: provider.id, authType: "oauth" }) as { flowId: string };
+    const waiting = await waitForAuth(host, started.flowId, (flow) => Boolean(flow.prompt));
+    const promptId = waiting.prompt!.id;
+    await host.handle({ id: "cancel", type: "auth_cancel", flowId: started.flowId });
+    const cancelled = await waitForAuth(host, started.flowId, (flow) => flow.status === "cancelled");
+    assert.equal(cancelled.prompt, null);
+    assert.deepEqual(cancelled.cancelledPromptIds, [promptId]);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("refreshes and persists an expired OAuth credential", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-oauth-refresh-"));
+  const faux = fauxProvider({ provider: "workbench-oauth-refresh", tokensPerSecond: 0 });
+  faux.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+  const credentialKey = Buffer.alloc(32, 9).toString("base64");
+  let refreshCount = 0;
+  const provider: Provider = {
+    ...faux.provider,
+    auth: {
+      oauth: {
+        name: "Workbench expiring login",
+        async login() {
+          return { type: "oauth", access: "expired", refresh: "rotate-me", expires: Date.now() - 1 };
+        },
+        async refresh() {
+          refreshCount += 1;
+          return { type: "oauth", access: "fresh", refresh: "rotated", expires: Date.now() + 3_600_000 };
+        },
+        async toAuth(credential) { return { apiKey: credential.access }; },
+      },
+    },
+  };
+  const firstEvents: Record<string, unknown>[] = [];
+  let host = await WorkbenchAgentHost.create(dataDir, (event) => firstEvents.push(event), (runtime) => runtime.registerNativeProvider(provider), undefined, EncryptedFileCredentialStore.fromBase64(dataDir, credentialKey));
+  try {
+    const started = await host.handle({ id: "start", type: "auth_start", providerId: provider.id, authType: "oauth" }) as { flowId: string };
+    await waitForAuth(host, started.flowId, (flow) => flow.status === "completed");
+    await host.handle({ id: "create-first", type: "create_session", sessionId: "oauth-refresh-first", provider: provider.id, model: faux.getModel().id });
+    await host.handle({ id: "send-first", type: "send_message", sessionId: "oauth-refresh-first", taskId: "oauth-refresh-task-first", message: "test" });
+    await waitForEvent(firstEvents, "task_completed", "oauth-refresh-task-first");
+    assert.equal(refreshCount, 1);
+
+    host.dispose();
+    const secondEvents: Record<string, unknown>[] = [];
+    host = await WorkbenchAgentHost.create(dataDir, (event) => secondEvents.push(event), (runtime) => runtime.registerNativeProvider(provider), undefined, EncryptedFileCredentialStore.fromBase64(dataDir, credentialKey));
+    await host.handle({ id: "create-second", type: "create_session", sessionId: "oauth-refresh-second", provider: provider.id, model: faux.getModel().id });
+    await host.handle({ id: "send-second", type: "send_message", sessionId: "oauth-refresh-second", taskId: "oauth-refresh-task-second", message: "test again" });
+    await waitForEvent(secondEvents, "task_completed", "oauth-refresh-task-second");
+    assert.equal(refreshCount, 1);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("reports wrong and correct interactive API keys", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-api-key-check-"));
+  const faux = fauxProvider({ provider: "workbench-api-key-check", tokensPerSecond: 0 });
+  const provider: Provider = {
+    ...faux.provider,
+    auth: {
+      apiKey: {
+        name: "Workbench API key",
+        async login(interaction) {
+          return { type: "api_key", key: await interaction.prompt({ type: "secret", message: "输入 API Key" }) };
+        },
+        async check({ credential }) {
+          return credential?.key === "correct-key" ? { type: "api_key", source: "Stored API key" } : undefined;
+        },
+        async resolve({ credential }) {
+          return credential?.key === "correct-key" ? { auth: { apiKey: credential.key }, source: "Stored API key" } : undefined;
+        },
+      },
+    },
+  };
+  const host = await WorkbenchAgentHost.create(dataDir, () => {}, (runtime) => runtime.registerNativeProvider(provider));
+  try {
+    for (const [key, healthy] of [["wrong-key", false], ["correct-key", true]] as const) {
+      const started = await host.handle({ id: `start-${key}`, type: "auth_start", providerId: provider.id, authType: "api_key" }) as { flowId: string };
+      const waiting = await waitForAuth(host, started.flowId, (flow) => Boolean(flow.prompt));
+      await host.handle({ id: `respond-${key}`, type: "auth_respond", flowId: started.flowId, promptId: waiting.prompt!.id, value: key });
+      await waitForAuth(host, started.flowId, (flow) => flow.status === "completed");
+      const tested = await host.handle({ id: `test-${key}`, type: "test_provider", providerId: provider.id }) as { healthy: boolean };
+      assert.equal(tested.healthy, healthy);
+    }
   } finally {
     host.dispose();
     await rm(dataDir, { recursive: true, force: true });

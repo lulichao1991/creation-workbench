@@ -261,7 +261,9 @@ pub fn agent_runtime_doctor(
         .app_data_dir()
         .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
     crate::agent_models::restore_agent_credentials(&app_data_dir, &state)?;
-    state.doctor()
+    let mut diagnostics = state.doctor()?;
+    diagnostics.local_database_healthy = true;
+    Ok(diagnostics)
 }
 
 #[tauri::command]

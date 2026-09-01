@@ -73,6 +73,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
   const [authFlow, setAuthFlow] = useState<AgentAuthFlow | null>(null);
   const [authPromptValue, setAuthPromptValue] = useState("");
   const [showCustomForm, setShowCustomForm] = useState(false);
+  const [showAllProviders, setShowAllProviders] = useState(false);
   const [customDraft, setCustomDraft] = useState<CustomDraft>(() => emptyCustomDraft());
   const openedAuthUrls = useRef(new Set<string>());
 
@@ -118,6 +119,8 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
   const sortedProviders = useMemo(() => [...providers]
     .filter((provider) => `${providerDisplayName(provider)} ${provider.name}`.toLowerCase().includes(query.trim().toLowerCase()))
     .sort((a, b) => providerRank(a) - providerRank(b) || providerDisplayName(a).localeCompare(providerDisplayName(b), "zh-CN")), [providers, query]);
+  const compactProviders = sortedProviders.filter((provider) => provider.authConfigured || provider.custom || commonProviders.includes(provider.id));
+  const visibleProviders = query.trim() || showAllProviders ? sortedProviders : compactProviders;
   const selectedProvider = providers.find((provider) => provider.id === draft?.defaultModel.provider) ?? null;
   const selectedModel = selectedProvider?.models.find((model) => model.id === draft?.defaultModel.model) ?? null;
   const modelOptions = useMemo(() => providers.filter((provider) => provider.authConfigured).flatMap((provider) => provider.models.map((model) => ({
@@ -237,7 +240,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
         </div>
         <label className="ai-provider-search"><span className="sr-only">搜索 AI 服务</span><input value={query} placeholder="搜索 AI 服务" onChange={(event) => setQuery(event.target.value)} /></label>
         <div className="ai-provider-list">
-          {sortedProviders.map((provider) => (
+          {visibleProviders.map((provider) => (
             <article className={`ai-provider-card ${provider.authConfigured ? "connected" : ""}`} key={provider.id}>
               <div className="ai-provider-main">
                 <span className={`ai-provider-status ${provider.authConfigured ? "ready" : "idle"}`}>{provider.authConfigured ? <CheckCircle2 size={16} /> : <span />}</span>
@@ -260,6 +263,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
             </article>
           ))}
           {sortedProviders.length === 0 && <p className="ai-provider-empty">没有匹配的 AI 服务。</p>}
+          {!query.trim() && sortedProviders.length > compactProviders.length && <button className={`ai-provider-more ${showAllProviders ? "expanded" : ""}`} onClick={() => setShowAllProviders((current) => !current)}><ChevronDown size={15} />{showAllProviders ? "收起更多 AI 服务" : `查看更多 AI 服务（${sortedProviders.length - compactProviders.length}）`}</button>}
         </div>
         {showCustomForm && <CustomProviderForm draft={customDraft} disabled={working} onChange={setCustomDraft} onCancel={() => { setShowCustomForm(false); setCustomDraft(emptyCustomDraft()); }} onSave={() => void run(saveCustom)} />}
       </section>

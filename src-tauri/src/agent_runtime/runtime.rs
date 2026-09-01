@@ -54,6 +54,8 @@ pub struct RuntimeTaskHandle {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeDiagnostics {
     pub healthy: bool,
+    #[serde(default)]
+    pub local_database_healthy: bool,
     pub agent_host_healthy: bool,
     pub sdk_version: Option<String>,
     pub model_runtime_healthy: bool,
