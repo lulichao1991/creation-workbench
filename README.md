@@ -1,6 +1,6 @@
 # 创作工作台 V2 开发线
 
-本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-beta.1` 核心闭环修复阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI、真实生图或视频生成服务，V1 工作流保持完整可用：
+本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-beta.2` Pi 原生 Agent 完整验收阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI、真实生图或视频生成服务，V1 工作流保持完整可用：
 
 `作品结构 → 剧本 → 分镜 → 资产 → 关键帧 → 生成任务 / 提示词 → 历史与快照`
 
@@ -234,3 +234,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - Runtime 检测替换为 Agent Host Doctor，统一显示 Pi SDK 版本、ModelRuntime 状态、Provider 登录数、Session 健康和 Tool Gateway 健康。
 - 应用启动时从 Tauri `resource_dir` 解析私有 Runtime 与 Host 脚本；开发测试仍可显式指定 Host fixture，但正式包不会执行系统 Shell 或 PATH 查找。
 - 自动化覆盖私有 Runtime 路径解析、Agent Host Doctor、Provider/模型状态、Session 状态、Tool Gateway 状态及完整前后端回归测试。
+
+## V2 Beta 2 Goal34 Pi 原生 Agent 完整验收
+
+- 《智斗游戏》20 项验收已全部映射到真实 Pi SDK Tool Loop、Rust 数据/权限回归与界面确认边界；详细证据见 `BETA2_GOAL34_REVIEW.md`。
+- 新增 30 集结构连续讨论验收：主 Agent 自行读取结构和有效记忆，第二轮“把第10集提前一点”沿用同一 Pi AgentSession 上下文。
+- 主 Agent 可建议但不能自动启动专家团；有效建议必须包含 2–6 个不重复的已注册专业角色，并由用户进入申请与高成本确认。
+- 提示词 Agent 新增只读 `compile_prompt_preview`，调用确定性 PromptCompiler 返回来源、警告和去路径参考图；不持久化预览、不设置正式稿、无视频调用。
+- Beta 2 继续保持静态生图显式触发、所有 AI 修改经权限与 ChangeSet、可撤销，以及全产品无视频生成入口。

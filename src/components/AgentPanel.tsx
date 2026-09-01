@@ -65,6 +65,11 @@ interface AgentResult {
   stale?: boolean;
   baseRevision?: number;
   currentRevision?: number;
+  expertTeamSuggestion?: {
+    reason: string;
+    question: string;
+    members: ExpertType[];
+  } | null;
 }
 
 const expertLabels: Record<ExpertType | "main", string> = {
@@ -413,6 +418,12 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     setShowTeamBuilder(true);
   };
 
+  const useExpertTeamSuggestion = async (suggestion: NonNullable<AgentResult["expertTeamSuggestion"]>) => {
+    setTeamRequest(suggestion.question);
+    setTeamMembers(new Set(suggestion.members));
+    await openTeamBuilder();
+  };
+
   const requestTeam = async () => {
     const message = teamRequest.trim();
     if (!sessionId || !message || teamMembers.size < 2 || taskRunning || teamRunning) return;
@@ -668,7 +679,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
             <p>我会先判断专业方向，只读取必要上下文；含糊请求会先澄清。</p>
           </div>
         )}
-        {messages.map((message) => <AgentMessageView key={message.id} message={message} />)}
+        {messages.map((message) => <AgentMessageView key={message.id} message={message} onExpertTeamSuggestion={useExpertTeamSuggestion} />)}
         {streamingText && (
           <article className="agent-message assistant streaming">
             <header><Bot size={13} /><strong>{expertLabels[activeExpert]}</strong><span>生成中</span></header>
@@ -813,7 +824,10 @@ function ResultGroup({ title, values, emphasis = false }: { title: string; value
   );
 }
 
-function AgentMessageView({ message }: { message: AgentMessage }) {
+function AgentMessageView({ message, onExpertTeamSuggestion }: {
+  message: AgentMessage;
+  onExpertTeamSuggestion: (suggestion: NonNullable<AgentResult["expertTeamSuggestion"]>) => Promise<void>;
+}) {
   const structured = message.structured as AgentResult | null;
   return (
     <article className={`agent-message ${message.role}`}>
@@ -823,6 +837,7 @@ function AgentMessageView({ message }: { message: AgentMessage }) {
       {structured?.affectedObjects?.length ? <p className="agent-impact-list">受影响对象：{structured.affectedObjects.map((reference) => `${reference.objectType}:${reference.objectId}${reference.field ? `.${reference.field}` : ""}`).join("、")}</p> : null}
       {structured?.recommendedReviewScope?.length ? <p className="agent-impact-list">建议复查：{structured.recommendedReviewScope.join("、")}</p> : null}
       {structured?.deepAnalysisRequiresConfirmation && <p className="agent-question">跨剧集深度分析需要你确认后才能继续。</p>}
+      {structured?.expertTeamSuggestion && <section className="agent-team-suggestion"><strong>建议专家团复核</strong><p>{structured.expertTeamSuggestion.reason}</p><small>{structured.expertTeamSuggestion.members.map((member) => expertLabels[member]).join(" · ")}</small><button className="secondary" onClick={() => void onExpertTeamSuggestion(structured.expertTeamSuggestion!)}><Users size={11} />建立申请并确认成本</button></section>}
       {structured?.stale && <p className="agent-risk"><AlertTriangle size={12} />分析结果已过期（r{structured.baseRevision} → r{structured.currentRevision}）。</p>}
       {structured?.questions?.map((question) => <p className="agent-question" key={question}>{question}</p>)}
       {structured?.risks?.map((risk) => <p className="agent-risk" key={risk}><AlertTriangle size={12} />{risk}</p>)}

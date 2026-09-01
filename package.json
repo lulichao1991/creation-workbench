@@ -1,7 +1,7 @@
 {
   "name": "workbench",
   "private": true,
-  "version": "0.2.0-beta.1",
+  "version": "0.2.0-beta.2",
   "type": "module",
   "scripts": {
     "postinstall": "npm --prefix agent-host install --ignore-scripts",
@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:agent-host": "npm --prefix agent-host run check",
     "test:all": "npm test && npm run test:agent-host",
+    "package:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1",
     "test:watch": "vitest",
     "preview": "vite preview",
     "tauri": "tauri"

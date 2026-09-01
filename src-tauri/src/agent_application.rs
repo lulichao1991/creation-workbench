@@ -264,6 +264,18 @@ struct ExpertResultDraft {
     recommended_review_scope: Vec<String>,
     #[serde(default)]
     deep_analysis_requires_confirmation: bool,
+    expert_team_suggestion: Option<ExpertTeamSuggestionDraft>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExpertTeamSuggestionDraft {
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    question: String,
+    #[serde(default)]
+    members: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -1144,7 +1156,7 @@ fn build_tool_driven_prompt(
     let (display_name, system_instruction) = if expert_type == "main" {
         (
             "主 Agent",
-            "先自行读取项目事实；只有需要专业判断时才调用 call_expert，并在专家返回后综合，不得把专业选择预先交给 Rust 关键词路由。",
+            "先自行读取项目事实；只有需要专业判断时才调用 call_expert，并在专家返回后综合，不得把专业选择预先交给 Rust 关键词路由。确认问题横跨至少两个专业方向时，只建议 expertTeamSuggestion，由用户确认专家与高成本后启动。",
         )
     } else {
         let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
@@ -1156,7 +1168,7 @@ fn build_tool_driven_prompt(
         "这是只读讨论，最终 JSON 的 patchProposal 必须为 null。"
     };
     Ok(format!(
-        "当前请求由真实 Pi MainAgentSession 处理，当前角色是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。需要专业判断时由你自行调用 call_expert(writer/director/cinematography/art/keyframe/prompt)，专业 Agent 会在独立 Pi AgentSession 中自行读取事实。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
+        "当前请求由真实 Pi MainAgentSession 处理，当前角色是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。需要专业判断时由你自行调用 call_expert(writer/director/cinematography/art/keyframe/prompt)，专业 Agent 会在独立 Pi AgentSession 中自行读取事实。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、expertTeamSuggestion。只有核对事实后确认问题横跨至少两个专业方向时，expertTeamSuggestion 才包含 reason、question、members（2–6 个 writer/director/cinematography/art/keyframe/prompt）；否则为 null。不得自行启动专家团。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
         display_name,
         system_instruction,
         mode_rule,
@@ -1432,9 +1444,17 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
     } else {
         Vec::new()
     };
+    let expert_team_suggestion = draft
+        .expert_team_suggestion
+        .take()
+        .and_then(normalize_expert_team_suggestion);
     let status = if stale {
         "stale"
-    } else if patch_value.is_some() || !draft.questions.is_empty() || !card_ids.is_empty() {
+    } else if patch_value.is_some()
+        || !draft.questions.is_empty()
+        || !card_ids.is_empty()
+        || expert_team_suggestion.is_some()
+    {
         "waiting_for_user"
     } else {
         "completed"
@@ -1452,6 +1472,7 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
         "affectedObjects": draft.affected_objects,
         "recommendedReviewScope": draft.recommended_review_scope,
         "deepAnalysisRequiresConfirmation": draft.deep_analysis_requires_confirmation,
+        "expertTeamSuggestion": expert_team_suggestion,
         "cardIds": card_ids,
         "baseRevision": revision,
         "currentRevision": current_revision,
@@ -1459,6 +1480,20 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
     });
     finish_without_runtime(project_path, task_id, &session_id, &result, status)?;
     Ok(result)
+}
+
+fn normalize_expert_team_suggestion(
+    suggestion: ExpertTeamSuggestionDraft,
+) -> Option<ExpertTeamSuggestionDraft> {
+    let mut unique = HashSet::new();
+    let valid = !suggestion.reason.trim().is_empty()
+        && !suggestion.question.trim().is_empty()
+        && (2..=6).contains(&suggestion.members.len())
+        && suggestion
+            .members
+            .iter()
+            .all(|member| expert(member).is_some() && unique.insert(member.clone()));
+    valid.then_some(suggestion)
 }
 
 fn materialize_analysis_cards(
@@ -1797,6 +1832,29 @@ mod tests {
             ]
         );
         assert!(EXPERTS.iter().all(|expert| !expert.prohibited.is_empty()));
+    }
+
+    #[test]
+    fn main_agent_accepts_only_bounded_cross_discipline_team_suggestions() {
+        let valid = normalize_expert_team_suggestion(ExpertTeamSuggestionDraft {
+            reason: "镜头节奏、构图和对白动机互相影响".into(),
+            question: "请编剧、导演和摄影分别判断镜头04的改法".into(),
+            members: vec!["writer".into(), "director".into(), "cinematography".into()],
+        })
+        .unwrap();
+        assert_eq!(valid.members.len(), 3);
+        assert!(normalize_expert_team_suggestion(ExpertTeamSuggestionDraft {
+            reason: "重复角色".into(),
+            question: "复查".into(),
+            members: vec!["writer".into(), "writer".into()],
+        })
+        .is_none());
+        assert!(normalize_expert_team_suggestion(ExpertTeamSuggestionDraft {
+            reason: "越界角色".into(),
+            question: "复查".into(),
+            members: vec!["writer".into(), "video_generator".into()],
+        })
+        .is_none());
     }
 
     #[test]

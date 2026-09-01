@@ -12,6 +12,7 @@ use crate::context::{
 };
 use crate::database::{new_id, now, open_database, AppResult};
 use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
+use crate::prompt_compiler::compile_prompt_preview;
 
 const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_RESULT_TOKENS: usize = 12_000;
@@ -146,6 +147,7 @@ pub fn execute_tool(
                     _ => execute_inner(
                         &tx,
                         app_data_dir,
+                        project_path,
                         &project_id,
                         &selection,
                         &write_scope_json,
@@ -470,6 +472,7 @@ pub(crate) fn expert_tool_names(expert_type: &str) -> &'static [&'static str] {
         "prompt" => &[
             "get_selection",
             "read_generation_task",
+            "compile_prompt_preview",
             "read_shot_context",
             "read_asset",
         ],
@@ -490,6 +493,7 @@ pub(crate) fn professional_system_prompt(expert_type: &str) -> AppResult<String>
 fn execute_inner(
     conn: &Connection,
     app_data_dir: Option<&Path>,
+    project_path: &Path,
     project_id: &str,
     selection: &SelectionSnapshot,
     write_scope_json: &str,
@@ -536,6 +540,34 @@ fn execute_inner(
             project_id,
             &string_arg(arguments, "generationTaskId")?,
         ),
+        "compile_prompt_preview" => {
+            let preview = compile_prompt_preview(
+                app_data_dir.ok_or("TOOL_NOT_AVAILABLE: 缺少应用数据目录")?,
+                project_path,
+                string_arg(arguments, "generationTaskId")?,
+                optional_string_arg(arguments, "modelProfileKey")?,
+                optional_string_arg(arguments, "templateId")?,
+            )?;
+            Ok(json!({
+                "generationTaskId": preview.generation_task_id,
+                "modelProfileKey": preview.model_profile_key,
+                "modelProfileVersion": preview.model_profile_version,
+                "templateId": preview.template_id,
+                "templateVersion": preview.template_version,
+                "sourceRevision": preview.source_revision,
+                "compiledPrompt": preview.compiled_prompt,
+                "sourceMap": preview.source_map,
+                "warnings": preview.warnings,
+                "referenceImages": preview.reference_images.into_iter().map(|image| json!({
+                    "sourceType": image.source_type,
+                    "sourceId": image.source_id,
+                    "label": image.label,
+                })).collect::<Vec<_>>(),
+                "status": "preview",
+                "persisted": false,
+                "videoGenerationCalled": false,
+            }))
+        }
         "read_story_structure" => read_story_structure(
             conn,
             project_id,
@@ -955,6 +987,7 @@ fn validate_arguments(tool_name: &str, arguments: &Map<String, Value>) -> AppRes
         "read_shot_context" => &["shotId"],
         "read_asset" => &["assetId"],
         "read_generation_task" => &["generationTaskId"],
+        "compile_prompt_preview" => &["generationTaskId", "modelProfileKey", "templateId"],
         "read_story_structure" => &["scopeType", "scopeId", "limit"],
         "search_project" => &["query", "limit"],
         "read_active_memories" => &["objectType", "objectId"],
@@ -1103,6 +1136,7 @@ fn top_level_keys(value: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_database::open_app_database;
     use crate::database::{init_database, now};
 
     fn setup_project() -> (tempfile::TempDir, String) {
@@ -1238,6 +1272,46 @@ mod tests {
             )
             .unwrap(),
             14
+        );
+    }
+
+    #[test]
+    fn prompt_agent_compiles_readonly_preview_without_persisting_or_exposing_paths() {
+        let (temp, _) = setup_project();
+        let app_data_dir = temp.path().join("app-data");
+        let app_conn = open_app_database(&app_data_dir).unwrap();
+        let timestamp = now();
+        app_conn.execute("INSERT INTO model_profiles (key,display_name,provider,prompt_format,image_reference_rules,supports_start_end_frame,recommended_constraints_json,prohibited_patterns_json,version,created_at,updated_at) VALUES ('preview-model','预览模型','test','plain_text','',0,'[]','[]','1.0',?1,?1)", [&timestamp]).unwrap();
+        app_conn.execute("INSERT INTO prompt_templates (id,scope,model_profile_key,name,version,template_body,conditional_rules_json,active,created_at,updated_at) VALUES ('preview-template','global','preview-model','预览模板','1.0','{{header}}\n{{shots}}','{}',1,?1,?1)", [&timestamp]).unwrap();
+        drop(app_conn);
+
+        let result = execute_tool(
+            temp.path(),
+            Some(&app_data_dir),
+            ToolGatewayRequest {
+                tool_call_id: "tool-compile-preview".into(),
+                task_id: "task".into(),
+                session_id: "session".into(),
+                tool_name: "compile_prompt_preview".into(),
+                arguments: json!({ "generationTaskId": "generation" }),
+            },
+        )
+        .unwrap();
+        assert_eq!(result["data"]["status"], "preview");
+        assert_eq!(result["data"]["persisted"], false);
+        assert_eq!(result["data"]["videoGenerationCalled"], false);
+        assert!(result["data"]["compiledPrompt"]
+            .as_str()
+            .is_some_and(|value| value.contains("镜头04")));
+        assert!(!result.to_string().contains("C:/private"));
+        assert!(!result.to_string().contains("filePath"));
+        let project_conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            project_conn
+                .query_row("SELECT COUNT(*) FROM prompt_compilations", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
         );
     }
 

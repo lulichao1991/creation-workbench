@@ -442,6 +442,54 @@ fn compile_prompt(
     project_path: &Path,
     input: CompilePromptInput,
 ) -> AppResult<PromptCompilation> {
+    compile_prompt_internal(app_data_dir, project_path, input, true)
+}
+
+pub(crate) fn compile_prompt_preview(
+    app_data_dir: &Path,
+    project_path: &Path,
+    generation_task_id: String,
+    model_profile_key: Option<String>,
+    template_id: Option<String>,
+) -> AppResult<PromptCompilation> {
+    let project_id: String = open_database(project_path)?
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    let profile = match model_profile_key {
+        Some(key) => key,
+        None => list_profiles(app_data_dir)?
+            .into_iter()
+            .next()
+            .map(|profile| profile.key)
+            .ok_or("OBJECT_NOT_FOUND: 尚未配置模型档案")?,
+    };
+    let template = match template_id {
+        Some(id) => id,
+        None => list_templates(app_data_dir, Some(&project_id))?
+            .into_iter()
+            .find(|template| template.model_profile_key == profile)
+            .map(|template| template.id)
+            .ok_or("OBJECT_NOT_FOUND: 所选模型档案没有可用模板")?,
+    };
+    compile_prompt_internal(
+        app_data_dir,
+        project_path,
+        CompilePromptInput {
+            request_id: format!("preview:{generation_task_id}"),
+            generation_task_id,
+            model_profile_key: profile,
+            template_id: template,
+        },
+        false,
+    )
+}
+
+fn compile_prompt_internal(
+    app_data_dir: &Path,
+    project_path: &Path,
+    input: CompilePromptInput,
+    persist: bool,
+) -> AppResult<PromptCompilation> {
     validate_nonempty(&[
         ("请求 ID", &input.request_id),
         ("生成任务 ID", &input.generation_task_id),
@@ -455,14 +503,16 @@ fn compile_prompt(
         return Err("TOOL_ARGUMENT_INVALID: 模板未启用或不属于所选模型档案".into());
     }
     let conn = open_database(project_path)?;
-    if let Ok(existing) = load_compilation(&conn, &input.request_id) {
-        if existing.generation_task_id == input.generation_task_id
-            && existing.model_profile_key == input.model_profile_key
-            && existing.template_id == input.template_id
-        {
-            return Ok(existing);
+    if persist {
+        if let Ok(existing) = load_compilation(&conn, &input.request_id) {
+            if existing.generation_task_id == input.generation_task_id
+                && existing.model_profile_key == input.model_profile_key
+                && existing.template_id == input.template_id
+            {
+                return Ok(existing);
+            }
+            return Err("REQUEST_ID_CONFLICT: 请求 ID 已用于其他编译参数".into());
         }
-        return Err("REQUEST_ID_CONFLICT: 请求 ID 已用于其他编译参数".into());
     }
     let (task_name, task_duration, project_id, revision): (String,f64,String,i64) = conn.query_row("SELECT gt.name,gt.duration,p.id,p.revision FROM generation_tasks gt JOIN projects p WHERE gt.id=?1 LIMIT 1", [&input.generation_task_id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).map_err(|_|"OBJECT_NOT_FOUND: 生成任务不存在".to_string())?;
     if template.scope == "project" && template.project_id.as_deref() != Some(&project_id) {
@@ -691,8 +741,29 @@ fn compile_prompt(
         }
     }
     let timestamp = now();
-    conn.execute("INSERT INTO prompt_compilations (id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,source_map_json,warnings_json,reference_images_json,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'compiled',?12,?12)",params![input.request_id,input.generation_task_id,profile.key,profile.version,template.id,template.version,revision,compiled_prompt,json!(source_map).to_string(),json!(warnings).to_string(),json!(reference_images).to_string(),timestamp]).map_err(|e|format!("保存提示词编译记录失败：{e}"))?;
-    load_compilation(&conn, &input.request_id)
+    let preview = PromptCompilation {
+        id: input.request_id,
+        generation_task_id: input.generation_task_id,
+        model_profile_key: profile.key,
+        model_profile_version: profile.version,
+        template_id: template.id,
+        template_version: template.version,
+        source_revision: revision,
+        compiled_prompt,
+        user_override: None,
+        current_prompt: None,
+        source_map,
+        warnings,
+        reference_images,
+        status: if persist { "compiled" } else { "preview" }.into(),
+        created_at: timestamp.clone(),
+        updated_at: timestamp,
+    };
+    if !persist {
+        return Ok(preview);
+    }
+    conn.execute("INSERT INTO prompt_compilations (id,generation_task_id,model_profile_key,model_profile_version,template_id,template_version,source_revision,compiled_prompt,source_map_json,warnings_json,reference_images_json,status,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'compiled',?12,?12)",params![preview.id,preview.generation_task_id,preview.model_profile_key,preview.model_profile_version,preview.template_id,preview.template_version,preview.source_revision,preview.compiled_prompt,json!(preview.source_map).to_string(),json!(preview.warnings).to_string(),json!(preview.reference_images).to_string(),preview.created_at]).map_err(|e|format!("保存提示词编译记录失败：{e}"))?;
+    load_compilation(&conn, &preview.id)
 }
 
 fn load_compilation(conn: &Connection, id: &str) -> AppResult<PromptCompilation> {

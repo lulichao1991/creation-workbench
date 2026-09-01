@@ -65,6 +65,59 @@ test("keeps two real Pi SDK turns in the same AgentSession", async () => {
   }
 });
 
+test("Goal34 main Agent reads 30-episode structure and continues episode-10 discussion with memory", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-goal34-story-"));
+  const faux = fauxProvider({ provider: "workbench-goal34-story-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("read_story_structure", { scopeType: "project", limit: 30 }, { id: "read-30-episodes" }),
+    ]),
+    (context) => {
+      assert.match(JSON.stringify(context.messages), /第30集/);
+      return fauxAssistantMessage([
+        fauxToolCall("read_active_memories", {}, { id: "read-project-memory" }),
+      ]);
+    },
+    (context) => {
+      assert.match(JSON.stringify(context.messages), /保持第10集线索提前但不改变结局/);
+      return fauxAssistantMessage("已核对30集结构：第10集的线索可以提前到第8集铺垫，结局不变。");
+    },
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /已核对30集结构/);
+      assert.match(transcript, /把第10集提前一点/);
+      return fauxAssistantMessage("沿用上一轮：将第10集关键事件提前至第9集，保留第8集铺垫和原结局。");
+    },
+  ]);
+  const tools: string[] = [];
+  const events: Record<string, unknown>[] = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      tools.push(request.toolName);
+      if (request.toolName === "read_story_structure") {
+        return { projectRevision: 12, data: { episodes: Array.from({ length: 30 }, (_, index) => ({ id: `ep-${index + 1}`, name: `第${index + 1}集` })) } };
+      }
+      return { projectRevision: 12, data: [{ content: "保持第10集线索提前但不改变结局" }] };
+    },
+  );
+  const sessionId = "00000000-0000-4000-8000-000000000034";
+  try {
+    await host.handle({ id: "goal34-create", type: "create_session", sessionId, provider: faux.provider.id, model: faux.getModel().id });
+    await host.handle({ id: "goal34-first", type: "send_message", sessionId, taskId: "goal34-turn-1", message: "讨论《智斗游戏》30集结构" });
+    await waitForEvent(events, "task_completed", "goal34-turn-1");
+    await host.handle({ id: "goal34-second", type: "send_message", sessionId, taskId: "goal34-turn-2", message: "把第10集提前一点" });
+    await waitForEvent(events, "task_completed", "goal34-turn-2");
+    assert.deepEqual(tools, ["read_story_structure", "read_active_memories"]);
+    assert.equal(faux.state.callCount, 4);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("restores a persisted Pi SDK session after host restart", async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-resume-"));
   const faux = fauxProvider({ provider: "workbench-resume-test", tokensPerSecond: 0 });
@@ -421,6 +474,48 @@ test("runs three independent professional AgentSessions in parallel with distinc
     assert.equal(faux.state.callCount, 6);
   } finally {
     host.dispose();
+  }
+});
+
+test("prompt AgentSession calls deterministic compile_prompt_preview without video tools", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-prompt-preview-"));
+  const faux = fauxProvider({ provider: "workbench-prompt-preview-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("compile_prompt_preview", { generationTaskId: "generation" }, { id: "compile-preview" }),
+    ]),
+    fauxAssistantMessage([{ type: "text", text: "{\"summary\":\"提示词预览已分析\",\"patchProposal\":null}" }]),
+  ]);
+  const calls: string[] = [];
+  const events: Record<string, unknown>[] = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      calls.push(request.toolName);
+      return { projectRevision: 11, data: { compiledPrompt: "镜头04提示词", persisted: false, videoGenerationCalled: false } };
+    },
+  );
+  try {
+    await host.handle({
+      id: "prompt-session",
+      type: "create_session",
+      sessionId: "prompt-agent",
+      provider: faux.provider.id,
+      model: faux.getModel().id,
+      allowedTools: ["compile_prompt_preview"],
+      allowCallExpert: false,
+      thinkingLevel: "off",
+      systemPrompt: "你是提示词 Agent，只能调用确定性编译预览，不得调用视频生成。",
+    });
+    await host.handle({ id: "prompt-message", type: "send_message", sessionId: "prompt-agent", taskId: "prompt-task", message: "编译并分析预览" });
+    await waitForEvent(events, "task_completed", "prompt-task");
+    assert.deepEqual(calls, ["compile_prompt_preview"]);
+    assert.doesNotMatch(JSON.stringify(events), /video_generate|generate_video|video_job/);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
   }
 });
 

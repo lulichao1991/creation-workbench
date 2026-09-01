@@ -1,6 +1,6 @@
 # Goal 01–25 与 V2 beta.1 实施状态
 
-验证日期：2026-09-01（0.2.0-beta.1，V2 核心闭环修复）
+验证日期：2026-09-01（0.2.0-beta.2，Pi 原生 Agent 完整验收）
 
 ## Goal 对照
 
@@ -164,6 +164,6 @@ PromptCompiler 以 GenerationTask 为编译中心，严格按 `generation_task_s
 
 ## V2 Goal25 说明
 
-`0.2.0-beta.1` 已完成核心闭环修复。V1 的 30 集《智斗游戏》手工工作流、快照恢复和关闭重开仍由端到端测试覆盖；app.db V5 和 project.db V10 从旧版本顺序迁移时继续执行 WAL checkpoint、备份、事务、外键和完整性检查。新增多轮 SessionWorkingMemory、ContextPolicy v3、Pi 视觉附件与 Runtime 检测、真实参考图 multipart、可取消 HTTP、多季排序、memoryKey、独立提示词参考图清单和终态 Runtime 回收。当前机器未安装 Pi，真实 Pi + 真实模型验收仍是 RC 前置条件。
+`0.2.0-beta.2` 已完成 Goal26–34 Pi 原生 Agent 重构。主 Agent、六类专业 Agent 和专家团均运行在真实 Pi AgentSession；上下文按需工具化，模型与凭据在应用内配置，正式包携带私有 Runtime，不要求目标电脑安装 Pi、Node 或 npm。《智斗游戏》20 项完整证据见 `BETA2_GOAL34_REVIEW.md`。
 
 新增发布规模回归同时装载 30 集、500 镜头、100 项资产、300 张正式图片、1000 条关系、500 条项目记忆和 100 个 Agent 任务，ProjectState 在 5 秒门槛内完成并通过完整性检查。自动化现为前端 16 项、Rust 59 项；tracked 文件扫描未发现常见明文密钥或凭据文件，源代码没有视频生成命令、视频 Job、视频 Adapter 或对应 UI。完整证据矩阵与《智斗游戏》15 项验收映射记录在 `V2_RELEASE_REVIEW.md`。
