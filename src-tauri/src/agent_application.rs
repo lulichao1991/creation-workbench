@@ -1,4 +1,4 @@
-use crate::agent_models::model_choice_for_role;
+use crate::agent_models::{model_choice_for_role, restore_agent_credentials};
 use crate::agent_runtime::{
     ensure_agent_core_enabled, RuntimeAttachment, RuntimeEvent, RuntimeEventSink, RuntimeState,
     RuntimeTaskInput, RUNTIME_EVENT_NAME,
@@ -373,6 +373,7 @@ pub fn agent_send_message(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    restore_agent_credentials(&app_data_dir, &runtime)?;
     let global_memories = if input.mode == "change_analysis"
         && load_feature_flags(&app_data_dir)?.get("memory") == Some(&true)
     {
@@ -953,7 +954,7 @@ fn prepare_task_for_runtime(
             &input.request_id,
         )?)
     };
-    let attachments = if is_change_analysis {
+    let attachments = if is_change_analysis || (pi_sdk_runtime && expert_type == "main") {
         Vec::new()
     } else {
         visual_attachments(project_path, &conn, expert_type, &input.selection)?
@@ -1012,6 +1013,7 @@ fn prepare_task_for_runtime(
             thinking_level: None,
             allowed_tools: None,
             allow_call_expert: pi_sdk_runtime.then_some(true),
+            result_tool_kind: pi_sdk_runtime.then_some("agent".into()),
             attachments,
         }),
     })
@@ -1163,12 +1165,12 @@ fn build_tool_driven_prompt(
         (definition.display_name, definition.system_instruction)
     };
     let mode_rule = if mode == "edit" {
-        "如需修改，只能在最终 JSON 中返回 patchProposal；工作台会继续执行权限和 stale 校验。"
+        "如需修改，只能在 submit_agent_result 中返回 patchProposal；工作台会继续执行权限和 stale 校验。"
     } else {
-        "这是只读讨论，最终 JSON 的 patchProposal 必须为 null。"
+        "这是只读讨论，submit_agent_result 的 patchProposal 必须为 null。"
     };
     Ok(format!(
-        "当前请求由真实 Pi MainAgentSession 处理，当前角色是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。需要专业判断时由你自行调用 call_expert(writer/director/cinematography/art/keyframe/prompt)，专业 Agent 会在独立 Pi AgentSession 中自行读取事实。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、expertTeamSuggestion。只有核对事实后确认问题横跨至少两个专业方向时，expertTeamSuggestion 才包含 reason、question、members（2–6 个 writer/director/cinematography/art/keyframe/prompt）；否则为 null。不得自行启动专家团。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
+        "当前请求由真实 Pi MainAgentSession 处理，当前角色是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。需要专业判断时由你自行调用 call_expert(writer/director/cinematography/art/keyframe/prompt)，专业 Agent 会在独立 Pi AgentSession 中自行读取事实。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n结束前必须调用一次 submit_agent_result，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、expertTeamSuggestion。只有核对事实后确认问题横跨至少两个专业方向时，expertTeamSuggestion 才包含 reason、question、members（2–6 个 writer/director/cinematography/art/keyframe/prompt）；否则为 null。不得自行启动专家团。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。不要依赖自由文本 JSON。",
         display_name,
         system_instruction,
         mode_rule,
@@ -1297,7 +1299,7 @@ fn build_change_analysis_prompt(
          分析剧本动机与对白一致性、镜头时长/连续性/关键帧/生成任务、资产引用与跨阶段直接影响。默认只分析直接关系和同一剧集；若必须跨剧集深挖，只设置 deepAnalysisRequiresConfirmation=true，不自行扩大范围。\n\
          这是只读任务：不得修改 sync_status，不得返回写入建议，patchProposal 必须为 null。问题与建议必须给出具体差异证据；没有证据就不要生成卡片。\n\
          用户请求：{}\nContextPackage：{}\n\
-         只返回一个 JSON 对象，键必须为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、problemCards、suggestionCards、affectedObjects、recommendedReviewScope、deepAnalysisRequiresConfirmation。\n\
+         结束前调用一次 submit_agent_result，参数键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks、problemCards、suggestionCards、affectedObjects、recommendedReviewScope、deepAnalysisRequiresConfirmation；不要依赖自由文本 JSON。\n\
          problemCards/suggestionCards 每项包含 title、body、relatedRef（可为 null）、evidence、affectedObjects；对象引用包含 projectId、objectType、objectId、field（可省略）。affectedObjects 是去重后的直接受影响对象。",
         user_message,
         serde_json::to_string(package).map_err(|e| e.to_string())?,
@@ -1355,6 +1357,11 @@ fn handle_runtime_event(project_path: &Path, buffer: &Mutex<String>, event: &Run
                 );
             }
         }
+        RuntimeEvent::StructuredResult { result, .. } => {
+            if let Ok(mut text) = buffer.lock() {
+                *text = result.to_string();
+            }
+        }
         RuntimeEvent::TaskCompleted { task_id } => {
             let text = buffer.lock().map(|value| value.clone()).unwrap_or_default();
             if let Err(error) = complete_agent_task(project_path, task_id, &text) {
@@ -1392,7 +1399,7 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
         .map_err(|e| e.to_string())?;
     drop(conn);
     let is_change_analysis = task_type == "change_analysis";
-    let stale = is_change_analysis && current_revision != revision;
+    let stale = current_revision != revision;
     let mut draft =
         serde_json::from_str::<ExpertResultDraft>(raw).unwrap_or_else(|_| ExpertResultDraft {
             summary: raw.trim().to_string(),
@@ -1413,25 +1420,26 @@ fn complete_agent_task(project_path: &Path, task_id: &str, raw: &str) -> AppResu
             "分析期间项目已从 revision {revision} 变为 {current_revision}，结果已过期"
         ));
     }
-    let patch_value = if let Some(patch) = proposed_patch.filter(|_| interaction_mode == "edit") {
-        let proposal = propose_patch(
-            project_path,
-            ProposePatchInput {
-                request_id: format!("{task_id}:proposal"),
-                task_id: task_id.into(),
-                base_revision: revision,
-                title: if patch.title.trim().is_empty() {
-                    "专业 Agent 修改提案".into()
-                } else {
-                    patch.title
+    let patch_value =
+        if let Some(patch) = proposed_patch.filter(|_| interaction_mode == "edit" && !stale) {
+            let proposal = propose_patch(
+                project_path,
+                ProposePatchInput {
+                    request_id: format!("{task_id}:proposal"),
+                    task_id: task_id.into(),
+                    base_revision: revision,
+                    title: if patch.title.trim().is_empty() {
+                        "专业 Agent 修改提案".into()
+                    } else {
+                        patch.title
+                    },
+                    items: patch.items,
                 },
-                items: patch.items,
-            },
-        )?;
-        Some(serde_json::to_value(proposal).map_err(|e| e.to_string())?)
-    } else {
-        None
-    };
+            )?;
+            Some(serde_json::to_value(proposal).map_err(|e| e.to_string())?)
+        } else {
+            None
+        };
     let card_ids = if is_change_analysis {
         materialize_analysis_cards(
             project_path,
@@ -2008,11 +2016,15 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.dispatch.route.expert_type.as_deref(), Some("main"));
         assert_eq!(prepared.dispatch.route.task_type, "main_agent");
-        let prompt = prepared.runtime_input.unwrap().prompt;
+        let runtime_input = prepared.runtime_input.unwrap();
+        let prompt = runtime_input.prompt;
         assert!(prompt.contains("read_shot_context"));
         assert!(prompt.contains("call_expert"));
+        assert!(prompt.contains("submit_agent_result"));
         assert!(!prompt.contains("不应进入启动包的旧构图事实"));
         assert!(prompt.len() < 3_000);
+        assert!(runtime_input.attachments.is_empty());
+        assert_eq!(runtime_input.result_tool_kind.as_deref(), Some("agent"));
         let conn = open_database(temp.path()).unwrap();
         assert_eq!(
             conn.query_row(
@@ -2223,6 +2235,28 @@ mod tests {
         assert!(third_prompt.contains("方案二人物后移"));
         assert!(third_prompt.contains("人物后移并保留前景层次"));
         assert!(third_prompt.contains("继续微调，人物稍向左"));
+        open_database(temp.path())
+            .unwrap()
+            .execute("UPDATE projects SET revision=revision+1", [])
+            .unwrap();
+        let stale = complete_agent_task(
+            temp.path(),
+            &third.dispatch.task_id,
+            r#"{"summary":"基于旧构图的继续建议","findings":[],"patchProposal":null,"relatedImpacts":[],"permissionRequests":[],"questions":[],"risks":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(stale["stale"], true);
+        assert_eq!(
+            open_database(temp.path())
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM agent_tasks WHERE id=?1",
+                    [&third.dispatch.task_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "stale"
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ interface SessionEntry {
   session: AgentSession;
   unsubscribe: () => void;
   activeTaskId?: string;
-  activeImages?: ImageInput[];
+  submittedResult?: Record<string, unknown>;
 }
 
 interface ImageInput {
@@ -37,7 +37,7 @@ const MAIN_SYSTEM_PROMPT = `你是创作工作台的主创作 Agent，定位接�
 先根据用户问题调用必要的读取工具；信息不足时继续调用工具，不要猜测项目事实。
 需要专业判断时自行调用 call_expert；不得用关键词假装已经咨询专家。专业 Agent 的结果只是意见，你必须结合项目事实综合回答。
 如果核对事实后确认问题横跨至少两个专业方向、并行独立意见比单专家更合适，只能返回 expertTeamSuggestion（reason、question、members），由用户确认专家和高成本后启动；不得自行启动专家团。
-所有修改只能在最终结构化结果中提出 patchProposal，由工作台决定是否应用。`;
+所有修改只能在 submit_agent_result 中提出 patchProposal，由工作台决定是否应用。结束前必须调用一次 submit_agent_result；不要依赖自由文本 JSON。`;
 
 const unavailableGateway: ToolGateway = async () => {
   throw new Error("工作台 Tool Gateway 不可用");
@@ -188,6 +188,7 @@ export class WorkbenchAgentHost {
     const resourceLoader = isolatedResourceLoader(optionalString(request, "systemPrompt") ?? MAIN_SYSTEM_PROMPT);
     const allowedToolNames = optionalStringArray(request, "allowedTools");
     const allowCallExpert = optionalBoolean(request, "allowCallExpert") ?? true;
+    const resultToolKind = optionalResultToolKind(request) ?? "agent";
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: true },
       retry: { enabled: true, maxRetries: 2 },
@@ -203,6 +204,8 @@ export class WorkbenchAgentHost {
       customTools: createWorkbenchTools(sessionId, () => entry?.activeTaskId, this.gateway, {
         allowedToolNames,
         callExpert: allowCallExpert ? (input) => this.callExpert(sessionId, entry, input) : undefined,
+        resultToolKind,
+        submitResult: (result) => { if (entry) entry.submittedResult = result; },
       }),
       resourceLoader,
       settingsManager,
@@ -235,11 +238,13 @@ export class WorkbenchAgentHost {
       },
     }, input.signal)));
     let session: AgentSession | undefined;
+    let submittedResult: Record<string, unknown> | undefined;
     let unsubscribe = () => {};
     const abort = () => void session?.abort();
     input.signal?.addEventListener("abort", abort, { once: true });
     try {
       const model = selectModel(this.modelRuntime, launch.provider, launch.model) ?? parentEntry.session.model;
+      if (!model) throw new Error(`${launch.expertType} Agent 没有可用模型`);
       const settingsManager = SettingsManager.inMemory({
         compaction: { enabled: true },
         retry: { enabled: true, maxRetries: 2 },
@@ -255,7 +260,12 @@ export class WorkbenchAgentHost {
           launch.expertSessionId,
           () => launch.expertTaskId,
           this.gateway,
-          { allowedToolNames: launch.allowedTools, parentTaskId },
+          {
+            allowedToolNames: launch.allowedTools,
+            parentTaskId,
+            resultToolKind: "expert",
+            submitResult: (result) => { submittedResult = result; },
+          },
         ),
         resourceLoader: isolatedResourceLoader(launch.systemPrompt),
         settingsManager,
@@ -287,24 +297,25 @@ export class WorkbenchAgentHost {
           });
         }
       });
-      const prompt = `专业任务：${input.task}\n焦点对象：${JSON.stringify(input.focusRefs)}\n先调用必要的工作台读取工具核对事实，再返回专业意见。最终只返回 JSON，键为 summary、findings、patchProposal、questions、risks。`;
-      await session.prompt(prompt, { images: launch.allowImages ? parentEntry.activeImages : undefined });
+      const prompt = `专业任务：${input.task}\n焦点对象：${JSON.stringify(input.focusRefs)}\n先调用必要的工作台读取工具核对事实，结束前必须调用一次 submit_expert_result；不要依赖自由文本 JSON。`;
+      await session.prompt(prompt, { images: model.input.includes("image") ? launch.images : undefined });
       const output = session.getLastAssistantText()?.trim();
-      if (!output) throw new Error(`${launch.expertType} Agent 没有返回结果`);
+      const structured = submittedResult ?? (output ? parseJson(output) : undefined);
+      if (!structured) throw new Error(`${launch.expertType} Agent 没有返回结果`);
       const completed = gatewayData(await this.gateway({
         toolCallId: `${input.toolCallId}:complete`,
         sessionId: launch.expertSessionId,
         taskId: launch.expertTaskId,
         parentTaskId,
         toolName: "complete_expert",
-        arguments: { runtimeSessionId: session.sessionId, result: output },
+        arguments: { runtimeSessionId: session.sessionId, result: JSON.stringify(structured) },
       }));
       return {
         expertType: launch.expertType,
         expertSessionId: launch.expertSessionId,
         result: completed && typeof completed === "object" && !Array.isArray(completed) && "result" in completed
           ? (completed as Record<string, unknown>).result
-          : parseJson(output),
+          : structured,
       };
     } catch (error) {
       await this.gateway({
@@ -330,12 +341,15 @@ export class WorkbenchAgentHost {
     const entry = this.requiredSession(sessionId);
     if (entry.activeTaskId) throw new Error(`会话正在执行任务：${entry.activeTaskId}`);
     entry.activeTaskId = taskId;
+    entry.submittedResult = undefined;
     this.emit({ type: "event", event: "task_started", sessionId, taskId });
     const images = imageInputs(request.images);
-    entry.activeImages = images;
     void entry.session.prompt(message, { images }).then(
       () => {
-        if (entry.activeTaskId === taskId) this.emit({ type: "event", event: "task_completed", sessionId, taskId });
+        if (entry.activeTaskId === taskId) {
+          if (entry.submittedResult) this.emit({ type: "event", event: "structured_result", sessionId, taskId, result: entry.submittedResult });
+          this.emit({ type: "event", event: "task_completed", sessionId, taskId });
+        }
       },
       (error: unknown) => {
         if (entry.activeTaskId === taskId) {
@@ -351,7 +365,7 @@ export class WorkbenchAgentHost {
     ).finally(() => {
       if (entry.activeTaskId === taskId) {
         entry.activeTaskId = undefined;
-        entry.activeImages = undefined;
+        entry.submittedResult = undefined;
       }
     });
     return { accepted: true, sessionId, taskId };
@@ -376,7 +390,7 @@ export class WorkbenchAgentHost {
     await entry.session.abort();
     if (taskId) this.emit({ type: "event", event: "task_cancelled", sessionId, taskId });
     entry.activeTaskId = undefined;
-    entry.activeImages = undefined;
+    entry.submittedResult = undefined;
     return { cancelled: Boolean(taskId) };
   }
 
@@ -418,7 +432,7 @@ interface ExpertLaunch {
   provider?: string;
   model?: string;
   thinkingLevel?: ThinkingLevel;
-  allowImages: boolean;
+  images?: ImageInput[];
 }
 
 function expertLaunch(value: unknown): ExpertLaunch {
@@ -437,7 +451,7 @@ function expertLaunch(value: unknown): ExpertLaunch {
     provider: record.provider === null ? undefined : optionalRecordString(record, "provider"),
     model: record.model === null ? undefined : optionalRecordString(record, "model"),
     thinkingLevel: optionalRecordString(record, "thinkingLevel") as ThinkingLevel | undefined,
-    allowImages: record.allowImages === true,
+    images: imageInputs(record.images),
   };
 }
 
@@ -530,6 +544,15 @@ function optionalThinkingLevel(value: HostRequest): ThinkingLevel | undefined {
   const levels: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
   if (!levels.includes(level as ThinkingLevel)) throw new Error(`无效 thinkingLevel：${level}`);
   return level as ThinkingLevel;
+}
+
+function optionalResultToolKind(value: HostRequest): "agent" | "expert" | "team" | undefined {
+  const kind = optionalString(value, "resultToolKind");
+  if (!kind) return undefined;
+  if (!(["agent", "expert", "team"] as const).includes(kind as "agent" | "expert" | "team")) {
+    throw new Error(`无效 resultToolKind：${kind}`);
+  }
+  return kind as "agent" | "expert" | "team";
 }
 
 function imageInputs(value: unknown): ImageInput[] | undefined {

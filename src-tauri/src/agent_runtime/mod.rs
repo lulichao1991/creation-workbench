@@ -110,6 +110,9 @@ pub fn agent_runtime_start_readonly(
     input: RuntimeTaskInput,
 ) -> AppResult<RuntimeTaskHandle> {
     ensure_agent_core_enabled(&app)?;
+    if let Some(app_data_dir) = input.app_data_dir.as_deref() {
+        crate::agent_models::restore_agent_credentials(std::path::Path::new(app_data_dir), &state)?;
+    }
     let event_app = app.clone();
     let event_sink: RuntimeEventSink = Arc::new(move |event| {
         let _ = event_app.emit(RUNTIME_EVENT_NAME, event);
@@ -173,8 +176,14 @@ pub fn agent_get_task_state(
 
 #[tauri::command]
 pub fn agent_runtime_doctor(
+    app: tauri::AppHandle,
     state: tauri::State<'_, RuntimeState>,
 ) -> AppResult<RuntimeDiagnostics> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    crate::agent_models::restore_agent_credentials(&app_data_dir, &state)?;
     state.doctor()
 }
 
@@ -211,6 +220,7 @@ mod tests {
             thinking_level: None,
             allowed_tools: None,
             allow_call_expert: None,
+            result_tool_kind: None,
             attachments: Vec::new(),
         }
     }

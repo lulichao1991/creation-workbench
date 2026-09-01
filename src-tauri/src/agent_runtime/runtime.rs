@@ -30,6 +30,8 @@ pub struct RuntimeTaskInput {
     #[serde(default)]
     pub allow_call_expert: Option<bool>,
     #[serde(default)]
+    pub result_tool_kind: Option<String>,
+    #[serde(default)]
     pub attachments: Vec<RuntimeAttachment>,
 }
 
@@ -146,6 +148,10 @@ pub enum RuntimeEvent {
     UsageUpdated {
         task_id: String,
         usage: Value,
+    },
+    StructuredResult {
+        task_id: String,
+        result: Value,
     },
     TaskCompleted {
         task_id: String,

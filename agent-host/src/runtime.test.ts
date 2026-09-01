@@ -228,6 +228,54 @@ test("runs multiple Workbench tools inside the real Pi Tool Loop", async () => {
   }
 });
 
+test("uses TypeBox submit_agent_result even when final model text is not JSON", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-structured-result-"));
+  const faux = fauxProvider({ provider: "workbench-structured-result-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    (context) => {
+      assert.match(JSON.stringify(context.tools), /submit_agent_result/);
+      return fauxAssistantMessage([fauxToolCall("submit_agent_result", {
+        summary: "结构化修改提案",
+        findings: ["镜头主体过小"],
+        patchProposal: {
+          title: "调整构图",
+          items: [{
+            objectType: "shot",
+            objectId: "shot04",
+            fieldName: "composition",
+            oldValue: "平视中景",
+            newValue: "低机位近景",
+            reason: "增强压迫感",
+          }],
+        },
+        relatedImpacts: [],
+        permissionRequests: [],
+        questions: [],
+        risks: [],
+        expertTeamSuggestion: null,
+      }, { id: "submit-main-result" })], { stopReason: "toolUse" });
+    },
+    fauxAssistantMessage("下面是结果，已经提交；这段自由文本故意不是 JSON。"),
+  ]);
+  const events: Record<string, unknown>[] = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+  );
+  try {
+    await host.handle({ id: "create", type: "create_session", sessionId: "structured-session", provider: faux.provider.id, model: faux.getModel().id });
+    await host.handle({ id: "send", type: "send_message", sessionId: "structured-session", taskId: "structured-task", message: "提出修改" });
+    await waitForEvent(events, "task_completed", "structured-task");
+    const structured = events.find((event) => event.event === "structured_result" && event.taskId === "structured-task");
+    assert.equal((structured?.result as { summary: string }).summary, "结构化修改提案");
+    assert.equal(((structured?.result as { patchProposal: { items: unknown[] } }).patchProposal.items).length, 1);
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("main AgentSession calls an independent cinematography AgentSession and synthesizes its result", async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-expert-"));
   const faux = fauxProvider({ provider: "workbench-expert-test", tokensPerSecond: 0 });

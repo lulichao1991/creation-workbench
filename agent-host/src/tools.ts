@@ -31,12 +31,71 @@ interface WorkbenchToolOptions {
   allowedToolNames?: readonly string[];
   parentTaskId?: string;
   callExpert?: (input: CallExpertInput) => Promise<unknown>;
+  resultToolKind?: "agent" | "expert" | "team";
+  submitResult?: (result: Record<string, unknown>) => void;
 }
 
 const objectRef = {
   objectType: Type.String({ minLength: 1, maxLength: 48 }),
   objectId: Type.String({ minLength: 1, maxLength: 256 }),
 };
+
+const patchProposal = Type.Union([
+  Type.Null(),
+  Type.Object({
+    title: Type.String({ maxLength: 500 }),
+    items: Type.Array(Type.Object({
+      objectType: Type.String({ minLength: 1, maxLength: 48 }),
+      objectId: Type.String({ minLength: 1, maxLength: 256 }),
+      fieldName: Type.String({ minLength: 1, maxLength: 128 }),
+      oldValue: Type.Unknown(),
+      newValue: Type.Unknown(),
+      reason: Type.String({ maxLength: 2_000 }),
+    }, { additionalProperties: false }), { maxItems: 100 }),
+  }, { additionalProperties: false }),
+]);
+
+const agentResultSchema = Type.Object({
+  summary: Type.String({ minLength: 1, maxLength: 20_000 }),
+  findings: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  patchProposal,
+  relatedImpacts: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  permissionRequests: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  questions: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+  risks: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+  problemCards: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 100 })),
+  suggestionCards: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 100 })),
+  affectedObjects: Type.Optional(Type.Array(Type.Unknown(), { maxItems: 100 })),
+  recommendedReviewScope: Type.Optional(Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 })),
+  deepAnalysisRequiresConfirmation: Type.Optional(Type.Boolean()),
+  expertTeamSuggestion: Type.Optional(Type.Union([Type.Null(), Type.Object({
+    reason: Type.String({ minLength: 1, maxLength: 4_000 }),
+    question: Type.String({ minLength: 1, maxLength: 4_000 }),
+    members: Type.Array(Type.Union([
+      Type.Literal("writer"), Type.Literal("director"), Type.Literal("cinematography"),
+      Type.Literal("art"), Type.Literal("keyframe"), Type.Literal("prompt"),
+    ]), { minItems: 2, maxItems: 6 }),
+  }, { additionalProperties: false })])),
+}, { additionalProperties: false });
+
+const expertResultSchema = Type.Object({
+  summary: Type.String({ minLength: 1, maxLength: 20_000 }),
+  findings: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  patchProposal,
+  relatedImpacts: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  permissionRequests: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  questions: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+  risks: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+}, { additionalProperties: false });
+
+const teamResultSchema = Type.Object({
+  summary: Type.String({ minLength: 1, maxLength: 20_000 }),
+  consensus: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  disagreements: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  recommendations: Type.Array(Type.Unknown(), { maxItems: 100 }),
+  questions: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+  risks: Type.Array(Type.String({ maxLength: 4_000 }), { maxItems: 100 }),
+}, { additionalProperties: false });
 
 const toolSpecs: ToolSpec[] = [
   { name: "get_selection", label: "读取当前选区", description: "读取当前选区、多选、写入范围、保护范围和项目 revision。", parameters: Type.Object({}, { additionalProperties: false }) },
@@ -126,6 +185,25 @@ export function createWorkbenchTools(
           }],
           details: {},
         };
+      },
+    });
+  }
+  if (options.resultToolKind && options.submitResult) {
+    const definition = {
+      agent: ["submit_agent_result", "提交主 Agent 结构化结果", agentResultSchema],
+      expert: ["submit_expert_result", "提交专业 Agent 结构化结果", expertResultSchema],
+      team: ["submit_team_result", "提交专家团综合结果", teamResultSchema],
+    }[options.resultToolKind] as [string, string, TSchema];
+    tools.push({
+      name: definition[0],
+      label: definition[1],
+      description: "任务结束前必须调用一次；参数会由 TypeBox 校验并作为正式结构化结果返回工作台。",
+      promptSnippet: `${definition[0]}: 提交本轮唯一正式结构化结果；提交后只需简短确认。`,
+      parameters: definition[2],
+      executionMode: "sequential",
+      execute: async (_toolCallId, params) => {
+        options.submitResult!(params as Record<string, unknown>);
+        return { content: [{ type: "text", text: "结构化结果已接收。" }], details: {} };
       },
     });
   }

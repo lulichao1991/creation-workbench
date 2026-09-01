@@ -1,6 +1,6 @@
 # Goal 01–25 与 V2 beta.1 实施状态
 
-验证日期：2026-09-01（0.2.0-beta.2，Pi 原生 Agent 完整验收）
+验证日期：2026-09-01（0.2.0-beta.3，Pi 原生 Agent RC 加固）
 
 ## Goal 对照
 
@@ -164,6 +164,6 @@ PromptCompiler 以 GenerationTask 为编译中心，严格按 `generation_task_s
 
 ## V2 Goal25 说明
 
-`0.2.0-beta.2` 已完成 Goal26–34 Pi 原生 Agent 重构。主 Agent、六类专业 Agent 和专家团均运行在真实 Pi AgentSession；上下文按需工具化，模型与凭据在应用内配置，正式包携带私有 Runtime，不要求目标电脑安装 Pi、Node 或 npm。《智斗游戏》20 项完整证据见 `BETA2_GOAL34_REVIEW.md`。
+`0.2.0-beta.3` 在 Goal26–34 基础上完成 RC 前本地加固：Agent API Key 由 Windows Credential Manager 持久化；单专家使用专业模型、thinking level 和焦点视觉附件；专家团综合使用独立无工具 Session，并由 Rust Gateway 强制任务级白名单；主 Agent、专业 Agent 和专家团均使用 TypeBox Result Tool；所有 Agent 结果带通用 stale 语义；终态 Runtime 任务缓存有界。真实外部文本/视觉模型验收仍需用户配置 Provider API Key。Goal34 基线证据见 `BETA2_GOAL34_REVIEW.md`，本轮证据见 `BETA3_RC_HARDENING_REVIEW.md`。
 
 新增发布规模回归同时装载 30 集、500 镜头、100 项资产、300 张正式图片、1000 条关系、500 条项目记忆和 100 个 Agent 任务，ProjectState 在 5 秒门槛内完成并通过完整性检查。自动化现为前端 16 项、Rust 59 项；tracked 文件扫描未发现常见明文密钥或凭据文件，源代码没有视频生成命令、视频 Job、视频 Adapter 或对应 UI。完整证据矩阵与《智斗游戏》15 项验收映射记录在 `V2_RELEASE_REVIEW.md`。

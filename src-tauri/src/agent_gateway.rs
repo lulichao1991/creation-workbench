@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use crate::agent_application::{expert, expert_model_override};
+use crate::agent_application::{expert, expert_model_override, visual_attachments};
+use crate::agent_models::model_choice_for_role;
 use crate::app_database::load_feature_flags;
 use crate::context::{
     estimate_tokens, neighbor_refs, object_value, parent_ref, search_project, ContextPolicy,
@@ -119,9 +120,12 @@ pub fn execute_tool(
         .unwrap_or_else(|| {
             argument_object(&request.arguments).and_then(|arguments| {
                 validate_arguments(&request.tool_name, arguments)?;
+                ensure_tool_allowed(&agent_type, &task_type, &request.tool_name)?;
                 match request.tool_name.as_str() {
                     "call_expert" => start_expert(
                         &tx,
+                        app_data_dir,
+                        project_path,
                         &project_id,
                         revision,
                         &request.task_id,
@@ -227,9 +231,50 @@ fn is_read_tool(tool_name: &str) -> bool {
     )
 }
 
+fn ensure_tool_allowed(agent_type: &str, task_type: &str, tool_name: &str) -> AppResult<()> {
+    if task_type == "expert_team_synthesis" {
+        return Err(format!(
+            "TOOL_SCOPE_DENIED: 专家团综合任务不允许调用工具：{tool_name}"
+        ));
+    }
+    let allowed = if matches!(tool_name, "complete_expert" | "fail_expert") {
+        task_type == "professional_consultation" && agent_type != "main"
+    } else if agent_type == "main" {
+        tool_name == "call_expert"
+            || matches!(
+                tool_name,
+                "get_selection"
+                    | "read_object"
+                    | "read_parent"
+                    | "read_children"
+                    | "read_neighbors"
+                    | "read_scene"
+                    | "read_shot_context"
+                    | "read_asset"
+                    | "read_generation_task"
+                    | "compile_prompt_preview"
+                    | "read_story_structure"
+                    | "search_project"
+                    | "read_active_memories"
+                    | "read_change_set"
+            )
+    } else {
+        expert_tool_names(agent_type).contains(&tool_name)
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "TOOL_SCOPE_DENIED: {agent_type}/{task_type} 不允许调用工具：{tool_name}"
+        ))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn start_expert(
     conn: &Connection,
+    app_data_dir: Option<&Path>,
+    project_path: &Path,
     project_id: &str,
     revision: i64,
     parent_task_id: &str,
@@ -254,7 +299,19 @@ fn start_expert(
         selection.selected = focus_refs.clone();
     }
     selection.project_revision = revision;
-    let (provider, model) = expert_model_override(conn, project_id, &expert_type, provider, model)?;
+    let app_choice = app_data_dir
+        .map(|path| model_choice_for_role(path, &expert_type))
+        .transpose()?
+        .unwrap_or_default();
+    let thinking_level = app_choice.thinking_level.unwrap_or_else(|| "medium".into());
+    let (provider, model) = expert_model_override(
+        conn,
+        project_id,
+        &expert_type,
+        app_choice.provider.or(provider),
+        app_choice.model.or(model),
+    )?;
+    let attachments = visual_attachments(project_path, conn, &expert_type, &selection)?;
     let expert_session_id = new_id();
     let expert_task_id = new_id();
     let timestamp = now();
@@ -318,8 +375,8 @@ fn start_expert(
         "allowedTools": allowed_tools,
         "provider": provider,
         "model": model,
-        "thinkingLevel": "medium",
-        "allowImages": matches!(expert_type.as_str(), "cinematography" | "art" | "keyframe" | "prompt"),
+        "thinkingLevel": thinking_level,
+        "images": attachments,
         "parentTaskId": parent_task_id,
     }))
 }
@@ -338,16 +395,35 @@ fn complete_expert(
             "TOOL_RESULT_TOO_LARGE: 专业 Agent 结果约 {token_estimate} tokens，最大允许 {MAX_EXPERT_RESULT_TOKENS} tokens"
         ));
     }
-    let result =
+    let mut result =
         serde_json::from_str::<Value>(&output).unwrap_or_else(|_| json!({ "summary": output }));
+    let context_revision: i64 = conn
+        .query_row(
+            "SELECT context_revision FROM agent_tasks WHERE id=?1 AND session_id=?2",
+            params![task_id, session_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "OBJECT_NOT_FOUND: 专业 AgentTask 不存在".to_string())?;
+    let current_revision: i64 = conn
+        .query_row("SELECT revision FROM projects LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let stale = context_revision != current_revision;
+    if let Some(result) = result.as_object_mut() {
+        result.insert("baseRevision".into(), json!(context_revision));
+        result.insert("currentRevision".into(), json!(current_revision));
+        result.insert("stale".into(), json!(stale));
+    }
+    let status = if stale { "stale" } else { "completed" };
     let timestamp = now();
     let changed = conn
         .execute(
             "UPDATE agent_tasks
-             SET status='completed', result_json=?1, completed_at=?2
-             WHERE id=?3 AND session_id=?4 AND task_type='professional_consultation'
+             SET status=?1, result_json=?2, completed_at=?3
+             WHERE id=?4 AND session_id=?5 AND task_type='professional_consultation'
                AND status IN ('queued','running')",
-            params![result.to_string(), timestamp, task_id, session_id],
+            params![status, result.to_string(), timestamp, task_id, session_id],
         )
         .map_err(|e| e.to_string())?;
     if changed != 1 {
@@ -1141,6 +1217,8 @@ mod tests {
 
     fn setup_project() -> (tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("media")).unwrap();
+        std::fs::write(temp.path().join("media/hero.png"), b"\x89PNG\r\n\x1a\n").unwrap();
         let project = init_database(temp.path(), "Tool Gateway", "series").unwrap();
         let conn = open_database(temp.path()).unwrap();
         let timestamp = now();
@@ -1157,7 +1235,7 @@ mod tests {
             conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, composition, subjects, environment, created_at, updated_at) VALUES (?1, 'scene', ?2, ?3, '平视中景', '主角', '狭窄密室', ?4, ?4)", params![id, order, title, timestamp]).unwrap();
         }
         conn.execute("INSERT INTO assets (id, project_id, type, name, description, created_at, updated_at) VALUES ('hero', ?1, 'character', '主角', '正式角色资产', ?2, ?2)", params![project.id, timestamp]).unwrap();
-        conn.execute("INSERT INTO asset_media (id, asset_id, file_path, label, is_primary, created_at, updated_at) VALUES ('hero-image', 'hero', 'C:/private/hero.png', '正面设定', 1, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO asset_media (id, asset_id, file_path, label, is_primary, created_at, updated_at) VALUES ('hero-image', 'hero', 'media/hero.png', '正面设定', 1, ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO shot_assets (id, shot_id, asset_id, role, created_at, updated_at) VALUES ('shot-hero', 'shot04', 'hero', 'subject', ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO generation_tasks (id, content_unit_id, name, target_model, prompt, created_at, updated_at) VALUES ('generation', 'episode', '静态关键帧', 'gpt-image', '密室压迫感', ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO generation_task_shots (generation_task_id, shot_id, sort_order) VALUES ('generation', 'shot04', 0)", []).unwrap();
@@ -1417,6 +1495,80 @@ mod tests {
             )
             .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn single_expert_uses_role_model_thinking_and_focus_specific_images() {
+        let (temp, project_id) = setup_project();
+        let app_data_dir = temp.path().join("app-data");
+        let app_conn = open_app_database(&app_data_dir).unwrap();
+        app_conn.execute(
+            "INSERT INTO app_settings (key,value_json,updated_at) VALUES ('agent_model_settings',?1,?2)",
+            params![json!({
+                "defaultModel": { "provider": "main-provider", "model": "main-model", "thinkingLevel": "low" },
+                "professionalOverrides": {
+                    "cinematography": { "provider": "vision-provider", "model": "vision-model", "thinkingLevel": "high" }
+                }
+            }).to_string(), now()],
+        ).unwrap();
+        open_database(temp.path()).unwrap().execute(
+            "INSERT INTO project_expert_overrides (id,project_id,expert_type,enabled,model_provider,model_name,created_at,updated_at) VALUES ('cinema-override',?1,'cinematography',1,'project-provider','project-model',?2,?2)",
+            params![project_id, now()],
+        ).unwrap();
+        let launch = execute_tool(
+            temp.path(),
+            Some(&app_data_dir),
+            ToolGatewayRequest {
+                tool_call_id: "role-model".into(),
+                task_id: "task".into(),
+                session_id: "session".into(),
+                tool_name: "call_expert".into(),
+                arguments: json!({
+                    "expertType": "cinematography",
+                    "task": "检查主角构图",
+                    "focusRefs": [{ "objectType": "shot", "objectId": "shot04" }],
+                }),
+            },
+        )
+        .unwrap();
+        assert_eq!(launch["data"]["provider"], "project-provider");
+        assert_eq!(launch["data"]["model"], "project-model");
+        assert_eq!(launch["data"]["thinkingLevel"], "high");
+        assert_eq!(launch["data"]["images"].as_array().unwrap().len(), 1);
+        assert_eq!(launch["data"]["images"][0]["name"], "正面设定");
+    }
+
+    #[test]
+    fn synthesis_task_is_technically_denied_every_gateway_tool() {
+        let (temp, _) = setup_project();
+        open_database(temp.path())
+            .unwrap()
+            .execute(
+                "UPDATE agent_tasks SET task_type='expert_team_synthesis' WHERE id='task'",
+                [],
+            )
+            .unwrap();
+        let error = call(temp.path(), "synthesis-read", "get_selection", json!({})).unwrap_err();
+        assert!(error.starts_with("TOOL_SCOPE_DENIED"));
+        let error = call(
+            temp.path(),
+            "synthesis-expert",
+            "call_expert",
+            json!({ "expertType": "writer", "task": "绕过确认", "focusRefs": [] }),
+        )
+        .unwrap_err();
+        assert!(error.starts_with("TOOL_SCOPE_DENIED"));
+        assert_eq!(
+            open_database(temp.path())
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_sessions WHERE session_kind='expert'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 

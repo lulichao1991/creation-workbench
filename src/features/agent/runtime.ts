@@ -8,6 +8,7 @@ export interface RuntimeTaskInput {
   model?: string;
   systemPrompt?: string;
   thinkingLevel?: string;
+  resultToolKind?: "agent" | "expert" | "team";
   attachments?: RuntimeAttachment[];
 }
 
@@ -78,6 +79,7 @@ export type RuntimeEvent =
   | { type: "tool_call_requested"; task_id: string; tool_name: string; arguments: unknown }
   | { type: "tool_call_completed"; task_id: string; tool_name: string; result: unknown }
   | { type: "usage_updated"; task_id: string; usage: unknown }
+  | { type: "structured_result"; task_id: string; result: unknown }
   | { type: "task_completed"; task_id: string }
   | { type: "task_failed"; task_id: string; error: string }
   | { type: "task_cancelled"; task_id: string };

@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::Utc;
+use keyring::v1::Entry;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -12,6 +13,8 @@ use crate::app_database::open_app_database;
 use crate::database::AppResult;
 
 const SETTINGS_KEY: &str = "agent_model_settings";
+const CREDENTIAL_PROVIDERS_KEY: &str = "agent_credential_providers";
+const CREDENTIAL_SERVICE: &str = "com.lu.workbench.agent-provider";
 const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -95,6 +98,68 @@ pub(crate) fn model_choice_for_role(
     })
 }
 
+fn credential_entry(provider_id: &str) -> AppResult<Entry> {
+    Entry::new(CREDENTIAL_SERVICE, provider_id)
+        .map_err(|error| format!("打开系统密钥库失败：{error}"))
+}
+
+fn credential_provider_ids(app_data_dir: &Path) -> AppResult<BTreeSet<String>> {
+    let conn = open_app_database(app_data_dir)?;
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value_json FROM app_settings WHERE key=?1",
+            [CREDENTIAL_PROVIDERS_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取 Agent 凭据索引失败：{error}"))?;
+    value
+        .map(|value| {
+            serde_json::from_str(&value)
+                .map_err(|error| format!("解析 Agent 凭据索引失败：{error}"))
+        })
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn save_credential_provider_ids(
+    app_data_dir: &Path,
+    provider_ids: &BTreeSet<String>,
+) -> AppResult<()> {
+    let conn = open_app_database(app_data_dir)?;
+    conn.execute(
+        "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, updated_at=excluded.updated_at",
+        params![
+            CREDENTIAL_PROVIDERS_KEY,
+            serde_json::to_string(provider_ids).map_err(|error| error.to_string())?,
+            Utc::now().to_rfc3339()
+        ],
+    )
+    .map_err(|error| format!("保存 Agent 凭据索引失败：{error}"))?;
+    Ok(())
+}
+
+pub(crate) fn restore_agent_credentials(
+    app_data_dir: &Path,
+    runtime: &RuntimeState,
+) -> AppResult<()> {
+    let known_providers = runtime
+        .get_models()?
+        .providers
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect::<BTreeSet<_>>();
+    for provider_id in credential_provider_ids(app_data_dir)? {
+        if known_providers.contains(&provider_id) {
+            if let Ok(api_key) = credential_entry(&provider_id)?.get_password() {
+                runtime.login_provider(&provider_id, &api_key)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn agent_model_settings_get(
     app: tauri::AppHandle,
@@ -104,6 +169,7 @@ pub fn agent_model_settings_get(
         .path()
         .app_data_dir()
         .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    restore_agent_credentials(&app_data_dir, &runtime)?;
     Ok(AgentModelConfiguration {
         catalog: runtime.get_models()?,
         settings: load_agent_model_settings(&app_data_dir)?,
@@ -116,12 +182,13 @@ pub fn agent_model_settings_save(
     runtime: tauri::State<'_, RuntimeState>,
     settings: AgentModelSettings,
 ) -> AppResult<AgentModelSettings> {
-    let catalog = runtime.get_models()?;
-    validate_settings(&settings, &catalog)?;
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    restore_agent_credentials(&app_data_dir, &runtime)?;
+    let catalog = runtime.get_models()?;
+    validate_settings(&settings, &catalog)?;
     let conn = open_app_database(&app_data_dir)?;
     conn.execute(
         "INSERT INTO app_settings (key, value_json, updated_at) VALUES (?1, ?2, ?3)
@@ -138,24 +205,54 @@ pub fn agent_model_settings_save(
 
 #[tauri::command]
 pub fn agent_provider_login(
+    app: tauri::AppHandle,
     runtime: tauri::State<'_, RuntimeState>,
     input: ProviderLoginInput,
 ) -> AppResult<()> {
     if input.provider_id.trim().is_empty() || input.api_key.trim().is_empty() {
         return Err("Provider 和 API Key 不能为空".into());
     }
-    runtime.login_provider(input.provider_id.trim(), input.api_key.trim())
+    let provider_id = input.provider_id.trim();
+    if !runtime
+        .get_models()?
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id)
+    {
+        return Err(format!("Provider 不存在：{provider_id}"));
+    }
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    credential_entry(provider_id)?
+        .set_password(input.api_key.trim())
+        .map_err(|error| format!("写入系统密钥库失败：{error}"))?;
+    let mut provider_ids = credential_provider_ids(&app_data_dir)?;
+    provider_ids.insert(provider_id.to_string());
+    save_credential_provider_ids(&app_data_dir, &provider_ids)?;
+    runtime.login_provider(provider_id, input.api_key.trim())
 }
 
 #[tauri::command]
 pub fn agent_provider_logout(
+    app: tauri::AppHandle,
     runtime: tauri::State<'_, RuntimeState>,
     provider_id: String,
 ) -> AppResult<()> {
     if provider_id.trim().is_empty() {
         return Err("Provider 不能为空".into());
     }
-    runtime.logout_provider(provider_id.trim())
+    let provider_id = provider_id.trim();
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    let _ = credential_entry(provider_id)?.delete_credential();
+    let mut provider_ids = credential_provider_ids(&app_data_dir)?;
+    provider_ids.remove(provider_id);
+    save_credential_provider_ids(&app_data_dir, &provider_ids)?;
+    runtime.logout_provider(provider_id)
 }
 
 fn validate_settings(settings: &AgentModelSettings, catalog: &AgentModelCatalog) -> AppResult<()> {
@@ -253,5 +350,36 @@ mod tests {
             )
             .unwrap();
         assert!(!stored.contains("apiKey"));
+    }
+
+    #[test]
+    fn persists_only_provider_ids_in_the_credential_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let provider_ids = BTreeSet::from(["openai".to_string(), "anthropic".to_string()]);
+        save_credential_provider_ids(temp.path(), &provider_ids).unwrap();
+        assert_eq!(credential_provider_ids(temp.path()).unwrap(), provider_ids);
+        let stored = open_app_database(temp.path())
+            .unwrap()
+            .query_row(
+                "SELECT value_json FROM app_settings WHERE key=?1",
+                [CREDENTIAL_PROVIDERS_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert!(!stored.to_ascii_lowercase().contains("api_key"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_manager_round_trips_agent_secret() {
+        let provider_id = format!(
+            "workbench-test-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_millis()
+        );
+        let entry = credential_entry(&provider_id).unwrap();
+        entry.set_password("temporary-test-secret").unwrap();
+        assert_eq!(entry.get_password().unwrap(), "temporary-test-secret");
+        entry.delete_credential().unwrap();
     }
 }

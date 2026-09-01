@@ -107,8 +107,8 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
           </p>
           <section className="agent-provider-auth">
             <div><strong>{selectedProvider?.authConfigured ? "Provider 已登录" : "Provider 未登录"}</strong><small>{selectedProvider?.authLabel ?? selectedProvider?.authSource ?? "API Key 由 Pi ModelRuntime 管理"}</small></div>
-            <input type="password" autoComplete="off" value={apiKey} placeholder="API Key（不会写入 app.db）" disabled={disabled || working} onChange={(event) => setApiKey(event.target.value)} />
-            <button className="secondary" disabled={disabled || working || !selectedProvider || !apiKey.trim()} onClick={() => void run(async () => { await api.agentProviderLogin(selectedProvider!.id, apiKey.trim()); setApiKey(""); })}><KeyRound size={11} />保存并登录</button>
+            <input type="password" autoComplete="off" value={apiKey} placeholder="API Key（保存到 Windows 系统密钥库）" disabled={disabled || working} onChange={(event) => setApiKey(event.target.value)} />
+            <button className="secondary" disabled={disabled || working || !selectedProvider || !apiKey.trim()} onClick={() => void run(async () => { await api.agentProviderLogin(selectedProvider!.id, apiKey.trim()); setApiKey(""); })}><KeyRound size={11} />安全保存并登录</button>
             {selectedProvider?.authConfigured && <button className="ghost" disabled={disabled || working} onClick={() => void run(() => api.agentProviderLogout(selectedProvider.id))}><LogOut size={11} />注销</button>}
           </section>
           <section className="agent-model-overrides">
@@ -119,6 +119,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
               return <div className="agent-model-override" key={role}><span>{label}</span><select value={value} disabled={disabled || working} onChange={(event) => setOverride(role, event.target.value)}><option value="">沿用主 Agent</option>{modelOptions.map((option) => <option value={option.key} key={option.key}>{option.label}</option>)}</select><select aria-label={`${label} thinking level`} value={choice?.thinkingLevel ?? draft.defaultModel.thinkingLevel ?? "medium"} disabled={disabled || working || !choice} onChange={(event) => setDraft({ ...draft, professionalOverrides: { ...draft.professionalOverrides, [role]: { ...choice, thinkingLevel: event.target.value } as AgentModelChoice } })}>{thinkingLevels.map((level) => <option value={level} key={level}>{level}</option>)}</select></div>;
             })}
           </section>
+          <p className="agent-model-capabilities">模型或 thinking level 的修改从新建讨论开始生效；现有讨论继续使用创建时的配置。</p>
           <button className="primary agent-model-save" disabled={disabled || working} onClick={() => void run(async () => { await api.agentModelSettingsSave(draft); })}><Check size={11} />保存模型设置</button>
         </div>
       )}

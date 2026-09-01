@@ -3,7 +3,7 @@ use crate::agent_application::{
     visual_attachments,
 };
 use crate::agent_gateway::{expert_tool_names, professional_system_prompt};
-use crate::agent_models::model_choice_for_role;
+use crate::agent_models::{model_choice_for_role, restore_agent_credentials};
 use crate::agent_runtime::{
     RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
 };
@@ -153,6 +153,7 @@ pub fn expert_team_confirm(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
+    restore_agent_credentials(&app_data_dir, &runtime)?;
     let event_app = app.clone();
     let emitter: EventEmitter = Arc::new(move |event| {
         let _ = event_app.emit(RUNTIME_EVENT_NAME, event);
@@ -582,7 +583,7 @@ fn prepare_member_tasks(
         let (prompt, system_prompt, allowed_tools, attachments) = if pi_sdk_runtime {
             (
                 format!(
-                    "专家团独立只读会诊。会诊问题：{}\n启动选区引用：{}\n项目事实没有预先打包；先调用 get_selection，再使用你白名单内的读取工具核对事实。只从你的专业职责分析，不得参考、猜测或请求其他专家意见。最终只返回 JSON，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks；patchProposal 必须为 null，permissionRequests 必须为空。",
+                    "专家团独立只读会诊。会诊问题：{}\n启动选区引用：{}\n项目事实没有预先打包；先调用 get_selection，再使用你白名单内的读取工具核对事实。只从你的专业职责分析，不得参考、猜测或请求其他专家意见。结束前必须调用一次 submit_expert_result；patchProposal 必须为 null，permissionRequests 必须为空。不要依赖自由文本 JSON。",
                     consultation.user_request,
                     serde_json::to_string(&consultation.selection).map_err(|e| e.to_string())?,
                 ),
@@ -650,6 +651,7 @@ fn prepare_member_tasks(
                 thinking_level,
                 allowed_tools,
                 allow_call_expert: pi_sdk_runtime.then_some(false),
+                result_tool_kind: pi_sdk_runtime.then_some("expert".into()),
                 attachments,
             },
         });
@@ -722,6 +724,11 @@ fn handle_member_event(project_path: &Path, buffer: &Mutex<String>, event: &Runt
                 );
             }
         }
+        RuntimeEvent::StructuredResult { result, .. } => {
+            if let Ok(mut text) = buffer.lock() {
+                *text = result.to_string();
+            }
+        }
         RuntimeEvent::TaskCompleted { task_id } => {
             let raw = buffer.lock().map(|text| text.clone()).unwrap_or_default();
             let _ = complete_member(project_path, task_id, &raw);
@@ -738,12 +745,12 @@ fn handle_member_event(project_path: &Path, buffer: &Mutex<String>, event: &Runt
 
 fn complete_member(project_path: &Path, task_id: &str, raw: &str) -> AppResult<()> {
     let mut conn = open_database(project_path)?;
-    let (current_status, member_session_id): (String, String) = conn
+    let (current_status, member_session_id, context_revision): (String, String, i64) = conn
         .query_row(
-            "SELECT status, session_id FROM agent_tasks
+            "SELECT status, session_id, context_revision FROM agent_tasks
              WHERE id=?1 AND task_type='expert_team_member'",
             [task_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: 专家团成员任务不存在".to_string())?;
     if current_status == "cancelled" {
@@ -768,6 +775,17 @@ fn complete_member(project_path: &Path, task_id: &str, raw: &str) -> AppResult<(
             .risks
             .push("专家团为只读会诊，已忽略模型返回的修改或扩权请求".into());
     }
+    let current_revision: i64 = conn
+        .query_row("SELECT revision FROM projects LIMIT 1", [], |row| {
+            row.get(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let stale = context_revision != current_revision;
+    if stale {
+        draft.risks.push(format!(
+            "分析期间项目已从 revision {context_revision} 变为 {current_revision}，结果已过期"
+        ));
+    }
     let result = json!({
         "expertType": expert_type,
         "summary": draft.summary,
@@ -778,16 +796,20 @@ fn complete_member(project_path: &Path, task_id: &str, raw: &str) -> AppResult<(
         "questions": draft.questions,
         "risks": draft.risks,
         "readOnly": true,
+        "baseRevision": context_revision,
+        "currentRevision": current_revision,
+        "stale": stale,
     });
+    let status = if stale { "stale" } else { "completed" };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let timestamp = now();
     tx.execute(
-        "UPDATE agent_tasks SET status='completed', result_json=?1, completed_at=?2 WHERE id=?3 AND status<>'cancelled'",
-        params![result.to_string(), timestamp, task_id],
+        "UPDATE agent_tasks SET status=?1, result_json=?2, completed_at=?3 WHERE id=?4 AND status<>'cancelled'",
+        params![status, result.to_string(), timestamp, task_id],
     ).map_err(|e| e.to_string())?;
     tx.execute(
-        "UPDATE expert_team_members SET status='completed', result_json=?1, updated_at=?2 WHERE task_id=?3 AND status<>'cancelled'",
-        params![result.to_string(), timestamp, task_id],
+        "UPDATE expert_team_members SET status=?1, result_json=?2, updated_at=?3 WHERE task_id=?4 AND status<>'cancelled'",
+        params![status, result.to_string(), timestamp, task_id],
     ).map_err(|e| e.to_string())?;
     tx.execute(
         "UPDATE agent_sessions SET status='closed', session_status='closed',
@@ -893,8 +915,22 @@ fn maybe_start_synthesis(
     let sink_buffer = Arc::clone(&buffer);
     let sink_path = project_path.to_path_buf();
     let sink_emitter = emitter.clone();
+    let sink_runtime = runtime.clone();
+    let sink_session_id = task_id.clone();
     let sink: RuntimeEventSink = Arc::new(move |event| {
         handle_synthesis_event(&sink_path, &sink_buffer, &event);
+        if matches!(
+            event,
+            RuntimeEvent::TaskCompleted { .. }
+                | RuntimeEvent::TaskFailed { .. }
+                | RuntimeEvent::TaskCancelled { .. }
+        ) {
+            let runtime = sink_runtime.clone();
+            let session_id = sink_session_id.clone();
+            std::thread::spawn(move || {
+                let _ = runtime.close_session(&session_id);
+            });
+        }
         if let Some(emit) = sink_emitter.as_ref() {
             emit(event);
         }
@@ -997,13 +1033,6 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
-    let runtime_session_id: Option<String> = tx
-        .query_row(
-            "SELECT runtime_session_id FROM agent_sessions WHERE id=?1",
-            [&session_id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, 'expert_team_synthesis', 'main', ?3, '[]', ?4, ?5, 'queued', ?6, ?7, ?8)",
         params![synthesis_task_id, session_id, selection_json, serde_json::to_string(&WriteScope::default()).map_err(|e| e.to_string())?, base_revision, provider, model, timestamp],
@@ -1015,9 +1044,9 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
     tx.commit().map_err(|e| e.to_string())?;
     let prompt = build_synthesis_prompt(&user_request, &members)?;
     Ok(Some(RuntimeTaskInput {
-        task_id: Some(synthesis_task_id),
-        session_id: Some(session_id),
-        runtime_session_id,
+        task_id: Some(synthesis_task_id.clone()),
+        session_id: Some(synthesis_task_id.clone()),
+        runtime_session_id: None,
         project_path: Some(project_path.to_string_lossy().into_owned()),
         app_data_dir: None,
         prompt,
@@ -1027,13 +1056,14 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
         thinking_level: None,
         allowed_tools: Some(Vec::new()),
         allow_call_expert: Some(false),
+        result_tool_kind: Some("team".into()),
         attachments: Vec::new(),
     }))
 }
 
 fn build_synthesis_prompt(user_request: &str, members: &Value) -> AppResult<String> {
     Ok(format!(
-        "你是创作工作台主 Agent。以下是多个专业 Agent 在互不查看彼此意见的前提下完成的独立只读会诊结果。请整合共识、明确分歧、给出建议和待确认问题，不得伪造一致意见，不得返回 patchProposal、权限申请、SQL、文件操作或任何直接写入命令。如需修改，只能建议用户另行发起修改提案。\n会诊问题：{}\n独立专家结果：{}\n只返回一个 JSON 对象，键必须为 summary、consensus、disagreements、recommendations、questions、risks。",
+        "你是创作工作台主 Agent。以下是多个专业 Agent 在互不查看彼此意见的前提下完成的独立只读会诊结果。请整合共识、明确分歧、给出建议和待确认问题，不得伪造一致意见，不得返回 patchProposal、权限申请、SQL、文件操作或任何直接写入命令。如需修改，只能建议用户另行发起修改提案。\n会诊问题：{}\n独立专家结果：{}\n结束前必须调用一次 submit_team_result，参数键为 summary、consensus、disagreements、recommendations、questions、risks；不要依赖自由文本 JSON。",
         user_request,
         serde_json::to_string(members).map_err(|e| e.to_string())?,
     ))
@@ -1060,6 +1090,11 @@ fn handle_synthesis_event(project_path: &Path, buffer: &Mutex<String>, event: &R
                     "UPDATE agent_tasks SET usage_json=?1 WHERE id=?2",
                     params![usage.to_string(), task_id],
                 );
+            }
+        }
+        RuntimeEvent::StructuredResult { result, .. } => {
+            if let Ok(mut text) = buffer.lock() {
+                *text = result.to_string();
             }
         }
         RuntimeEvent::TaskCompleted { task_id } => {

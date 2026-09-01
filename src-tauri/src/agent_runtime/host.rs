@@ -15,6 +15,8 @@ use super::runtime::{
 use crate::agent_gateway::{execute_tool, ToolGatewayRequest};
 use crate::database::{new_id, AppResult};
 
+const MAX_TERMINAL_TASKS: usize = 256;
+
 struct HostCommand {
     program: PathBuf,
     args: Vec<String>,
@@ -36,6 +38,7 @@ struct HostProcess {
     child: Arc<Mutex<Child>>,
     pending: Arc<Mutex<HashMap<String, PendingResponse>>>,
     tasks: Arc<Mutex<HashMap<String, HostTask>>>,
+    terminal_tasks: Arc<Mutex<HashMap<String, RuntimeTaskState>>>,
     request_id: AtomicU64,
     reader: Option<JoinHandle<()>>,
     stderr_reader: Option<JoinHandle<()>>,
@@ -65,8 +68,10 @@ impl HostProcess {
         let child = Arc::new(Mutex::new(child));
         let pending = Arc::new(Mutex::new(HashMap::<String, PendingResponse>::new()));
         let tasks = Arc::new(Mutex::new(HashMap::<String, HostTask>::new()));
+        let terminal_tasks = Arc::new(Mutex::new(HashMap::<String, RuntimeTaskState>::new()));
         let reader_pending = Arc::clone(&pending);
         let reader_tasks = Arc::clone(&tasks);
+        let reader_terminal_tasks = Arc::clone(&terminal_tasks);
         let reader_stdin = Arc::clone(&stdin);
         let reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
@@ -77,6 +82,7 @@ impl HostProcess {
                                 value,
                                 &reader_pending,
                                 &reader_tasks,
+                                &reader_terminal_tasks,
                                 &reader_stdin,
                             );
                         }
@@ -85,7 +91,11 @@ impl HostProcess {
                     Err(_) => break,
                 }
             }
-            fail_live_tasks(&reader_tasks, "Pi SDK Agent Host 已停止");
+            fail_live_tasks(
+                &reader_tasks,
+                &reader_terminal_tasks,
+                "Pi SDK Agent Host 已停止",
+            );
             if let Ok(mut pending) = reader_pending.lock() {
                 for (_, sender) in pending.drain() {
                     let _ = sender.send(Err("Pi SDK Agent Host 已停止".into()));
@@ -101,6 +111,7 @@ impl HostProcess {
             child,
             pending,
             tasks,
+            terminal_tasks,
             request_id: AtomicU64::new(1),
             reader: Some(reader),
             stderr_reader: Some(stderr_reader),
@@ -218,6 +229,7 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
                     "thinkingLevel": input.thinking_level,
                     "allowedTools": input.allowed_tools,
                     "allowCallExpert": input.allow_call_expert,
+                    "resultToolKind": input.result_tool_kind,
                 }),
             )?;
             let runtime_session_id = result
@@ -343,14 +355,25 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
     }
 
     fn get_task_state(&self, task_id: &str) -> AppResult<RuntimeTaskState> {
-        self.process
+        let process = self
+            .process
             .as_ref()
-            .ok_or_else(|| "Agent Host 尚未启动".to_string())?
+            .ok_or_else(|| "Agent Host 尚未启动".to_string())?;
+        if let Some(state) = process
             .tasks
             .lock()
             .map_err(|_| "Agent Host task 锁损坏".to_string())?
             .get(task_id)
             .map(|task| task.state.clone())
+        {
+            return Ok(state);
+        }
+        process
+            .terminal_tasks
+            .lock()
+            .map_err(|_| "Agent Host terminal task 锁损坏".to_string())?
+            .get(task_id)
+            .cloned()
             .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))
     }
 
@@ -398,6 +421,7 @@ fn handle_host_message(
     value: Value,
     pending: &Mutex<HashMap<String, PendingResponse>>,
     tasks: &Mutex<HashMap<String, HostTask>>,
+    terminal_tasks: &Mutex<HashMap<String, RuntimeTaskState>>,
     stdin: &Mutex<ChildStdin>,
 ) {
     if value.get("type").and_then(Value::as_str) == Some("response") {
@@ -475,6 +499,10 @@ fn handle_host_message(
             task_id: task_id.into(),
             usage: value.get("usage").cloned().unwrap_or(Value::Null),
         },
+        "structured_result" => RuntimeEvent::StructuredResult {
+            task_id: task_id.into(),
+            result: value.get("result").cloned().unwrap_or(Value::Null),
+        },
         "task_completed" => {
             task.state = RuntimeTaskState::Completed;
             RuntimeEvent::TaskCompleted {
@@ -501,7 +529,14 @@ fn handle_host_message(
         _ => return,
     };
     let sink = Arc::clone(&task.sink);
+    let terminal_state = task.state.is_terminal().then(|| task.state.clone());
+    if terminal_state.is_some() {
+        task_map.remove(task_id);
+    }
     drop(task_map);
+    if let Some(state) = terminal_state {
+        remember_terminal_task(terminal_tasks, task_id, state);
+    }
     sink(event);
 }
 
@@ -579,16 +614,20 @@ fn handle_tool_request(
     }
 }
 
-fn fail_live_tasks(tasks: &Mutex<HashMap<String, HostTask>>, error: &str) {
+fn fail_live_tasks(
+    tasks: &Mutex<HashMap<String, HostTask>>,
+    terminal_tasks: &Mutex<HashMap<String, RuntimeTaskState>>,
+    error: &str,
+) {
     let Ok(mut tasks) = tasks.lock() else {
         return;
     };
     let notifications = tasks
-        .iter_mut()
+        .drain()
         .filter(|(_, task)| !task.state.is_terminal())
         .map(|(task_id, task)| {
-            task.state = RuntimeTaskState::Failed;
-            (task_id.clone(), Arc::clone(&task.sink))
+            remember_terminal_task(terminal_tasks, &task_id, RuntimeTaskState::Failed);
+            (task_id, Arc::clone(&task.sink))
         })
         .collect::<Vec<_>>();
     drop(tasks);
@@ -598,6 +637,22 @@ fn fail_live_tasks(tasks: &Mutex<HashMap<String, HostTask>>, error: &str) {
             error: error.into(),
         });
     }
+}
+
+fn remember_terminal_task(
+    terminal_tasks: &Mutex<HashMap<String, RuntimeTaskState>>,
+    task_id: &str,
+    state: RuntimeTaskState,
+) {
+    let Ok(mut terminal_tasks) = terminal_tasks.lock() else {
+        return;
+    };
+    if terminal_tasks.len() >= MAX_TERMINAL_TASKS {
+        if let Some(oldest) = terminal_tasks.keys().next().cloned() {
+            terminal_tasks.remove(&oldest);
+        }
+    }
+    terminal_tasks.insert(task_id.to_string(), state);
 }
 
 fn resolve_host_command() -> HostCommand {
@@ -686,6 +741,19 @@ mod tests {
     }
 
     #[test]
+    fn terminal_task_cache_is_bounded() {
+        let tasks = Mutex::new(HashMap::new());
+        for index in 0..(MAX_TERMINAL_TASKS + 20) {
+            remember_terminal_task(
+                &tasks,
+                &format!("task-{index}"),
+                RuntimeTaskState::Completed,
+            );
+        }
+        assert_eq!(tasks.lock().unwrap().len(), MAX_TERMINAL_TASKS);
+    }
+
+    #[test]
     fn sdk_adapter_bridges_persistent_host_events() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("test-data")
@@ -711,6 +779,7 @@ mod tests {
                     thinking_level: None,
                     allowed_tools: None,
                     allow_call_expert: None,
+                    result_tool_kind: None,
                     attachments: Vec::new(),
                 },
                 sink,
@@ -791,6 +860,7 @@ mod tests {
                     thinking_level: None,
                     allowed_tools: None,
                     allow_call_expert: None,
+                    result_tool_kind: None,
                     attachments: Vec::new(),
                 },
                 sink,

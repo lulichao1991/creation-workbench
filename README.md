@@ -1,6 +1,6 @@
 # 创作工作台 V2 开发线
 
-本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-beta.2` Pi 原生 Agent 完整验收阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI、真实生图或视频生成服务，V1 工作流保持完整可用：
+本地优先的 AI 视频创作工作台。`v2-dev` 当前处于 `0.2.0-beta.3` Pi 原生 Agent RC 加固阶段；所有 V2 功能开关默认关闭，未配置时不调用 AI、真实生图或视频生成服务，V1 工作流保持完整可用：
 
 `作品结构 → 剧本 → 分镜 → 资产 → 关键帧 → 生成任务 / 提示词 → 历史与快照`
 
@@ -242,3 +242,12 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - 主 Agent 可建议但不能自动启动专家团；有效建议必须包含 2–6 个不重复的已注册专业角色，并由用户进入申请与高成本确认。
 - 提示词 Agent 新增只读 `compile_prompt_preview`，调用确定性 PromptCompiler 返回来源、警告和去路径参考图；不持久化预览、不设置正式稿、无视频调用。
 - Beta 2 继续保持静态生图显式触发、所有 AI 修改经权限与 ChangeSet、可撤销，以及全产品无视频生成入口。
+
+## V2 Beta 3 RC 前加固
+
+- Agent Provider API Key 持久化到 Windows Credential Manager，应用数据库不保存密钥；重启后自动恢复到 Pi ModelRuntime。
+- 单专业 Agent 使用应用级专业模型/thinking 与项目覆盖，并根据 `focusRefs` 获取自己的正式视觉附件。
+- 专家团综合改用独立无工具 Pi Session，Rust Tool Gateway 同时执行任务级和角色级白名单。
+- 主 Agent、专业 Agent 和专家团通过 TypeBox `submit_*_result` 工具提交结构化结果；自由文本 JSON 仅作为旧会话兼容回退。
+- 所有 Agent 结果补齐 stale 标记，Runtime 终态任务只保留最多 256 项轻量状态；完整证据见 `BETA3_RC_HARDENING_REVIEW.md`。
+- 真实外部文本/视觉模型验收仍需先在应用内配置 Provider API Key，完成前版本保持 Beta。
