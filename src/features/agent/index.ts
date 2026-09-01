@@ -73,6 +73,11 @@ export interface AgentSession {
   scopeId: string | null;
   title: string;
   status: string;
+  runtimeSessionId: string | null;
+  sessionKind: string;
+  parentSessionId: string | null;
+  expertType: ExpertType | "main" | null;
+  lastActiveAt: string;
   createdAt: string;
   updatedAt: string;
 }

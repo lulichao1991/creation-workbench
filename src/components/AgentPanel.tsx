@@ -12,11 +12,12 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type {
   AgentMessage,
   AgentMode,
+  AgentSession,
   AgentTask,
   ExpertDefinition,
   ExpertTeamConsultation,
@@ -84,6 +85,7 @@ const modeLabels: Record<AgentMode, string> = {
 export function AgentPanel({ project, revision, workspace, currentUnitId, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
   const selection = useSelectionStore();
   const [flags, setFlags] = useState<FeatureFlags | null>(null);
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
   const [input, setInput] = useState("");
@@ -125,32 +127,56 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   const taskRunning = activeTask && ["created", "context_building", "queued", "running"].includes(activeTask.status);
   const teamRunning = isExpertTeamRunning(consultation?.status);
 
+  const openSession = useCallback(async (session: AgentSession) => {
+    setSessionId(session.id);
+    setActiveTask(null);
+    activeTaskIdRef.current = null;
+    setStreamingText("");
+    setProposal(null);
+    setCards([]);
+    setSelectedPatchIds(new Set());
+    setConsultation(null);
+    const history = await api.agentListMessages(project.path, session.id);
+    setMessages(history);
+    const prior = latestProposal(history);
+    if (prior) {
+      const current = await api.patchGet(project.path, prior.id);
+      setProposal(current);
+      setSelectedPatchIds(selectablePatchIds(current));
+      setCards(await api.cardList(project.path, current.taskId));
+    }
+  }, [project.path]);
+
   useEffect(() => {
     void api.getFeatureFlags().then(setFlags).catch(onError);
   }, [onError]);
 
   useEffect(() => {
     if (!agentEnabled) return;
-    const id = `agent-ui-${project.id}`;
-    void api.agentCreateSession(project.path, {
-      requestId: id,
-      projectId: project.id,
-      scopeType: "project",
-      scopeId: project.id,
-      title: `${project.name} 主 Agent`,
-    }).then(async (session) => {
-      setSessionId(session.id);
-      const history = await api.agentListMessages(project.path, session.id);
-      setMessages(history);
-      const prior = latestProposal(history);
-      if (prior) {
-        const current = await api.patchGet(project.path, prior.id);
-        setProposal(current);
-        setSelectedPatchIds(selectablePatchIds(current));
-        setCards(await api.cardList(project.path, current.taskId));
+    let disposed = false;
+    void (async () => {
+      let items = await api.agentListSessions(project.path);
+      let current = items.find((item) => item.status === "active");
+      if (!items.length) {
+        current = await api.agentCreateSession(project.path, {
+          requestId: crypto.randomUUID(),
+          projectId: project.id,
+          scopeType: "project",
+          scopeId: project.id,
+          title: "讨论 1",
+        });
+        items = [current];
       }
-    }).catch(onError);
-  }, [agentEnabled, project.id, project.name, project.path, onError]);
+      if (disposed) return;
+      setSessions(items);
+      if (current) await openSession(current);
+      else {
+        setSessionId(null);
+        setMessages([]);
+      }
+    })().catch(onError);
+    return () => { disposed = true; };
+  }, [agentEnabled, project.id, project.path, openSession, onError]);
 
   useEffect(() => {
     if (!agentEnabled) return;
@@ -217,6 +243,71 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     try {
       await api.setFeatureFlag("agent_core", true);
       setFlags(await api.setFeatureFlag("expert_agents", true));
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const newDiscussion = async () => {
+    if (taskRunning || teamRunning || working) return;
+    setWorking(true);
+    try {
+      const session = await api.agentCreateSession(project.path, {
+        requestId: crypto.randomUUID(),
+        projectId: project.id,
+        scopeType: "project",
+        scopeId: project.id,
+        title: `讨论 ${sessions.length + 1}`,
+      });
+      setSessions((items) => [session, ...items]);
+      await openSession(session);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const switchDiscussion = async (nextSessionId: string) => {
+    if (nextSessionId === sessionId || taskRunning || teamRunning || working) return;
+    const selected = sessions.find((item) => item.id === nextSessionId);
+    if (!selected) return;
+    setWorking(true);
+    try {
+      const session = selected.status === "closed"
+        ? await api.agentResumeSession(project.path, selected.id)
+        : selected;
+      setSessions((items) => items.map((item) => item.id === session.id ? session : item));
+      await openSession(session);
+    } catch (error) {
+      onError(error);
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  const closeDiscussion = async () => {
+    if (!sessionId || taskRunning || teamRunning || working) return;
+    setWorking(true);
+    try {
+      const closed = await api.agentCloseSession(project.path, sessionId);
+      const nextSessions = sessions.map((item) => item.id === closed.id ? closed : item);
+      setSessions(nextSessions);
+      const next = nextSessions.find((item) => item.status === "active" && item.id !== closed.id);
+      if (next) {
+        await openSession(next);
+      } else {
+        setSessionId(null);
+        setMessages([]);
+        setActiveTask(null);
+        activeTaskIdRef.current = null;
+        setStreamingText("");
+        setProposal(null);
+        setCards([]);
+        setConsultation(null);
+      }
     } catch (error) {
       onError(error);
     } finally {
@@ -462,6 +553,27 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
 
   return (
     <div className="agent-panel">
+      <section className="agent-session-row">
+        <select
+          aria-label="当前讨论"
+          value={sessionId ?? ""}
+          disabled={Boolean(taskRunning) || teamRunning || working}
+          onChange={(event) => void switchDiscussion(event.target.value)}
+        >
+          {!sessionId && <option value="" disabled>选择或新建讨论</option>}
+          {sessions.map((session) => (
+            <option key={session.id} value={session.id}>
+              {session.title}{session.status === "closed" ? "（已结束，选择后恢复）" : ""}
+            </option>
+          ))}
+        </select>
+        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning || working} onClick={() => void newDiscussion()}>
+          新建讨论
+        </button>
+        <button className="ghost" disabled={!sessionId || Boolean(taskRunning) || teamRunning || working} onClick={() => void closeDiscussion()}>
+          结束讨论
+        </button>
+      </section>
       <section className="agent-context-strip">
         <div><span>当前对象</span><strong>{displayRef(agentSelection.center)}</strong></div>
         <div><span>模式 / revision</span><strong>{modeLabels[mode]} · r{revision}</strong></div>

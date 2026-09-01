@@ -189,3 +189,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - Agent Host 使用独立系统数据目录和显式空资源加载器，不读取用户 Pi 环境或项目文件；默认禁用全部内置文件与 Shell 工具。
 - Rust 新增 `PiSdkRuntimeAdapter`，复用现有 Runtime 事件契约，并通过 `WORKBENCH_AGENT_RUNTIME=pi_sdk` 与 legacy Runtime 双轨迁移。
 - 自动化覆盖真实 Pi SDK Session 创建、同一 Session 两轮上下文、Host Doctor、中文空格路径、流式事件以及前后端原有回归测试。
+
+## V2 Beta 2 Goal27 MainAgentSession
+
+- Pi SDK Session 由 SDK 原生 JSONL 持久化；应用或 Agent Host 重启后按 `runtime_session_id` 恢复完整上下文。
+- `project.db` 记录主会话生命周期和 Pi Session 映射；运行中任务不能关闭，结束后的讨论可显式恢复。
+- Agent 面板支持新建、切换、结束和恢复讨论，不再使用项目级硬编码会话 ID。
+- Pi SDK 模式由 `AgentSession` 自己维护多轮上下文；旧 `SessionWorkingMemory` 仅在 Goal 33 前作为 legacy Runtime 回退。
+- Runtime 桥接同时支持 `steer` 和 `follow_up`，自动化覆盖 Host 重启恢复、数据库映射、生命周期与忙碌会话保护。

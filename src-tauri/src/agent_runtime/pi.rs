@@ -222,7 +222,10 @@ impl AgentRuntime for PiRuntimeAdapter {
                 stderr_reader,
             },
         );
-        Ok(RuntimeTaskHandle { task_id })
+        Ok(RuntimeTaskHandle {
+            task_id,
+            runtime_session_id: None,
+        })
     }
 
     fn send_user_input(&mut self, task_id: &str, input: String) -> AppResult<()> {
@@ -236,6 +239,20 @@ impl AgentRuntime for PiRuntimeAdapter {
             .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
         task.command_tx
             .send(json!({ "type": "prompt", "message": input, "streamingBehavior": "steer" }))
+            .map_err(|_| "Pi Runtime 已停止".to_string())
+    }
+
+    fn send_follow_up(&mut self, task_id: &str, input: String) -> AppResult<()> {
+        self.cleanup_terminal_tasks();
+        if input.trim().is_empty() {
+            return Err("追加输入不能为空".into());
+        }
+        let task = self
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
+        task.command_tx
+            .send(json!({ "type": "prompt", "message": input, "streamingBehavior": "followUp" }))
             .map_err(|_| "Pi Runtime 已停止".to_string())
     }
 
@@ -270,6 +287,10 @@ impl AgentRuntime for PiRuntimeAdapter {
                 exited.store(true, Ordering::Release);
             }
         });
+        Ok(())
+    }
+
+    fn close_session(&mut self, _session_id: &str) -> AppResult<()> {
         Ok(())
     }
 

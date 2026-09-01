@@ -1,5 +1,5 @@
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -142,7 +142,7 @@ impl HostProcess {
 pub struct PiSdkRuntimeAdapter {
     command: HostCommand,
     process: Option<HostProcess>,
-    sessions: HashSet<String>,
+    sessions: HashMap<String, String>,
 }
 
 impl Default for PiSdkRuntimeAdapter {
@@ -156,7 +156,7 @@ impl PiSdkRuntimeAdapter {
         Self {
             command,
             process: None,
-            sessions: HashSet::new(),
+            sessions: HashMap::new(),
         }
     }
 
@@ -179,20 +179,29 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
         }
         let task_id = input.task_id.unwrap_or_else(new_id);
         let session_id = input.session_id.unwrap_or_else(|| task_id.clone());
-        if !self.sessions.contains(&session_id) {
-            let process = self.process()?;
-            process.request(
+        let runtime_session_id = if let Some(runtime_session_id) = self.sessions.get(&session_id) {
+            runtime_session_id.clone()
+        } else {
+            let result = self.process()?.request(
                 "create_session",
                 json!({
                     "sessionId": session_id,
+                    "runtimeSessionId": input.runtime_session_id,
                     "provider": input.provider,
                     "model": input.model,
                     "systemPrompt": input.system_prompt,
                     "thinkingLevel": input.thinking_level,
                 }),
             )?;
-            self.sessions.insert(session_id.clone());
-        }
+            let runtime_session_id = result
+                .get("runtimeSessionId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Agent Host 未返回 runtimeSessionId".to_string())?
+                .to_string();
+            self.sessions
+                .insert(session_id.clone(), runtime_session_id.clone());
+            runtime_session_id
+        };
         let process = self.process()?;
         {
             let mut tasks = process
@@ -237,7 +246,10 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
             }
             return Err(error);
         }
-        Ok(RuntimeTaskHandle { task_id })
+        Ok(RuntimeTaskHandle {
+            task_id,
+            runtime_session_id: Some(runtime_session_id),
+        })
     }
 
     fn send_user_input(&mut self, task_id: &str, input: String) -> AppResult<()> {
@@ -259,6 +271,25 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
         Ok(())
     }
 
+    fn send_follow_up(&mut self, task_id: &str, input: String) -> AppResult<()> {
+        if input.trim().is_empty() {
+            return Err("追加输入不能为空".into());
+        }
+        let process = self.process()?;
+        let session_id = process
+            .tasks
+            .lock()
+            .map_err(|_| "Agent Host task 锁损坏".to_string())?
+            .get(task_id)
+            .map(|task| task.session_id.clone())
+            .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
+        process.request(
+            "follow_up",
+            json!({ "sessionId": session_id, "message": input }),
+        )?;
+        Ok(())
+    }
+
     fn cancel_task(&mut self, task_id: &str) -> AppResult<()> {
         let process = self.process()?;
         let session_id = process
@@ -269,6 +300,16 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
             .map(|task| task.session_id.clone())
             .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
         process.request("cancel", json!({ "sessionId": session_id }))?;
+        Ok(())
+    }
+
+    fn close_session(&mut self, session_id: &str) -> AppResult<()> {
+        if self.sessions.remove(session_id).is_none() {
+            return Ok(());
+        }
+        if let Some(process) = self.process.as_ref() {
+            process.request("dispose_session", json!({ "sessionId": session_id }))?;
+        }
         Ok(())
     }
 
@@ -543,6 +584,7 @@ mod tests {
                 RuntimeTaskInput {
                     task_id: Some("sdk-task".into()),
                     session_id: Some("sdk-session".into()),
+                    runtime_session_id: None,
                     prompt: "继续讨论".into(),
                     provider: None,
                     model: None,

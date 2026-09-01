@@ -74,7 +74,10 @@ impl AgentRuntime for MockRuntime {
                 event_sink,
             },
         );
-        Ok(RuntimeTaskHandle { task_id })
+        Ok(RuntimeTaskHandle {
+            task_id,
+            runtime_session_id: None,
+        })
     }
 
     fn send_user_input(&mut self, task_id: &str, input: String) -> AppResult<()> {
@@ -89,6 +92,10 @@ impl AgentRuntime for MockRuntime {
         Ok(())
     }
 
+    fn send_follow_up(&mut self, task_id: &str, input: String) -> AppResult<()> {
+        self.send_user_input(task_id, input)
+    }
+
     fn cancel_task(&mut self, task_id: &str) -> AppResult<()> {
         let task = self
             .tasks
@@ -99,6 +106,10 @@ impl AgentRuntime for MockRuntime {
         (task.event_sink)(RuntimeEvent::TaskCancelled {
             task_id: task_id.to_string(),
         });
+        Ok(())
+    }
+
+    fn close_session(&mut self, _session_id: &str) -> AppResult<()> {
         Ok(())
     }
 

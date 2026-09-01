@@ -62,6 +62,68 @@ test("keeps two real Pi SDK turns in the same AgentSession", async () => {
   }
 });
 
+test("restores a persisted Pi SDK session after host restart", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-resume-"));
+  const faux = fauxProvider({ provider: "workbench-resume-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage("方案一、方案二、方案三"),
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /方案一、方案二、方案三/);
+      assert.match(transcript, /用第二个/);
+      return fauxAssistantMessage("已恢复讨论并沿用第二个方案");
+    },
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /已恢复讨论并沿用第二个方案/);
+      assert.match(transcript, /再往后一点/);
+      return fauxAssistantMessage("已将第二个方案继续后移");
+    },
+  ]);
+  const sessionId = "00000000-0000-4000-8000-000000000003";
+  const firstEvents: Record<string, unknown>[] = [];
+  const firstHost = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => firstEvents.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+  );
+  await firstHost.handle({
+    id: "create-first",
+    type: "create_session",
+    sessionId,
+    provider: faux.provider.id,
+    model: faux.getModel().id,
+  });
+  await firstHost.handle({ id: "turn-first", type: "send_message", sessionId, taskId: "turn-1", message: "给三个方案" });
+  await waitForEvent(firstEvents, "task_completed", "turn-1");
+  firstHost.dispose();
+
+  const secondEvents: Record<string, unknown>[] = [];
+  const secondHost = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => secondEvents.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+  );
+  try {
+    const resumed = await secondHost.handle({
+      id: "create-second",
+      type: "create_session",
+      sessionId,
+      runtimeSessionId: sessionId,
+      provider: faux.provider.id,
+      model: faux.getModel().id,
+    });
+    assert.equal((resumed as Record<string, unknown>).resumed, true);
+    await secondHost.handle({ id: "turn-second", type: "send_message", sessionId, taskId: "turn-2", message: "用第二个" });
+    await waitForEvent(secondEvents, "task_completed", "turn-2");
+    await secondHost.handle({ id: "turn-third", type: "send_message", sessionId, taskId: "turn-3", message: "再往后一点" });
+    await waitForEvent(secondEvents, "task_completed", "turn-3");
+    assert.equal(faux.state.callCount, 3);
+  } finally {
+    secondHost.dispose();
+  }
+});
+
 async function waitForEvent(events: Record<string, unknown>[], eventName: string, taskId: string): Promise<void> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {

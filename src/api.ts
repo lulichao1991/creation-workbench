@@ -69,6 +69,12 @@ export const api = {
     invoke<ResolvedIntent>("agent_resolve_intent", { input }),
   agentCreateSession: (projectPath: string, input: CreateSessionInput) =>
     invoke<AgentSession>("agent_create_session", { projectPath, input }),
+  agentListSessions: (projectPath: string) =>
+    invoke<AgentSession[]>("agent_list_sessions", { projectPath }),
+  agentCloseSession: (projectPath: string, sessionId: string) =>
+    invoke<AgentSession>("agent_close_session", { projectPath, sessionId }),
+  agentResumeSession: (projectPath: string, sessionId: string) =>
+    invoke<AgentSession>("agent_resume_session", { projectPath, sessionId }),
   agentSendMessage: (projectPath: string, input: SendAgentMessageInput) =>
     invoke<AgentDispatch>("agent_send_message", { projectPath, input }),
   agentGetTask: (projectPath: string, taskId: string) =>
@@ -89,6 +95,8 @@ export const api = {
     invoke<RuntimeTaskHandle>("agent_runtime_start_readonly", { input }),
   agentSendRuntimeInput: (taskId: string, input: string) =>
     invoke<void>("agent_runtime_send_input", { taskId, input }),
+  agentFollowUpRuntimeInput: (taskId: string, input: string) =>
+    invoke<void>("agent_runtime_follow_up", { taskId, input }),
   agentCancelTask: (taskId: string) =>
     invoke<void>("agent_cancel_task", { taskId }),
   agentGetTaskState: (taskId: string) =>

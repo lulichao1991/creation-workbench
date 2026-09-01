@@ -40,6 +40,7 @@ export class WorkbenchAgentHost {
 
   private constructor(
     private readonly dataDir: string,
+    private readonly sessionDir: string,
     private readonly modelRuntime: ModelRuntime,
     private readonly emit: Emit,
   ) {}
@@ -50,6 +51,8 @@ export class WorkbenchAgentHost {
     configureRuntime?: (runtime: ModelRuntime) => void,
   ): Promise<WorkbenchAgentHost> {
     await mkdir(dataDir, { recursive: true });
+    const sessionDir = path.join(dataDir, "sessions");
+    await mkdir(sessionDir, { recursive: true });
     const modelRuntime = await ModelRuntime.create({
       authPath: path.join(dataDir, "auth.json"),
       modelsPath: null,
@@ -57,7 +60,7 @@ export class WorkbenchAgentHost {
       refreshOnCreate: false,
     });
     configureRuntime?.(modelRuntime);
-    return new WorkbenchAgentHost(dataDir, modelRuntime, emit);
+    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit);
   }
 
   doctor(): Record<string, unknown> {
@@ -109,6 +112,9 @@ export class WorkbenchAgentHost {
       return { sessionId, runtimeSessionId: existing.session.sessionId, resumed: true };
     }
 
+    const runtimeSessionId = optionalString(request, "runtimeSessionId") ?? sessionId;
+    const prior = (await SessionManager.list(this.dataDir, this.sessionDir))
+      .find((candidate) => candidate.id === runtimeSessionId);
     const model = selectModel(this.modelRuntime, optionalString(request, "provider"), optionalString(request, "model"));
     const cwd = this.dataDir;
     const resourceLoader = isolatedResourceLoader(optionalString(request, "systemPrompt") ?? MAIN_SYSTEM_PROMPT);
@@ -126,12 +132,14 @@ export class WorkbenchAgentHost {
       customTools: [],
       resourceLoader,
       settingsManager,
-      sessionManager: SessionManager.inMemory(cwd, { id: sessionId }),
+      sessionManager: prior
+        ? SessionManager.open(prior.path, this.sessionDir, cwd)
+        : SessionManager.create(cwd, this.sessionDir, { id: runtimeSessionId }),
     });
     const entry: SessionEntry = { session, unsubscribe: () => {} };
     entry.unsubscribe = session.subscribe((event) => this.forwardSessionEvent(sessionId, entry, event));
     this.sessions.set(sessionId, entry);
-    return { sessionId, runtimeSessionId: session.sessionId, resumed: false };
+    return { sessionId, runtimeSessionId: session.sessionId, resumed: Boolean(prior) };
   }
 
   private sendMessage(request: HostRequest): Record<string, unknown> {
@@ -187,7 +195,8 @@ export class WorkbenchAgentHost {
   }
 
   private disposeSession(sessionId: string): Record<string, unknown> {
-    const entry = this.requiredSession(sessionId);
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return { disposed: false };
     entry.unsubscribe();
     entry.session.dispose();
     this.sessions.delete(sessionId);

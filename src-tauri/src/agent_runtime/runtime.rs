@@ -12,6 +12,8 @@ pub struct RuntimeTaskInput {
     pub task_id: Option<String>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub runtime_session_id: Option<String>,
     pub prompt: String,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -35,6 +37,7 @@ pub struct RuntimeAttachment {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeTaskHandle {
     pub task_id: String,
+    pub runtime_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -108,7 +111,9 @@ pub trait AgentRuntime: Send {
         event_sink: RuntimeEventSink,
     ) -> AppResult<RuntimeTaskHandle>;
     fn send_user_input(&mut self, task_id: &str, input: String) -> AppResult<()>;
+    fn send_follow_up(&mut self, task_id: &str, input: String) -> AppResult<()>;
     fn cancel_task(&mut self, task_id: &str) -> AppResult<()>;
+    fn close_session(&mut self, session_id: &str) -> AppResult<()>;
     fn get_task_state(&self, task_id: &str) -> AppResult<RuntimeTaskState>;
     fn dispose(&mut self) -> AppResult<()>;
 }

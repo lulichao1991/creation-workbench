@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 10;
+pub const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 pub const AGENT_TABLES: &[&str] = &[
+    "agent_tool_calls",
     "expert_team_members",
     "expert_team_consultations",
     "ai_cards",
@@ -130,6 +131,7 @@ pub fn init_database(
     conn.execute_batch(MIGRATION_V9)
         .map_err(|e| format!("初始化专家团结构失败：{e}"))?;
     migrate_v10(&conn).map_err(|e| format!("初始化 V2 beta 修复结构失败：{e}"))?;
+    migrate_v11(&conn).map_err(|e| format!("初始化 Pi Session 结构失败：{e}"))?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -208,6 +210,9 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 10 {
         migrate_v10(&tx).map_err(|e| format!("迁移到数据库版本 10 失败：{e}"))?;
     }
+    if version < 11 {
+        migrate_v11(&tx).map_err(|e| format!("迁移到数据库版本 11 失败：{e}"))?;
+    }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("更新数据库版本失败：{e}"))?;
@@ -265,6 +270,77 @@ fn migrate_v10(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_project_memories_conflict_key
          ON project_memories(scope_type, scope_id, category, memory_key, status, updated_at);",
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn migrate_v11(conn: &Connection) -> AppResult<()> {
+    for (table, column, definition) in [
+        ("agent_sessions", "runtime_session_id", "TEXT"),
+        (
+            "agent_sessions",
+            "session_kind",
+            "TEXT NOT NULL DEFAULT 'main'",
+        ),
+        ("agent_sessions", "parent_session_id", "TEXT"),
+        ("agent_sessions", "expert_type", "TEXT"),
+        (
+            "agent_sessions",
+            "session_status",
+            "TEXT NOT NULL DEFAULT 'active'",
+        ),
+        ("agent_sessions", "last_active_at", "TEXT"),
+        ("agent_tasks", "pi_session_id", "TEXT"),
+        ("agent_tasks", "base_revision", "INTEGER"),
+        (
+            "agent_tasks",
+            "tool_call_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("expert_team_members", "pi_session_id", "TEXT"),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                params![table, column],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !exists {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    conn.execute_batch(
+        "UPDATE agent_sessions
+         SET session_status=status,
+             last_active_at=COALESCE(last_active_at, updated_at)
+         WHERE session_status='active';
+
+         CREATE TABLE IF NOT EXISTS agent_tool_calls (
+           id TEXT PRIMARY KEY,
+           task_id TEXT NOT NULL,
+           session_id TEXT NOT NULL,
+           agent_type TEXT NOT NULL,
+           tool_name TEXT NOT NULL,
+           arguments_json TEXT NOT NULL DEFAULT '{}',
+           result_summary_json TEXT,
+           project_revision INTEGER NOT NULL,
+           status TEXT NOT NULL DEFAULT 'running',
+           started_at TEXT NOT NULL,
+           completed_at TEXT,
+           FOREIGN KEY(task_id) REFERENCES agent_tasks(id) ON DELETE CASCADE,
+           FOREIGN KEY(session_id) REFERENCES agent_sessions(id) ON DELETE CASCADE
+         );
+
+         CREATE INDEX IF NOT EXISTS idx_agent_sessions_runtime
+         ON agent_sessions(runtime_session_id);
+         CREATE INDEX IF NOT EXISTS idx_agent_sessions_lifecycle
+         ON agent_sessions(project_id, session_kind, session_status, last_active_at);
+         CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_task
+         ON agent_tool_calls(task_id, started_at);",
     )
     .map_err(|e| e.to_string())
 }
@@ -1062,6 +1138,8 @@ mod tests {
             "idx_image_generation_jobs_target",
             "idx_expert_team_session",
             "idx_expert_team_members_consultation",
+            "idx_agent_sessions_lifecycle",
+            "idx_agent_tool_calls_task",
         ] {
             let count: i64 = conn
                 .query_row(
@@ -1131,6 +1209,7 @@ mod tests {
             "image_generation_results",
             "expert_team_consultations",
             "expert_team_members",
+            "agent_tool_calls",
         ] {
             let exists: i64 = conn
                 .query_row(

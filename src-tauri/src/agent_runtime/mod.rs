@@ -58,6 +58,13 @@ impl RuntimeState {
             .cancel_task(task_id)
     }
 
+    pub(crate) fn close_session(&self, session_id: &str) -> AppResult<()> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .close_session(session_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn with_runtime(runtime: impl AgentRuntime + 'static) -> Self {
         Self {
@@ -96,6 +103,21 @@ pub fn agent_runtime_send_input(
 }
 
 #[tauri::command]
+pub fn agent_runtime_follow_up(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RuntimeState>,
+    task_id: String,
+    input: String,
+) -> AppResult<()> {
+    ensure_agent_core_enabled(&app)?;
+    state
+        .runtime
+        .lock()
+        .map_err(|_| "Runtime 状态锁损坏".to_string())?
+        .send_follow_up(&task_id, input)
+}
+
+#[tauri::command]
 pub fn agent_cancel_task(
     app: tauri::AppHandle,
     state: tauri::State<'_, RuntimeState>,
@@ -128,7 +150,7 @@ pub fn agent_runtime_doctor() -> RuntimeDiagnostics {
     }
 }
 
-fn use_pi_sdk_runtime() -> bool {
+pub(crate) fn use_pi_sdk_runtime() -> bool {
     std::env::var("WORKBENCH_AGENT_RUNTIME")
         .map(|value| value.eq_ignore_ascii_case("pi_sdk"))
         .unwrap_or(false)
@@ -160,6 +182,7 @@ mod tests {
         RuntimeTaskInput {
             task_id: Some(task_id.into()),
             session_id: None,
+            runtime_session_id: None,
             prompt: prompt.into(),
             provider: None,
             model: None,

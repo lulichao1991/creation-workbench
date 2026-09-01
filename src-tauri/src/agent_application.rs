@@ -1,6 +1,6 @@
 use crate::agent_runtime::{
-    ensure_agent_core_enabled, RuntimeAttachment, RuntimeEvent, RuntimeEventSink, RuntimeState,
-    RuntimeTaskInput, RUNTIME_EVENT_NAME,
+    ensure_agent_core_enabled, use_pi_sdk_runtime, RuntimeAttachment, RuntimeEvent,
+    RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
@@ -145,6 +145,11 @@ pub struct AgentSession {
     pub scope_id: Option<String>,
     pub title: String,
     pub status: String,
+    pub runtime_session_id: Option<String>,
+    pub session_kind: String,
+    pub parent_session_id: Option<String>,
+    pub expert_type: Option<String>,
+    pub last_active_at: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -309,6 +314,38 @@ pub fn agent_create_session(
 }
 
 #[tauri::command]
+pub fn agent_list_sessions(
+    app: tauri::AppHandle,
+    project_path: String,
+) -> AppResult<Vec<AgentSession>> {
+    ensure_expert_agents_enabled(&app)?;
+    list_sessions(Path::new(&project_path))
+}
+
+#[tauri::command]
+pub fn agent_close_session(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, RuntimeState>,
+    project_path: String,
+    session_id: String,
+) -> AppResult<AgentSession> {
+    ensure_expert_agents_enabled(&app)?;
+    ensure_session_can_close(Path::new(&project_path), &session_id)?;
+    runtime.close_session(&session_id)?;
+    update_session_status(Path::new(&project_path), &session_id, "closed")
+}
+
+#[tauri::command]
+pub fn agent_resume_session(
+    app: tauri::AppHandle,
+    project_path: String,
+    session_id: String,
+) -> AppResult<AgentSession> {
+    ensure_expert_agents_enabled(&app)?;
+    update_session_status(Path::new(&project_path), &session_id, "active")
+}
+
+#[tauri::command]
 pub fn agent_send_message(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, RuntimeState>,
@@ -341,9 +378,24 @@ pub fn agent_send_message(
         handle_runtime_event(&sink_path, &sink_buffer, &event);
         let _ = sink_app.emit(RUNTIME_EVENT_NAME, event);
     });
-    if let Err(error) = runtime.start_task(runtime_input, sink) {
-        mark_task_failed(Path::new(&project_path), &task_id, &error)?;
-        return Err(error);
+    let handle = match runtime.start_task(runtime_input, sink) {
+        Ok(handle) => handle,
+        Err(error) => {
+            mark_task_failed(Path::new(&project_path), &task_id, &error)?;
+            return Err(error);
+        }
+    };
+    if let Some(runtime_session_id) = handle.runtime_session_id.as_deref() {
+        if let Err(error) = bind_runtime_session(
+            Path::new(&project_path),
+            &prepared.dispatch.session_id,
+            &task_id,
+            runtime_session_id,
+        ) {
+            let _ = runtime.cancel_task(&task_id);
+            mark_task_failed(Path::new(&project_path), &task_id, &error)?;
+            return Err(error);
+        }
     }
     Ok(AgentDispatch {
         runtime_started: true,
@@ -586,11 +638,83 @@ fn create_session(project_path: &Path, input: CreateSessionInput) -> AppResult<A
     }
     let timestamp = now();
     conn.execute(
-        "INSERT INTO agent_sessions (id, project_id, scope_type, scope_id, title, status, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, ?6)",
+        "INSERT INTO agent_sessions (id, project_id, scope_type, scope_id, title, status, session_kind, session_status, last_active_at, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 'active', 'main', 'active', ?6, ?6, ?6)",
         params![input.request_id, input.project_id, input.scope_type, input.scope_id, input.title, timestamp],
     )
     .map_err(|e| e.to_string())?;
     load_session(&conn, &input.request_id)
+}
+
+fn list_sessions(project_path: &Path) -> AppResult<Vec<AgentSession>> {
+    let conn = open_database(project_path)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id FROM agent_sessions
+             WHERE project_id=(SELECT id FROM projects LIMIT 1) AND session_kind='main'
+             ORDER BY COALESCE(last_active_at, updated_at) DESC, created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    ids.iter().map(|id| load_session(&conn, id)).collect()
+}
+
+fn ensure_session_can_close(project_path: &Path, session_id: &str) -> AppResult<()> {
+    let conn = open_database(project_path)?;
+    let session = load_session(&conn, session_id)?;
+    let project_id: String = conn
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if session.project_id != project_id || session.session_kind != "main" {
+        return Err("TOOL_ARGUMENT_INVALID: AgentSession 不属于当前项目主会话".into());
+    }
+    let busy: bool = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM agent_tasks
+               WHERE session_id=?1 AND status IN ('created','context_building','queued','running')
+             ) OR EXISTS(
+               SELECT 1 FROM expert_team_consultations
+               WHERE session_id=?1 AND status IN ('awaiting_confirmation','running','synthesizing')
+             )",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if busy {
+        return Err("SESSION_BUSY: 当前讨论仍有运行中任务或专家团会诊".into());
+    }
+    Ok(())
+}
+
+fn update_session_status(
+    project_path: &Path,
+    session_id: &str,
+    status: &str,
+) -> AppResult<AgentSession> {
+    if !matches!(status, "active" | "closed") {
+        return Err("TOOL_ARGUMENT_INVALID: AgentSession 状态无效".into());
+    }
+    let conn = open_database(project_path)?;
+    let session = load_session(&conn, session_id)?;
+    let project_id: String = conn
+        .query_row("SELECT id FROM projects LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if session.project_id != project_id || session.session_kind != "main" {
+        return Err("TOOL_ARGUMENT_INVALID: AgentSession 不属于当前项目主会话".into());
+    }
+    let timestamp = now();
+    conn.execute(
+        "UPDATE agent_sessions
+         SET status=?1, session_status=?1, last_active_at=?2, updated_at=?2
+         WHERE id=?3",
+        params![status, timestamp, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    load_session(&conn, session_id)
 }
 
 fn prepare_task(
@@ -674,11 +798,11 @@ fn prepare_task(
             return Err("OBJECT_NOT_FOUND: 可分析的用户 ChangeSet 不存在或没有修改".into());
         }
     }
-    let session_project: String = tx
+    let (session_project, runtime_session_id): (String, Option<String>) = tx
         .query_row(
-            "SELECT project_id FROM agent_sessions WHERE id=?1 AND status='active'",
+            "SELECT project_id, runtime_session_id FROM agent_sessions WHERE id=?1 AND status='active' AND session_status='active'",
             [&input.session_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在或已关闭".to_string())?;
     if session_project != project_id {
@@ -690,11 +814,11 @@ fn prepare_task(
         params![input.request_id, input.session_id, input.message, timestamp],
     ).map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO agent_tasks (id, session_id, task_type, interaction_mode, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'context_building', ?10, ?11, ?12)",
+        "INSERT INTO agent_tasks (id, session_id, task_type, interaction_mode, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, base_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 'context_building', ?10, ?11, ?12)",
         params![task_id, input.session_id, route.task_type, input.mode, route.expert_type.as_deref().unwrap_or("main"), serde_json::to_string(&input.selection).map_err(|e| e.to_string())?, serde_json::to_string(&input.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&input.write_scope).map_err(|e| e.to_string())?, revision, input.provider, input.model, timestamp],
     ).map_err(|e| e.to_string())?;
     tx.execute(
-        "UPDATE agent_sessions SET updated_at=?1 WHERE id=?2",
+        "UPDATE agent_sessions SET last_active_at=?1, updated_at=?1 WHERE id=?2",
         params![timestamp, input.session_id],
     )
     .map_err(|e| e.to_string())?;
@@ -757,7 +881,15 @@ fn prepare_task(
         params![provider, model, task_id],
     )
     .map_err(|e| e.to_string())?;
-    let working_memory = session_working_memory(&conn, &input.session_id, &input.request_id)?;
+    let working_memory = if use_pi_sdk_runtime() {
+        None
+    } else {
+        Some(session_working_memory(
+            &conn,
+            &input.session_id,
+            &input.request_id,
+        )?)
+    };
     let attachments = if is_change_analysis {
         Vec::new()
     } else {
@@ -772,7 +904,7 @@ fn prepare_task(
             &input.message,
             &input.write_scope,
             &package,
-            Some(&working_memory),
+            working_memory.as_ref(),
         )?
     };
     if !attachments.is_empty() {
@@ -796,6 +928,7 @@ fn prepare_task(
         runtime_input: Some(RuntimeTaskInput {
             task_id: Some(task_id),
             session_id: Some(input.session_id),
+            runtime_session_id,
             prompt,
             provider,
             model,
@@ -1389,12 +1522,69 @@ fn mark_change_analysis_stale(conn: &rusqlite::Connection, task_id: &str) -> App
     Ok(())
 }
 
+fn bind_runtime_session(
+    project_path: &Path,
+    session_id: &str,
+    task_id: &str,
+    runtime_session_id: &str,
+) -> AppResult<()> {
+    let mut conn = open_database(project_path)?;
+    let current: Option<String> = conn
+        .query_row(
+            "SELECT runtime_session_id FROM agent_sessions WHERE id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在".to_string())?;
+    if current
+        .as_deref()
+        .is_some_and(|value| value != runtime_session_id)
+    {
+        return Err("SESSION_MAPPING_CONFLICT: Pi Session 映射不一致".into());
+    }
+    let timestamp = now();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions
+         SET runtime_session_id=?1, last_active_at=?2, updated_at=?2
+         WHERE id=?3",
+        params![runtime_session_id, timestamp, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_tasks SET pi_session_id=?1 WHERE id=?2 AND session_id=?3",
+        params![runtime_session_id, task_id, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 fn load_session(conn: &rusqlite::Connection, session_id: &str) -> AppResult<AgentSession> {
     conn.query_row(
-        "SELECT id, project_id, scope_type, scope_id, title, status, created_at, updated_at FROM agent_sessions WHERE id=?1",
+        "SELECT id, project_id, scope_type, scope_id, title, session_status,
+                runtime_session_id, session_kind, parent_session_id, expert_type,
+                COALESCE(last_active_at, updated_at), created_at, updated_at
+         FROM agent_sessions WHERE id=?1",
         [session_id],
-        |row| Ok(AgentSession { id: row.get(0)?, project_id: row.get(1)?, scope_type: row.get(2)?, scope_id: row.get(3)?, title: row.get(4)?, status: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)? }),
-    ).map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在".into())
+        |row| {
+            Ok(AgentSession {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                scope_type: row.get(2)?,
+                scope_id: row.get(3)?,
+                title: row.get(4)?,
+                status: row.get(5)?,
+                runtime_session_id: row.get(6)?,
+                session_kind: row.get(7)?,
+                parent_session_id: row.get(8)?,
+                expert_type: row.get(9)?,
+                last_active_at: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
+            })
+        },
+    )
+    .map_err(|_| "OBJECT_NOT_FOUND: AgentSession 不存在".into())
 }
 
 fn load_task(conn: &rusqlite::Connection, task_id: &str) -> AppResult<AgentTask> {
@@ -1546,6 +1736,78 @@ mod tests {
         });
         assert_eq!(ambiguous.task_type, "clarify");
         assert!(ambiguous.clarification_question.is_some());
+    }
+
+    #[test]
+    fn persists_main_session_mapping_and_lifecycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "会话测试", "short").unwrap();
+        let session = create_session(
+            temp.path(),
+            CreateSessionInput {
+                request_id: "main-session".into(),
+                project_id: project.id,
+                scope_type: "project".into(),
+                scope_id: None,
+                title: "第一次讨论".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(session.status, "active");
+        assert_eq!(session.session_kind, "main");
+        assert_eq!(list_sessions(temp.path()).unwrap().len(), 1);
+
+        let conn = open_database(temp.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks
+             (id, session_id, task_type, interaction_mode, agent_type, selection_json,
+              read_scope_json, write_scope_json, context_revision, status, created_at)
+             VALUES ('task', ?1, 'discussion', 'discussion', 'main', '{}', '[]', '{}', 0, 'completed', ?2)",
+            params![session.id, now()],
+        )
+        .unwrap();
+        drop(conn);
+
+        bind_runtime_session(temp.path(), &session.id, "task", "pi-session").unwrap();
+        let mapped = list_sessions(temp.path()).unwrap().remove(0);
+        assert_eq!(mapped.runtime_session_id.as_deref(), Some("pi-session"));
+        assert!(bind_runtime_session(temp.path(), &session.id, "task", "other-session").is_err());
+
+        let closed = update_session_status(temp.path(), &session.id, "closed").unwrap();
+        assert_eq!(closed.status, "closed");
+        let resumed = update_session_status(temp.path(), &session.id, "active").unwrap();
+        assert_eq!(resumed.status, "active");
+        assert_eq!(resumed.runtime_session_id.as_deref(), Some("pi-session"));
+    }
+
+    #[test]
+    fn refuses_to_close_a_busy_main_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "忙碌会话", "short").unwrap();
+        let session = create_session(
+            temp.path(),
+            CreateSessionInput {
+                request_id: "busy-session".into(),
+                project_id: project.id,
+                scope_type: "project".into(),
+                scope_id: None,
+                title: "运行中讨论".into(),
+            },
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        conn.execute(
+            "INSERT INTO agent_tasks
+             (id, session_id, task_type, interaction_mode, agent_type, selection_json,
+              read_scope_json, write_scope_json, context_revision, status, created_at)
+             VALUES ('running-task', ?1, 'discussion', 'discussion', 'main', '{}', '[]', '{}', 0, 'running', ?2)",
+            params![session.id, now()],
+        )
+        .unwrap();
+        drop(conn);
+        assert!(ensure_session_can_close(temp.path(), &session.id)
+            .unwrap_err()
+            .starts_with("SESSION_BUSY"));
     }
 
     #[test]

@@ -1,8 +1,12 @@
 export interface RuntimeTaskInput {
   taskId?: string;
+  sessionId?: string;
+  runtimeSessionId?: string;
   prompt: string;
   provider?: string;
   model?: string;
+  systemPrompt?: string;
+  thinkingLevel?: string;
   attachments?: RuntimeAttachment[];
 }
 
@@ -14,6 +18,7 @@ export interface RuntimeAttachment {
 
 export interface RuntimeTaskHandle {
   taskId: string;
+  runtimeSessionId?: string;
 }
 
 export interface RuntimeDiagnostics {
@@ -42,6 +47,7 @@ export type RuntimeEvent =
 export interface AgentRuntime {
   startTask(input: RuntimeTaskInput): Promise<RuntimeTaskHandle>;
   sendUserInput(taskId: string, input: string): Promise<void>;
+  followUp(taskId: string, input: string): Promise<void>;
   cancelTask(taskId: string): Promise<void>;
   getTaskState(taskId: string): Promise<RuntimeTaskState>;
   dispose(): Promise<void>;

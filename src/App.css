@@ -157,7 +157,7 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 
 /* Agent workspace */
 .agent-inspector { height: calc(100% - 54px); min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr); padding: 0; overflow: hidden; }
-.agent-panel { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto auto minmax(0,1fr) auto; }
+.agent-panel { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto auto auto minmax(0,1fr) auto; }
 .memory-enable { min-height: 47px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
 .memory-enable > svg { color: var(--accent); }
 .memory-enable > span { display: grid; gap: 2px; }
@@ -201,6 +201,9 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .agent-enable { display: grid; justify-items: start; gap: 9px; }
 .agent-enable p { margin: 0; line-height: 1.6; }
 .agent-enable small { line-height: 1.5; }
+.agent-session-row { min-height: 36px; display: grid; grid-template-columns: minmax(0,1fr) auto auto; align-items: center; gap: 5px; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+.agent-session-row select { min-width: 0; height: 26px; padding: 0 6px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; font-size: 9px; }
+.agent-session-row button { min-height: 26px; padding: 0 7px; font-size: 8px; }
 .agent-context-strip { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; padding: 1px; background: var(--line); border-bottom: 1px solid var(--line); }
 .agent-context-strip > div { min-width: 0; display: grid; gap: 3px; padding: 8px 10px; background: var(--surface-2); }
 .agent-context-strip > div:first-child { grid-column: 1/-1; }

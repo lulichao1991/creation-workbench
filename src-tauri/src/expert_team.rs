@@ -455,6 +455,7 @@ fn prepare_member_tasks(
             input: RuntimeTaskInput {
                 task_id: Some(task_id.clone()),
                 session_id: Some(task_id),
+                runtime_session_id: None,
                 prompt,
                 provider,
                 model,
@@ -755,6 +756,7 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
     Ok(Some(RuntimeTaskInput {
         task_id: Some(synthesis_task_id),
         session_id: Some(session_id),
+        runtime_session_id: None,
         prompt,
         provider,
         model,
