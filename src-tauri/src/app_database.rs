@@ -7,7 +7,7 @@ use tauri::Manager;
 
 use crate::database::AppResult;
 
-pub const APP_SCHEMA_VERSION: i64 = 5;
+pub const APP_SCHEMA_VERSION: i64 = 6;
 pub const FEATURE_FLAG_KEYS: &[&str] = &[
     "agent_core",
     "expert_agents",
@@ -149,6 +149,10 @@ fn migrate_app_database(
         tx.execute_batch(MIGRATION_V5)
             .map_err(|e| format!("迁移 app.db 到版本 5 失败：{e}"))?;
     }
+    if version < 6 {
+        tx.execute_batch(MIGRATION_V6)
+            .map_err(|e| format!("迁移 app.db 到版本 6 失败：{e}"))?;
+    }
     verify_app_database(&tx)?;
     tx.pragma_update(None, "user_version", APP_SCHEMA_VERSION)
         .map_err(|e| format!("更新 app.db 版本失败：{e}"))?;
@@ -283,6 +287,11 @@ const MIGRATION_V5: &str = r#"
 ALTER TABLE long_term_memories ADD COLUMN memory_key TEXT;
 CREATE INDEX IF NOT EXISTS idx_long_term_memories_conflict_key
 ON long_term_memories(scope_type, scope_id, category, memory_key, status, updated_at);
+"#;
+
+const MIGRATION_V6: &str = r#"
+ALTER TABLE provider_configs ADD COLUMN text_to_image_path TEXT NOT NULL DEFAULT '/images/generations';
+ALTER TABLE provider_configs ADD COLUMN image_edit_path TEXT NOT NULL DEFAULT '/images/edits';
 "#;
 
 #[cfg(test)]

@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import "./App.css";
 import { ProjectHome } from "./components/ProjectHome";
 import { Workbench } from "./components/Workbench";
+import { SettingsCenter } from "./components/SettingsCenter";
+import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { useSelectionStore } from "./stores/selectionStore";
 import { toUserErrorMessage } from "./domain/userError";
 import type {
@@ -19,18 +21,41 @@ function App() {
   const [projects, setProjects] = useState<ProjectDescriptor[]>([]);
   const [activeProject, setActiveProject] = useState<ProjectDescriptor | null>(null);
   const [state, setState] = useState<ProjectState | null>(null);
-  const [busy, setBusy] = useState(true);
+  const [pendingOperations, setPendingOperations] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [activeChangeSetId, setActiveChangeSetId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(() => localStorage.getItem("workbench.onboardingComplete") !== "true");
   const clearSelection = useSelectionStore((selection) => selection.clear);
   const saveState = useSelectionStore((selection) => selection.saveState);
+  const errorTimerRef = useRef<number | null>(null);
+  const busy = pendingOperations > 0;
+
+  const beginOperation = useCallback(() => setPendingOperations((count) => count + 1), []);
+  const endOperation = useCallback(() => setPendingOperations((count) => Math.max(0, count - 1)), []);
+  const dismissError = useCallback(() => {
+    if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+    errorTimerRef.current = null;
+    setError(null);
+  }, []);
+  const handleError = useCallback((reason: unknown) => {
+    if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+    setError(toUserErrorMessage(reason));
+    errorTimerRef.current = window.setTimeout(() => {
+      errorTimerRef.current = null;
+      setError(null);
+    }, 7000);
+  }, []);
 
   useEffect(() => {
     void initialize();
+    return () => {
+      if (errorTimerRef.current !== null) window.clearTimeout(errorTimerRef.current);
+    };
   }, []);
 
   const initialize = async () => {
-    setBusy(true);
+    beginOperation();
     try {
       const info = await api.getDefaultWorkspace();
       const savedRoot = localStorage.getItem("workbench.projectRoot") || info.defaultPath;
@@ -39,7 +64,7 @@ function App() {
     } catch (reason) {
       handleError(reason);
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
@@ -69,7 +94,7 @@ function App() {
   };
 
   const changeRoot = async (path: string) => {
-    setBusy(true);
+    beginOperation();
     try {
       localStorage.setItem("workbench.projectRoot", path);
       setRootPath(path);
@@ -77,26 +102,28 @@ function App() {
     } catch (reason) {
       handleError(reason);
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const createProject = async (name: string, structureType: string) => {
-    setBusy(true);
+    beginOperation();
     try {
       const project = await api.createProject(rootPath, name, structureType);
       await seedStructure(project, structureType);
       await refreshProjects();
       await openProject(project);
+      return true;
     } catch (reason) {
       handleError(reason);
+      return false;
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const openProject = async (projectOrPath: ProjectDescriptor | string) => {
-    setBusy(true);
+    beginOperation();
     try {
       const project =
         typeof projectOrPath === "string"
@@ -110,37 +137,37 @@ function App() {
     } catch (reason) {
       handleError(reason);
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const copyProject = async (project: ProjectDescriptor, name: string) => {
-    setBusy(true);
+    beginOperation();
     try {
       await api.copyProject(project.path, name);
       await refreshProjects();
     } catch (reason) {
       handleError(reason);
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const deleteProject = async (project: ProjectDescriptor) => {
-    setBusy(true);
+    beginOperation();
     try {
       await api.deleteProject(project.path);
       await refreshProjects();
     } catch (reason) {
       handleError(reason);
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const mutate = async (request: MutationRequest): Promise<MutationResponse> => {
     if (!activeProject) throw new Error("没有打开的项目");
-    setBusy(true);
+    beginOperation();
     try {
       const result = await api.mutate(activeProject.path, {
         ...request,
@@ -153,13 +180,13 @@ function App() {
       handleError(reason);
       throw reason;
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
   const mutateBatch = async (request: BatchMutationRequest): Promise<BatchMutationResponse> => {
     if (!activeProject) throw new Error("没有打开的项目");
-    setBusy(true);
+    beginOperation();
     try {
       const result = await api.mutateBatch(activeProject.path, {
         ...request,
@@ -172,13 +199,23 @@ function App() {
       handleError(reason);
       throw reason;
     } finally {
-      setBusy(false);
+      endOperation();
     }
   };
 
-  const handleError = (reason: unknown) => {
-    setError(toUserErrorMessage(reason));
-    window.setTimeout(() => setError(null), 7000);
+  const undoChangeSet = async (changeSetId: string) => {
+    if (!activeProject) throw new Error("没有打开的项目");
+    beginOperation();
+    try {
+      setActiveChangeSetId(null);
+      await api.undoChangeSet(activeProject.path, changeSetId);
+      await refreshState(activeProject);
+    } catch (reason) {
+      handleError(reason);
+      throw reason;
+    } finally {
+      endOperation();
+    }
   };
 
   return (
@@ -198,6 +235,8 @@ function App() {
           }}
           onMutate={mutate}
           onMutateBatch={mutateBatch}
+          onUndo={undoChangeSet}
+          onOpenSettings={() => setSettingsOpen(true)}
           onRefresh={() => refreshState(activeProject)}
           onError={handleError}
           activeChangeSetId={activeChangeSetId}
@@ -213,14 +252,17 @@ function App() {
           onOpen={openProject}
           onCopy={copyProject}
           onDelete={deleteProject}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
       )}
+      {settingsOpen && <SettingsCenter rootPath={rootPath} disabled={busy} onRootChange={changeRoot} onClose={() => setSettingsOpen(false)} onError={handleError} onRestartOnboarding={() => { localStorage.removeItem("workbench.onboardingComplete"); setSettingsOpen(false); setOnboardingOpen(true); }} />}
+      {onboardingOpen && !settingsOpen && <FirstRunOnboarding rootPath={rootPath} disabled={busy} onRootChange={changeRoot} onOpenSettings={() => setSettingsOpen(true)} onError={handleError} onComplete={() => { localStorage.setItem("workbench.onboardingComplete", "true"); setOnboardingOpen(false); }} />}
       {busy && <div className="busy-bar" />}
       {error && (
         <div className="toast error-toast">
           <strong>操作未完成</strong>
           <span>{error}</span>
-          <button onClick={() => setError(null)}>×</button>
+          <button onClick={dismissError}>×</button>
         </div>
       )}
     </>

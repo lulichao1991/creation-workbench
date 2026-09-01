@@ -18,6 +18,7 @@ import type {
   RuntimeTaskInput,
   RuntimeTaskState,
   RuntimeDiagnostics,
+  ProviderConnectionTest,
   AgentModelConfiguration,
   AgentModelSettings,
 } from "./features/agent/runtime";
@@ -33,6 +34,7 @@ import type {
   ImageResult,
   ImageSelectionState,
   ProviderConfig,
+  ProviderTestResult,
   SaveProviderInput,
   SelectImageResult,
 } from "./services/imageGeneration";
@@ -59,6 +61,7 @@ import type {
   BatchMutationResponse,
   ProjectDescriptor,
   ProjectState,
+  SnapshotDetail,
   SaveGraphLayoutInput,
 } from "./types";
 
@@ -104,6 +107,7 @@ export const api = {
   agentGetTaskState: (taskId: string) =>
     invoke<RuntimeTaskState>("agent_get_task_state", { taskId }),
   agentRuntimeDoctor: () => invoke<RuntimeDiagnostics>("agent_runtime_doctor"),
+  agentProviderTest: (providerId: string) => invoke<ProviderConnectionTest>("agent_provider_test", { providerId }),
   agentModelSettingsGet: () => invoke<AgentModelConfiguration>("agent_model_settings_get"),
   agentModelSettingsSave: (settings: AgentModelSettings) =>
     invoke<AgentModelSettings>("agent_model_settings_save", { settings }),
@@ -126,12 +130,15 @@ export const api = {
   providerList: () => invoke<ProviderConfig[]>("provider_list"),
   providerSave: (input: SaveProviderInput) => invoke<ProviderConfig>("provider_save", { input }),
   providerDelete: (providerId: string) => invoke<void>("provider_delete", { providerId }),
+  providerTest: (providerId: string) => invoke<ProviderTestResult>("provider_test", { providerId }),
   imageGenerate: (projectPath: string, input: GenerateImageInput) =>
     invoke<ImageJob>("image_generate", { projectPath, input }),
   imageGetJob: (projectPath: string, jobId: string) =>
     invoke<ImageJob>("image_get_job", { projectPath, jobId }),
   imageListJobs: (projectPath: string, targetType: GenerateImageInput["targetType"], targetId: string) =>
     invoke<ImageJob[]>("image_list_jobs", { projectPath, targetType, targetId }),
+  imageListRecentJobs: (projectPath: string, limit = 40) =>
+    invoke<ImageJob[]>("image_list_recent_jobs", { projectPath, limit }),
   imageCancel: (projectPath: string, jobId: string) =>
     invoke<ImageJob>("image_cancel", { projectPath, jobId }),
   imageSelectResult: (projectPath: string, resultId: string) =>
@@ -180,6 +187,8 @@ export const api = {
     invoke<ProjectDescriptor>("copy_project", { projectPath, newName }),
   deleteProject: (projectPath: string) =>
     invoke<void>("delete_project", { projectPath }),
+  exportProductionPackage: (projectPath: string, generationTaskId?: string) =>
+    invoke<{ directory: string; fileCount: number; warnings: string[] }>("export_production_package", { projectPath, generationTaskId }),
   loadProjectState: (projectPath: string) =>
     invoke<ProjectState>("load_project_state", { projectPath }),
   mutate: (projectPath: string, request: MutationRequest) =>
@@ -199,6 +208,8 @@ export const api = {
       name,
       description,
     }),
+  getSnapshot: (projectPath: string, snapshotId: string) =>
+    invoke<SnapshotDetail>("get_snapshot", { projectPath, snapshotId }),
   restoreSnapshot: (projectPath: string, snapshotId: string) =>
     invoke<number>("restore_snapshot", { projectPath, snapshotId }),
   importProjectFile: (

@@ -36,37 +36,62 @@ type Request =
 const DialogContext = createContext<DialogApi | null>(null);
 
 export function AppDialogProvider({ children }: { children: ReactNode }) {
-  const [request, setRequest] = useState<Request | null>(null);
+  const [requests, setRequests] = useState<Request[]>([]);
   const [value, setValue] = useState("");
   const fieldRef = useRef<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>(null);
   const dialogRef = useRef<HTMLElement | null>(null);
+  const requestsRef = useRef<Request[]>([]);
+  const request = requests[0] ?? null;
+
+  const enqueue = useCallback((next: Request) => {
+    requestsRef.current = [...requestsRef.current, next];
+    setRequests(requestsRef.current);
+  }, []);
+  const dequeue = useCallback(() => {
+    requestsRef.current = requestsRef.current.slice(1);
+    setRequests(requestsRef.current);
+  }, []);
 
   const prompt = useCallback<DialogApi["prompt"]>((title, options = {}) => new Promise((resolve) => {
-    setValue(options.defaultValue ?? options.options?.[0]?.value ?? "");
-    setRequest({ kind: "prompt", title, options, resolve });
-  }), []);
+    enqueue({ kind: "prompt", title, options, resolve });
+  }), [enqueue]);
   const confirm = useCallback<DialogApi["confirm"]>((message, options = {}) => new Promise((resolve) => {
-    setRequest({ kind: "confirm", message, options, resolve });
-  }), []);
+    enqueue({ kind: "confirm", message, options, resolve });
+  }), [enqueue]);
   const alert = useCallback<DialogApi["alert"]>((message, title = "提示") => new Promise((resolve) => {
-    setRequest({ kind: "alert", message, title, resolve });
-  }), []);
+    enqueue({ kind: "alert", message, title, resolve });
+  }), [enqueue]);
 
   const cancel = useCallback(() => {
     if (!request) return;
     if (request.kind === "prompt") request.resolve(null);
     else if (request.kind === "confirm") request.resolve(false);
     else request.resolve();
-    setRequest(null);
-  }, [request]);
+    dequeue();
+  }, [request, dequeue]);
 
   const submit = useCallback(() => {
     if (!request) return;
     if (request.kind === "prompt") request.resolve(value.trim());
     else if (request.kind === "confirm") request.resolve(true);
     else request.resolve();
-    setRequest(null);
-  }, [request, value]);
+    dequeue();
+  }, [request, value, dequeue]);
+
+  useEffect(() => {
+    if (request?.kind === "prompt") {
+      setValue(request.options.defaultValue ?? request.options.options?.[0]?.value ?? "");
+    }
+  }, [request]);
+
+  useEffect(() => () => {
+    for (const pending of requestsRef.current) {
+      if (pending.kind === "prompt") pending.resolve(null);
+      else if (pending.kind === "confirm") pending.resolve(false);
+      else pending.resolve();
+    }
+    requestsRef.current = [];
+  }, []);
 
   useEffect(() => {
     if (!request) return;

@@ -15,6 +15,8 @@ export interface ProviderConfig {
   providerType: "openai_compatible" | "mock";
   displayName: string;
   baseUrl: string;
+  textToImagePath: string;
+  imageEditPath: string;
   defaultModel: string;
   capabilities: Record<string, boolean>;
   timeoutSeconds: number;
@@ -31,11 +33,18 @@ export interface SaveProviderInput {
   providerType: ProviderConfig["providerType"];
   displayName: string;
   baseUrl: string;
+  textToImagePath?: string;
+  imageEditPath?: string;
   defaultModel: string;
   apiKey?: string;
   timeoutSeconds?: number;
   maxConcurrency?: number;
   allowImageUpload?: boolean;
+}
+
+export interface ProviderTestResult {
+  healthy: boolean;
+  message: string;
 }
 
 export interface ImageOptions {
@@ -106,4 +115,5 @@ export const terminalImageStatuses = new Set<ImageJobStatus>([
   "partial",
   "cancelled",
   "failed",
+  "interrupted",
 ]);

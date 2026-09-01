@@ -25,26 +25,27 @@ use agent_models::{
     agent_provider_logout,
 };
 use agent_runtime::{
-    agent_cancel_task, agent_get_task_state, agent_runtime_doctor, agent_runtime_follow_up,
-    agent_runtime_send_input, agent_runtime_start_readonly, RuntimeState,
+    agent_cancel_task, agent_get_task_state, agent_provider_test, agent_runtime_doctor,
+    agent_runtime_follow_up, agent_runtime_send_input, agent_runtime_start_readonly, RuntimeState,
 };
 use app_database::{get_feature_flags, set_feature_flag};
 use commands::{
-    cleanup_project_media, copy_project, create_project, delete_project, get_default_workspace,
-    import_project_file, list_projects, load_project_state, open_project, read_project_media,
+    cleanup_project_media, copy_project, create_project, delete_project, export_production_package,
+    get_default_workspace, import_project_file, list_projects, load_project_state, open_project,
+    read_project_media,
 };
 use context::{context_build, context_search};
 use expert_team::{
     expert_team_cancel, expert_team_confirm, expert_team_get, expert_team_list, expert_team_request,
 };
 use image_generation::{
-    image_cancel, image_generate, image_get_job, image_list_jobs, image_select_result,
-    image_update_result_state, ImageGenerationState,
+    image_cancel, image_generate, image_get_job, image_list_jobs, image_list_recent_jobs,
+    image_select_result, image_update_result_state, ImageGenerationState,
 };
 use memory::{memory_create, memory_invalidate, memory_list, memory_update};
 use mutation::{
-    apply_batch_mutation, apply_mutation, create_snapshot, list_history, restore_snapshot,
-    undo_change_set,
+    apply_batch_mutation, apply_mutation, create_snapshot, get_snapshot, list_history,
+    restore_snapshot, undo_change_set,
 };
 use permission::{
     card_create, card_get, card_list, card_resolve, patch_apply, patch_get, patch_propose,
@@ -54,7 +55,7 @@ use prompt_compiler::{
     prompt_compile, prompt_list_compilations, prompt_list_profiles, prompt_list_templates,
     prompt_save_profile, prompt_save_template, prompt_set_current,
 };
-use provider::{provider_delete, provider_list, provider_save};
+use provider::{provider_delete, provider_list, provider_save, provider_test};
 use story_structure::{graph_layout_reset, graph_layout_save};
 use tauri::Manager;
 
@@ -94,6 +95,7 @@ pub fn run() {
             expert_team_cancel,
             agent_runtime_start_readonly,
             agent_runtime_doctor,
+            agent_provider_test,
             agent_runtime_send_input,
             agent_runtime_follow_up,
             agent_cancel_task,
@@ -111,6 +113,7 @@ pub fn run() {
             provider_list,
             provider_save,
             provider_delete,
+            provider_test,
             prompt_list_profiles,
             prompt_save_profile,
             prompt_list_templates,
@@ -121,6 +124,7 @@ pub fn run() {
             image_generate,
             image_get_job,
             image_list_jobs,
+            image_list_recent_jobs,
             image_cancel,
             image_select_result,
             image_update_result_state,
@@ -138,6 +142,7 @@ pub fn run() {
             open_project,
             copy_project,
             delete_project,
+            export_production_package,
             load_project_state,
             import_project_file,
             read_project_media,
@@ -147,6 +152,7 @@ pub fn run() {
             list_history,
             undo_change_set,
             create_snapshot,
+            get_snapshot,
             restore_snapshot,
             graph_layout_save,
             graph_layout_reset,

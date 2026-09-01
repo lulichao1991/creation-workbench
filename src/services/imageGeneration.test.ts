@@ -6,6 +6,8 @@ const provider = (providerType: ProviderConfig["providerType"]): ProviderConfig 
   providerType,
   displayName: providerType === "mock" ? "Mock Provider" : "OpenAI",
   baseUrl: "https://api.openai.com/v1",
+  textToImagePath: "/images/generations",
+  imageEditPath: "/images/edits",
   defaultModel: "gpt-image-1",
   capabilities: {},
   timeoutSeconds: 120,

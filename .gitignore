@@ -16,7 +16,8 @@ dist-ssr
 /portable/
 /*.zip
 /*.exe
-/src-tauri/resources/agent-host/node.exe
+/agent-host-runtime/
+/src-tauri/resources/agent-host/
 
 # Editor directories and files
 .vscode/*

@@ -1,5 +1,6 @@
 use crate::database::{
-    new_id, now, open_database, query_table_json, row_by_id, AppResult, BUSINESS_TABLES,
+    new_id, now, open_database, query_snapshot_list, query_table_json, row_by_id, AppResult,
+    BUSINESS_TABLES,
 };
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Transaction};
@@ -1012,8 +1013,14 @@ pub fn list_history(project_path: String) -> AppResult<Value> {
     Ok(json!({
         "changeSets": query_table_json(&conn, "change_sets")?,
         "changes": query_table_json(&conn, "changes")?,
-        "snapshots": query_table_json(&conn, "snapshots")?,
+        "snapshots": query_snapshot_list(&conn)?,
     }))
+}
+
+#[tauri::command]
+pub fn get_snapshot(project_path: String, snapshot_id: String) -> AppResult<Value> {
+    let conn = open_database(Path::new(&project_path))?;
+    row_by_id(&conn, "snapshots", &snapshot_id)?.ok_or_else(|| "快照不存在".to_string())
 }
 
 #[tauri::command]

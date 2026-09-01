@@ -13,8 +13,8 @@ use host::PiSdkRuntimeAdapter;
 use runtime::AgentRuntime;
 
 pub use runtime::{
-    AgentModelCatalog, RuntimeAttachment, RuntimeDiagnostics, RuntimeTaskHandle, RuntimeTaskInput,
-    RuntimeTaskState,
+    AgentModelCatalog, ProviderConnectionTest, RuntimeAttachment, RuntimeDiagnostics,
+    RuntimeTaskHandle, RuntimeTaskInput, RuntimeTaskState,
 };
 pub(crate) use runtime::{RuntimeEvent, RuntimeEventSink};
 
@@ -86,6 +86,13 @@ impl RuntimeState {
             .lock()
             .map_err(|_| "Runtime 状态锁损坏".to_string())?
             .logout_provider(provider_id)
+    }
+
+    pub(crate) fn test_provider(&self, provider_id: &str) -> AppResult<ProviderConnectionTest> {
+        self.runtime
+            .lock()
+            .map_err(|_| "Runtime 状态锁损坏".to_string())?
+            .test_provider(provider_id)
     }
 
     pub(crate) fn doctor(&self) -> AppResult<RuntimeDiagnostics> {
@@ -185,6 +192,20 @@ pub fn agent_runtime_doctor(
         .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
     crate::agent_models::restore_agent_credentials(&app_data_dir, &state)?;
     state.doctor()
+}
+
+#[tauri::command]
+pub fn agent_provider_test(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RuntimeState>,
+    provider_id: String,
+) -> AppResult<ProviderConnectionTest> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("读取应用数据目录失败：{error}"))?;
+    crate::agent_models::restore_agent_credentials(&app_data_dir, &state)?;
+    state.test_provider(&provider_id)
 }
 
 pub(crate) fn ensure_agent_core_enabled(app: &tauri::AppHandle) -> AppResult<()> {

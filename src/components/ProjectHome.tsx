@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { ArrowUpRight, Copy, Film, FolderCog, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { ArrowUpRight, Copy, Film, FolderCog, FolderOpen, Plus, Settings2, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ProjectDescriptor } from "../types";
 import { useAppDialog } from "./AppDialog";
@@ -9,10 +9,11 @@ interface Props {
   projects: ProjectDescriptor[];
   busy: boolean;
   onRootChange: (path: string) => Promise<void>;
-  onCreate: (name: string, structureType: string) => Promise<void>;
+  onCreate: (name: string, structureType: string) => Promise<boolean>;
   onOpen: (project: ProjectDescriptor | string) => Promise<void>;
   onCopy: (project: ProjectDescriptor, name: string) => Promise<void>;
   onDelete: (project: ProjectDescriptor) => Promise<void>;
+  onOpenSettings: () => void;
 }
 
 const structureOptions = [
@@ -32,6 +33,7 @@ export function ProjectHome({
   onOpen,
   onCopy,
   onDelete,
+  onOpenSettings,
 }: Props) {
   const [name, setName] = useState("");
   const [structureType, setStructureType] = useState("single-season");
@@ -57,9 +59,7 @@ export function ProjectHome({
             <small>本地创作系统</small>
           </div>
         </div>
-        <button className="secondary" onClick={chooseProject} disabled={busy}>
-          <FolderOpen size={16} />打开其他项目
-        </button>
+        <div className="heading-actions"><button className="ghost" onClick={onOpenSettings}><Settings2 size={16} />全局设置</button><button className="secondary" onClick={chooseProject} disabled={busy}><FolderOpen size={16} />打开其他项目</button></div>
       </header>
 
       <section className="home-hero">
@@ -90,7 +90,7 @@ export function ProjectHome({
           placeholder="项目名称，例如：智斗游戏"
           onKeyDown={(event) => {
             if (event.key === "Enter" && name.trim()) {
-              void onCreate(name, structureType).then(() => setName(""));
+              void onCreate(name, structureType).then((created) => created && setName(""));
             }
           }}
         />
@@ -105,7 +105,7 @@ export function ProjectHome({
           className="primary"
           disabled={busy || !name.trim()}
           title={busy ? "正在处理上一项操作" : name.trim() ? "创建并打开项目" : "请先输入项目名称"}
-          onClick={() => void onCreate(name, structureType).then(() => setName(""))}
+          onClick={() => void onCreate(name, structureType).then((created) => created && setName(""))}
         >
           <Plus size={17} />创建项目
         </button>

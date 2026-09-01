@@ -323,8 +323,11 @@ export interface SnapshotRow {
   name: string;
   description: string;
   revision: number;
-  snapshot_json: string;
   created_at: string;
+}
+
+export interface SnapshotDetail extends SnapshotRow {
+  snapshot_json: string;
 }
 
 export interface ProjectState {

@@ -44,6 +44,7 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
   const scopeId = currentUnit?.id ?? null;
   const graph = useMemo(() => buildStructureGraph(state, scopeId), [state, scopeId]);
   const issues = useMemo(() => detectStructureIssues(state, scopeId), [state, scopeId]);
+  const storedLayout = state.graphLayouts.find((layout) => layout.scope_type === (scopeId ? "contentUnit" : "project") && layout.scope_id === (scopeId ?? project.id) && layout.view_type === view);
   const unpaidIds = new Set(issues.filter((issue) => issue.id.startsWith("unpaid:")).map((issue) => issue.elementId));
   const issueUnitIds = new Set(issues.map((issue) => issue.contentUnitId).filter(Boolean));
 
@@ -52,16 +53,19 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
   }, []);
 
   useEffect(() => {
-    const stored = state.graphLayouts.find((layout) => layout.scope_type === (scopeId ? "contentUnit" : "project") && layout.scope_id === (scopeId ?? project.id) && layout.view_type === view);
-    if (!stored) return;
+    if (!storedLayout) {
+      setFocus("all");
+      setSelectedElementId(null);
+      return;
+    }
     try {
-      const parsed = JSON.parse(stored.filter_json) as { focus?: FocusMode; selectedElementId?: string | null };
+      const parsed = JSON.parse(storedLayout.filter_json) as { focus?: FocusMode; selectedElementId?: string | null };
       if (parsed.focus) setFocus(parsed.focus);
       setSelectedElementId(parsed.selectedElementId ?? null);
     } catch {
       // Invalid legacy layout should not block the creative facts.
     }
-  }, [scopeId, project.id, state.graphLayouts, view]);
+  }, [scopeId, project.id, view, storedLayout?.id, storedLayout?.updated_at]);
 
   const visibleElements = graph.elements.filter((element) => {
     if (selectedElementId && element.id !== selectedElementId) return false;

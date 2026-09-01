@@ -373,7 +373,17 @@ pub fn query_table_json(conn: &Connection, table: &str) -> AppResult<Vec<Value>>
     if !STATE_TABLES.contains(&table) {
         return Err(format!("不允许读取数据表：{table}"));
     }
-    let sql = format!("SELECT * FROM {table}");
+    query_json(conn, &format!("SELECT * FROM {table}"))
+}
+
+pub fn query_snapshot_list(conn: &Connection) -> AppResult<Vec<Value>> {
+    query_json(
+        conn,
+        "SELECT id, project_id, scope_type, scope_id, name, description, revision, created_at FROM snapshots ORDER BY created_at",
+    )
+}
+
+fn query_json(conn: &Connection, sql: &str) -> AppResult<Vec<Value>> {
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let rows = stmt
@@ -424,7 +434,12 @@ pub fn project_state(conn: &Connection) -> AppResult<Value> {
     let mut state = Map::new();
     for table in STATE_TABLES {
         let key = snake_to_camel(table);
-        state.insert(key, Value::Array(query_table_json(conn, table)?));
+        let rows = if *table == "snapshots" {
+            query_snapshot_list(conn)?
+        } else {
+            query_table_json(conn, table)?
+        };
+        state.insert(key, Value::Array(rows));
     }
     Ok(Value::Object(state))
 }
@@ -1151,6 +1166,28 @@ mod tests {
             assert_eq!(count, 1, "missing Agent index {index}");
         }
         verify_database(&conn).unwrap();
+    }
+
+    #[test]
+    fn project_state_lists_snapshot_metadata_without_snapshot_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "快照项目", "short").unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        conn.execute(
+            "INSERT INTO snapshots (id, project_id, scope_type, name, description, revision, snapshot_json, created_at) VALUES ('snapshot', ?1, 'project', '第一版', '', 0, ?2, ?3)",
+            params![project.id, r#"{"shots":[{"id":"must-not-load"}]}"#, now()],
+        )
+        .unwrap();
+
+        let state = project_state(&conn).unwrap();
+        let summary = &state["snapshots"][0];
+        assert_eq!(summary["name"], "第一版");
+        assert!(summary.get("snapshot_json").is_none());
+        assert!(row_by_id(&conn, "snapshots", "snapshot")
+            .unwrap()
+            .unwrap()
+            .get("snapshot_json")
+            .is_some());
     }
 
     #[test]

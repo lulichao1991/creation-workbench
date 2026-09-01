@@ -11,9 +11,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::Manager;
+
+static IMAGE_HTTP_CLIENT: OnceLock<Client> = OnceLock::new();
+static IMAGE_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
 
 #[derive(Clone, Default)]
 pub struct ImageGenerationState {
@@ -135,14 +138,11 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
         if cancelled.load(Ordering::SeqCst) {
             return Err("TASK_CANCELLED: 用户已取消生图任务".into());
         }
-        let client = Client::builder()
-            .timeout(Duration::from_secs(self.config.timeout_seconds as u64))
-            .build()
-            .map_err(|e| format!("创建 Provider 客户端失败：{e}"))?;
+        let client = IMAGE_HTTP_CLIENT.get_or_init(Client::new);
         let base_url = self.config.base_url.trim_end_matches('/');
         let request = if references.is_empty() {
             client
-                .post(format!("{base_url}/images/generations"))
+                .post(format!("{base_url}{}", self.config.text_to_image_path))
                 .bearer_auth(&self.secret)
                 .json(&json!({
                     "model": model,
@@ -176,21 +176,27 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
                 form = form.part("image", part);
             }
             client
-                .post(format!("{base_url}/images/edits"))
+                .post(format!("{base_url}{}", self.config.image_edit_path))
                 .bearer_auth(&self.secret)
                 .multipart(form)
-        };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("创建 Provider 异步运行时失败：{e}"))?;
+        }
+        .timeout(Duration::from_secs(self.config.timeout_seconds as u64));
+        let runtime = IMAGE_RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("创建 Provider 异步运行时失败：{e}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
         let (status, value) = runtime.block_on(async {
             let response = tokio::select! {
                 response = request.send() => response.map_err(|e| {
                     if e.is_timeout() {
-                        "PROVIDER_TIMEOUT: 生图请求超时".into()
+                        String::from("PROVIDER_TIMEOUT: 生图请求超时")
                     } else {
-                        format!("PROVIDER_NETWORK_FAILED: {e}")
+                        String::from("PROVIDER_NETWORK_FAILED: 无法连接图片生成服务")
                     }
                 })?,
                 _ = wait_for_cancellation(cancelled) => {
@@ -198,10 +204,12 @@ impl ImageGenerationProvider for OpenAiCompatibleProvider {
                 }
             };
             let status = response.status();
-            let value: Value = response
-                .json()
-                .await
-                .map_err(|e| format!("Provider 返回了无效 JSON：{e}"))?;
+            let value: Value = tokio::select! {
+                value = response.json() => value.map_err(|_| "Provider 返回了无效 JSON".to_string())?,
+                _ = wait_for_cancellation(cancelled) => {
+                    return Err("TASK_CANCELLED: 用户已取消生图任务".into());
+                }
+            };
             Ok::<_, String>((status, value))
         })?;
         if !status.is_success() {
@@ -867,6 +875,25 @@ pub fn image_list_jobs(
 }
 
 #[tauri::command]
+pub fn image_list_recent_jobs(
+    project_path: String,
+    limit: Option<i64>,
+) -> AppResult<Vec<ImageJob>> {
+    let conn = open_database(Path::new(&project_path))?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM image_generation_jobs ORDER BY created_at DESC LIMIT ?1")
+        .map_err(|e| e.to_string())?;
+    let ids = stmt
+        .query_map([limit.unwrap_or(40).clamp(1, 100)], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    ids.iter().map(|id| load_job(&conn, id)).collect()
+}
+
+#[tauri::command]
 pub fn image_cancel(
     state: tauri::State<'_, ImageGenerationState>,
     project_path: String,
@@ -1000,6 +1027,8 @@ mod tests {
                 provider_type: "openai_compatible".into(),
                 display_name: "Local".into(),
                 base_url: format!("http://{address}/v1"),
+                text_to_image_path: "/images/generations".into(),
+                image_edit_path: "/images/edits".into(),
                 default_model: "gpt-image-test".into(),
                 capabilities: json!({"referenceImages":true}),
                 timeout_seconds: 10,

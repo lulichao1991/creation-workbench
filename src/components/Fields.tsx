@@ -12,12 +12,14 @@ interface TextFieldProps {
 
 export function TextField({ label, value, multiline, placeholder, onFocus, onSave }: TextFieldProps) {
   const [draft, setDraft] = useState(value);
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [fieldId] = useState(() => crypto.randomUUID());
   const markFieldDirty = useSelectionStore((state) => state.markFieldDirty);
   const beginFieldSave = useSelectionStore((state) => state.beginFieldSave);
   const finishFieldSave = useSelectionStore((state) => state.finishFieldSave);
-  useEffect(() => setDraft(value), [value]);
+  useEffect(() => { if (!dirty) setDraft(value); }, [value, dirty]);
 
   const save = async () => {
     if (draft === value) {
@@ -26,11 +28,14 @@ export function TextField({ label, value, multiline, placeholder, onFocus, onSav
       return;
     }
     setSaving(true);
+    setFailed(false);
     beginFieldSave(fieldId);
     try {
       await onSave(draft);
+      setDirty(false);
       finishFieldSave(fieldId, true);
     } catch {
+      setFailed(true);
       finishFieldSave(fieldId, false);
     } finally {
       setSaving(false);
@@ -44,7 +49,7 @@ export function TextField({ label, value, multiline, placeholder, onFocus, onSav
         <textarea
           value={draft}
           placeholder={placeholder}
-          onChange={(event) => { setDraft(event.target.value); markFieldDirty(fieldId); }}
+          onChange={(event) => { setDraft(event.target.value); setDirty(true); markFieldDirty(fieldId); }}
           onFocus={onFocus}
           onBlur={() => void save()}
           onKeyDown={(event) => {
@@ -58,7 +63,7 @@ export function TextField({ label, value, multiline, placeholder, onFocus, onSav
         <input
           value={draft}
           placeholder={placeholder}
-          onChange={(event) => { setDraft(event.target.value); markFieldDirty(fieldId); }}
+          onChange={(event) => { setDraft(event.target.value); setDirty(true); markFieldDirty(fieldId); }}
           onFocus={onFocus}
           onBlur={() => void save()}
           onKeyDown={(event) => {
@@ -66,6 +71,7 @@ export function TextField({ label, value, multiline, placeholder, onFocus, onSav
           }}
         />
       )}
+      {failed && <button type="button" className="field-retry" onClick={() => void save()}>保存失败，点击重试</button>}
     </label>
   );
 }
@@ -80,11 +86,13 @@ interface NumberFieldProps {
 
 export function NumberField({ label, value, step = 1, onFocus, onSave }: NumberFieldProps) {
   const [draft, setDraft] = useState(String(value));
+  const [dirty, setDirty] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [fieldId] = useState(() => crypto.randomUUID());
   const markFieldDirty = useSelectionStore((state) => state.markFieldDirty);
   const beginFieldSave = useSelectionStore((state) => state.beginFieldSave);
   const finishFieldSave = useSelectionStore((state) => state.finishFieldSave);
-  useEffect(() => setDraft(String(value)), [value]);
+  useEffect(() => { if (!dirty) setDraft(String(value)); }, [value, dirty]);
   return (
     <label className="field">
       <span>{label}</span>
@@ -94,24 +102,29 @@ export function NumberField({ label, value, step = 1, onFocus, onSave }: NumberF
         min="0"
         value={draft}
         onFocus={onFocus}
-        onChange={(event) => { setDraft(event.target.value); markFieldDirty(fieldId); }}
+        onChange={(event) => { setDraft(event.target.value); setDirty(true); markFieldDirty(fieldId); }}
         onBlur={async () => {
           const next = Number(draft);
           if (!Number.isFinite(next) || next === value) {
             setDraft(String(value));
+            setDirty(false);
             beginFieldSave(fieldId);
             finishFieldSave(fieldId, true);
             return;
           }
           beginFieldSave(fieldId);
+          setFailed(false);
           try {
             await onSave(next);
+            setDirty(false);
             finishFieldSave(fieldId, true);
           } catch {
+            setFailed(true);
             finishFieldSave(fieldId, false);
           }
         }}
       />
+      {failed && <button type="button" className="field-retry" onClick={(event) => { const input = event.currentTarget.parentElement?.querySelector("input"); input?.focus(); input?.blur(); }}>保存失败，点击重试</button>}
     </label>
   );
 }
@@ -125,17 +138,26 @@ interface SelectFieldProps {
 }
 
 export function SelectField({ label, value, options, onFocus, onSave }: SelectFieldProps) {
+  const [draft, setDraft] = useState(value);
+  const [dirty, setDirty] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [fieldId] = useState(() => crypto.randomUUID());
   const markFieldDirty = useSelectionStore((state) => state.markFieldDirty);
   const beginFieldSave = useSelectionStore((state) => state.beginFieldSave);
   const finishFieldSave = useSelectionStore((state) => state.finishFieldSave);
+  useEffect(() => { if (!dirty) setDraft(value); }, [value, dirty]);
   const save = async (next: string) => {
+    setDraft(next);
+    setDirty(true);
+    setFailed(false);
     markFieldDirty(fieldId);
     beginFieldSave(fieldId);
     try {
       await onSave(next);
+      setDirty(false);
       finishFieldSave(fieldId, true);
     } catch {
+      setFailed(true);
       finishFieldSave(fieldId, false);
     }
   };
@@ -143,7 +165,7 @@ export function SelectField({ label, value, options, onFocus, onSave }: SelectFi
     <label className="field">
       <span>{label}</span>
       <select
-        value={value}
+        value={draft}
         onFocus={onFocus}
         onChange={(event) => void save(event.target.value)}
       >
@@ -151,6 +173,7 @@ export function SelectField({ label, value, options, onFocus, onSave }: SelectFi
           <option value={optionValue} key={optionValue}>{optionLabel}</option>
         ))}
       </select>
+      {failed && <button type="button" className="field-retry" onClick={() => void save(draft)}>保存失败，点击重试</button>}
     </label>
   );
 }

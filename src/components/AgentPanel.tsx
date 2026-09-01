@@ -174,7 +174,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
       let current = items.find((item) => item.status === "active");
       if (!items.length) {
         current = await api.agentCreateSession(project.path, {
-          requestId: crypto.randomUUID(),
+          requestId: `default:${project.id}`,
           projectId: project.id,
           scopeType: "project",
           scopeId: project.id,
@@ -218,6 +218,20 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
     return () => window.clearInterval(timer);
   }, [consultation?.id, consultation?.status, project.path, sessionId, onError]);
 
+  const refreshTask = useCallback(async (taskId: string) => {
+    activeTaskIdRef.current = taskId;
+    const task = await api.agentGetTask(project.path, taskId);
+    setActiveTask(task);
+    setStreamingText("");
+    setActiveToolName(null);
+    if (sessionId) setMessages(await api.agentListMessages(project.path, sessionId));
+    const result = task.result as AgentResult | null;
+    const nextProposal = result?.patchProposal ?? null;
+    setProposal(nextProposal);
+    setSelectedPatchIds(nextProposal ? selectablePatchIds(nextProposal) : new Set());
+    setCards(await api.cardList(project.path, taskId));
+  }, [project.path, sessionId]);
+
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
@@ -243,21 +257,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
       disposed = true;
       unlisten?.();
     };
-  }, [project.path, sessionId, onError]);
-
-  const refreshTask = async (taskId: string) => {
-    activeTaskIdRef.current = taskId;
-    const task = await api.agentGetTask(project.path, taskId);
-    setActiveTask(task);
-    setStreamingText("");
-    setActiveToolName(null);
-    if (sessionId) setMessages(await api.agentListMessages(project.path, sessionId));
-    const result = task.result as AgentResult | null;
-    const nextProposal = result?.patchProposal ?? null;
-    setProposal(nextProposal);
-    setSelectedPatchIds(nextProposal ? selectablePatchIds(nextProposal) : new Set());
-    setCards(await api.cardList(project.path, taskId));
-  };
+  }, [refreshTask, onError]);
 
   const enableAgent = async () => {
     setWorking(true);

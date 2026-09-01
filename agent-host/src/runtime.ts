@@ -106,6 +106,8 @@ export class WorkbenchAgentHost {
         return this.getModels();
       case "login_provider":
         return this.loginProvider(request);
+      case "test_provider":
+        return this.testProvider(request);
       case "logout_provider":
         return this.logoutProvider(request);
       case "create_session":
@@ -164,6 +166,15 @@ export class WorkbenchAgentHost {
     if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
     await this.modelRuntime.setRuntimeApiKey(providerId, requiredString(request, "apiKey"));
     return { providerId, authConfigured: true };
+  }
+
+  private async testProvider(request: HostRequest): Promise<Record<string, unknown>> {
+    const providerId = requiredString(request, "providerId");
+    if (!this.modelRuntime.getProvider(providerId)) throw new Error(`Provider 不存在：${providerId}`);
+    const auth = await this.modelRuntime.checkAuth(providerId, { signal: AbortSignal.timeout(15_000) });
+    return auth
+      ? { healthy: true, message: "Provider 连接和认证均正常" }
+      : { healthy: false, message: "Provider 未通过认证，请检查 API Key" };
   }
 
   private async logoutProvider(request: HostRequest): Promise<Record<string, unknown>> {

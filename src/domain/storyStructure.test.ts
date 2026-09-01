@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildStructureGraph, detectStructureIssues, elementsForScope, episodesForScope } from "./storyStructure";
+import { buildStructureGraph, detectStructureIssues, elementsForScope, episodesForScope, textOverlap } from "./storyStructure";
 import type { ContentUnitRow, ProjectState, RelationRow } from "../types";
 
 const row = (id: string, parent_id: string | null, type: ContentUnitRow["type"], sort_order: number): ContentUnitRow => ({
@@ -61,5 +61,11 @@ describe("advanced story structure", () => {
     state.contentUnits = [{ ...row("ep", null, "episode", 0), summary: "英雄在车站找到失踪的妹妹" }];
     state.scripts = [{ id: "s", content_unit_id: "ep", title: "", summary: "反派在海岛引爆实验室", maturity: "exploring", sync_status: "normal", created_at: "", updated_at: "" }];
     expect(detectStructureIssues(state, null).map((issue) => issue.id)).toContain("plot-diverged:ep");
+  });
+
+  it("does not treat a short phrase contained in a long unrelated text as equivalent", () => {
+    const unrelated = Array.from({ length: 80 }, (_, index) => String.fromCharCode(0x4e00 + index)).join("");
+    expect(textOverlap("英雄发现信件", `英雄发现${unrelated}`)).toBeLessThan(0.2);
+    expect(textOverlap("英雄发现信件", "英雄发现信件")).toBe(1);
   });
 });

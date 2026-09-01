@@ -1,4 +1,4 @@
-import { Check, KeyRound, LogOut, Settings2 } from "lucide-react";
+import { Check, CheckCircle2, KeyRound, LogOut, RefreshCw, Settings2, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api";
@@ -8,6 +8,7 @@ import type {
   AgentModelChoice,
   AgentModelConfiguration,
   AgentModelSettings,
+  RuntimeDiagnostics,
 } from "../features/agent/runtime";
 
 const roles = [
@@ -33,6 +34,10 @@ export function AgentModelSettingsPanel({ disabled, onError, expanded = false }:
   const [apiKey, setApiKey] = useState("");
   const [working, setWorking] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+  const [connectionTest, setConnectionTest] = useState<{ healthy: boolean; message: string } | null>(null);
+  const [testingConnection, setTestingConnection] = useState(false);
 
   const load = async () => {
     setLoadError(null);
@@ -67,6 +72,7 @@ export function AgentModelSettingsPanel({ disabled, onError, expanded = false }:
       ...draft,
       defaultModel: { ...draft.defaultModel, provider: providerId, model: provider?.models[0]?.id ?? null },
     });
+    setConnectionTest(null);
   };
 
   const setOverride = (role: string, value: string) => {
@@ -97,6 +103,32 @@ export function AgentModelSettingsPanel({ disabled, onError, expanded = false }:
     }
   };
 
+  const diagnose = async () => {
+    setDiagnosing(true);
+    try {
+      setDiagnostics(await withTimeout(api.agentRuntimeDoctor(), 15000, "Agent 运行环境检测超时，请重试。"));
+      await load();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
+  const testConnection = async () => {
+    if (!selectedProvider) return;
+    setTestingConnection(true);
+    setConnectionTest(null);
+    try {
+      setConnectionTest(await withTimeout(api.agentProviderTest(selectedProvider.id), 20000, "Provider 连接测试超时，请检查网络后重试。"));
+      await load();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setTestingConnection(false);
+    }
+  };
+
   if (!configuration || !draft) {
     return <details className="agent-model-settings" open={expanded || undefined}><summary><Settings2 size={12} />AI 模型设置</summary>{loadError ? <div className="agent-model-load-error"><p>{loadError}</p><button className="ghost" onClick={() => void load()}>重试</button></div> : <p>正在读取模型配置…</p>}</details>;
   }
@@ -106,6 +138,13 @@ export function AgentModelSettingsPanel({ disabled, onError, expanded = false }:
       <summary><Settings2 size={12} />AI 模型设置</summary>
       {providers.length === 0 ? <p className="agent-runtime-error">Pi ModelRuntime 没有可用模型。</p> : (
         <div className="agent-model-settings-body">
+          <section className="agent-readiness">
+            <div className={diagnostics?.agentHostHealthy ? "ready" : diagnostics ? "error" : "unknown"}>{diagnostics?.agentHostHealthy ? <CheckCircle2 size={14} /> : diagnostics ? <XCircle size={14} /> : <RefreshCw size={14} />}<span>运行环境</span><strong>{diagnostics ? diagnostics.agentHostHealthy ? "正常" : "异常" : "尚未检测"}</strong></div>
+            <div className={selectedProvider?.authConfigured ? "ready" : "error"}>{selectedProvider?.authConfigured ? <CheckCircle2 size={14} /> : <XCircle size={14} />}<span>账号认证</span><strong>{selectedProvider?.authConfigured ? "已配置" : "未配置"}</strong></div>
+            <div className={selectedModel ? "ready" : "error"}>{selectedModel ? <CheckCircle2 size={14} /> : <XCircle size={14} />}<span>默认模型</span><strong>{selectedModel?.name ?? "未选择"}</strong></div>
+            <button className="secondary" disabled={disabled || working || diagnosing} onClick={() => void diagnose()}><RefreshCw size={12} />{diagnosing ? "检测中…" : "检测运行环境"}</button>
+            {diagnostics?.error && <p className="agent-runtime-error">{diagnostics.error}</p>}
+          </section>
           <div className="agent-model-grid">
             <label>Provider<select value={draft.defaultModel.provider ?? ""} disabled={disabled || working} onChange={(event) => updateDefaultProvider(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}</option>)}</select></label>
             <label>主 Agent 模型<select value={draft.defaultModel.model ?? ""} disabled={disabled || working} onChange={(event) => setDraft({ ...draft, defaultModel: { ...draft.defaultModel, model: event.target.value } })}>{selectedProvider?.models.map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
@@ -119,6 +158,9 @@ export function AgentModelSettingsPanel({ disabled, onError, expanded = false }:
             <input type="password" autoComplete="off" value={apiKey} placeholder="API Key（保存到 Windows 系统密钥库）" disabled={disabled || working} onChange={(event) => setApiKey(event.target.value)} />
             <button className="secondary" disabled={disabled || working || !selectedProvider || !apiKey.trim()} onClick={() => void run(async () => { await api.agentProviderLogin(selectedProvider!.id, apiKey.trim()); setApiKey(""); })}><KeyRound size={11} />安全保存并登录</button>
             {selectedProvider?.authConfigured && <button className="ghost" disabled={disabled || working} onClick={() => void run(() => api.agentProviderLogout(selectedProvider.id))}><LogOut size={11} />注销</button>}
+            <button className="ghost" disabled={disabled || working || testingConnection || !selectedProvider?.authConfigured} onClick={() => void testConnection()}><RefreshCw size={11} />{testingConnection ? "测试中…" : "测试账号连接"}</button>
+            {connectionTest && <p className={`provider-test-result ${connectionTest.healthy ? "success" : "error"}`}>{connectionTest.healthy ? <CheckCircle2 size={13} /> : <XCircle size={13} />}{connectionTest.message}</p>}
+            <p className="agent-oauth-note">当前桌面版不支持在应用内发起 OAuth 登录；请使用 API Key。若 Pi Runtime 已从外部提供 OAuth 凭据，只显示其认证状态，不会伪装成应用内 OAuth。</p>
           </section>
           <section className="agent-model-overrides">
             <strong>专业 Agent 模型覆盖</strong>

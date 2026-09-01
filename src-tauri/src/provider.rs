@@ -5,6 +5,7 @@ use reqwest::Url;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
 use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "com.lu.workbench.image-provider";
@@ -16,6 +17,8 @@ pub struct ProviderConfig {
     pub provider_type: String,
     pub display_name: String,
     pub base_url: String,
+    pub text_to_image_path: String,
+    pub image_edit_path: String,
     pub default_model: String,
     pub capabilities: serde_json::Value,
     pub timeout_seconds: i64,
@@ -34,11 +37,20 @@ pub struct SaveProviderInput {
     pub provider_type: String,
     pub display_name: String,
     pub base_url: String,
+    pub text_to_image_path: Option<String>,
+    pub image_edit_path: Option<String>,
     pub default_model: String,
     pub api_key: Option<String>,
     pub timeout_seconds: Option<i64>,
     pub max_concurrency: Option<i64>,
     pub allow_image_upload: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestResult {
+    pub healthy: bool,
+    pub message: String,
 }
 
 fn ensure_enabled(app: &tauri::AppHandle) -> AppResult<std::path::PathBuf> {
@@ -65,6 +77,20 @@ fn validate_base_url(value: &str) -> AppResult<String> {
     Ok(value.trim().trim_end_matches('/').to_string())
 }
 
+fn validate_endpoint_path(value: Option<&str>, fallback: &str) -> AppResult<String> {
+    let path = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback);
+    if !path.starts_with('/') || path.contains("://") || path.contains('?') || path.contains('#') {
+        return Err(
+            "TOOL_ARGUMENT_INVALID: 接口路径必须是以 / 开头、且不含域名、查询参数或片段的相对路径"
+                .into(),
+        );
+    }
+    Ok(path.to_string())
+}
+
 fn entry(config_id: &str) -> AppResult<Entry> {
     Entry::new(KEYRING_SERVICE, config_id).map_err(|e| format!("打开系统密钥库失败：{e}"))
 }
@@ -81,25 +107,27 @@ pub(crate) fn load_provider(
 ) -> AppResult<ProviderConfig> {
     let conn = open_app_database(app_data_dir)?;
     conn.query_row(
-        "SELECT id, provider_type, display_name, base_url, default_model, capabilities_json, timeout_seconds, max_concurrency, allow_image_upload, status, secret_ref, created_at, updated_at FROM provider_configs WHERE id=?1",
+        "SELECT id, provider_type, display_name, base_url, text_to_image_path, image_edit_path, default_model, capabilities_json, timeout_seconds, max_concurrency, allow_image_upload, status, secret_ref, created_at, updated_at FROM provider_configs WHERE id=?1",
         [config_id],
         |row| {
-            let capabilities_raw: String = row.get(5)?;
-            let secret_ref: String = row.get(10)?;
+            let capabilities_raw: String = row.get(7)?;
+            let secret_ref: String = row.get(12)?;
             Ok(ProviderConfig {
                 id: row.get(0)?,
                 provider_type: row.get(1)?,
                 display_name: row.get(2)?,
                 base_url: row.get(3)?,
-                default_model: row.get(4)?,
+                text_to_image_path: row.get(4)?,
+                image_edit_path: row.get(5)?,
+                default_model: row.get(6)?,
                 capabilities: serde_json::from_str(&capabilities_raw).unwrap_or_else(|_| json!({})),
-                timeout_seconds: row.get(6)?,
-                max_concurrency: row.get(7)?,
-                allow_image_upload: row.get::<_, i64>(8)? != 0,
-                status: row.get(9)?,
+                timeout_seconds: row.get(8)?,
+                max_concurrency: row.get(9)?,
+                allow_image_upload: row.get::<_, i64>(10)? != 0,
+                status: row.get(11)?,
                 has_secret: !secret_ref.is_empty(),
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
             })
         },
     )
@@ -136,6 +164,10 @@ pub fn provider_save(app: tauri::AppHandle, input: SaveProviderInput) -> AppResu
         return Err("TOOL_ARGUMENT_INVALID: 当前仅支持 openai_compatible 或 mock Provider".into());
     }
     let base_url = validate_base_url(&input.base_url)?;
+    let text_to_image_path =
+        validate_endpoint_path(input.text_to_image_path.as_deref(), "/images/generations")?;
+    let image_edit_path =
+        validate_endpoint_path(input.image_edit_path.as_deref(), "/images/edits")?;
     let conn = open_app_database(&app_data_dir)?;
     let existing: Option<(String, String)> = conn
         .query_row(
@@ -181,14 +213,16 @@ pub fn provider_save(app: tauri::AppHandle, input: SaveProviderInput) -> AppResu
         "transparentBackground": true
     });
     conn.execute(
-        "INSERT INTO provider_configs (id, provider_type, display_name, base_url, secret_ref, default_model, capabilities_json, timeout_seconds, max_concurrency, allow_image_upload, status, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'configured', ?11, ?12)
-         ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type, display_name=excluded.display_name, base_url=excluded.base_url, secret_ref=excluded.secret_ref, default_model=excluded.default_model, capabilities_json=excluded.capabilities_json, timeout_seconds=excluded.timeout_seconds, max_concurrency=excluded.max_concurrency, allow_image_upload=excluded.allow_image_upload, status='configured', updated_at=excluded.updated_at",
+        "INSERT INTO provider_configs (id, provider_type, display_name, base_url, text_to_image_path, image_edit_path, secret_ref, default_model, capabilities_json, timeout_seconds, max_concurrency, allow_image_upload, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'configured', ?13, ?14)
+         ON CONFLICT(id) DO UPDATE SET provider_type=excluded.provider_type, display_name=excluded.display_name, base_url=excluded.base_url, text_to_image_path=excluded.text_to_image_path, image_edit_path=excluded.image_edit_path, secret_ref=excluded.secret_ref, default_model=excluded.default_model, capabilities_json=excluded.capabilities_json, timeout_seconds=excluded.timeout_seconds, max_concurrency=excluded.max_concurrency, allow_image_upload=excluded.allow_image_upload, status='configured', updated_at=excluded.updated_at",
         params![
             input.request_id,
             input.provider_type,
             input.display_name.trim(),
             base_url,
+            text_to_image_path,
+            image_edit_path,
             secret_ref,
             input.default_model.trim(),
             capabilities.to_string(),
@@ -221,6 +255,66 @@ pub fn provider_delete(app: tauri::AppHandle, provider_id: String) -> AppResult<
     Ok(())
 }
 
+#[tauri::command]
+pub async fn provider_test(
+    app: tauri::AppHandle,
+    provider_id: String,
+) -> AppResult<ProviderTestResult> {
+    let app_data_dir = ensure_enabled(&app)?;
+    let provider = load_provider(&app_data_dir, &provider_id)?;
+    let result = if provider.provider_type == "mock" {
+        ProviderTestResult {
+            healthy: true,
+            message: "Mock 图片服务可用".into(),
+        }
+    } else {
+        let secret = provider_secret(&provider_id)?;
+        match reqwest::Client::new()
+            .get(format!("{}/models", provider.base_url))
+            .bearer_auth(secret)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => ProviderTestResult {
+                healthy: true,
+                message: "连接和认证均正常；生成接口路径会在首次生成时验证，以免产生测试费用"
+                    .into(),
+            },
+            Ok(response) if matches!(response.status().as_u16(), 401 | 403) => ProviderTestResult {
+                healthy: false,
+                message: "服务可连接，但 API Key 未通过认证".into(),
+            },
+            Ok(response) => ProviderTestResult {
+                healthy: false,
+                message: format!(
+                    "服务返回 HTTP {}，请检查 Base URL 和兼容性",
+                    response.status().as_u16()
+                ),
+            },
+            Err(error) if error.is_timeout() => ProviderTestResult {
+                healthy: false,
+                message: "连接超时，请检查网络或 Base URL".into(),
+            },
+            Err(_) => ProviderTestResult {
+                healthy: false,
+                message: "无法连接图片服务，请检查网络或 Base URL".into(),
+            },
+        }
+    };
+    let conn = open_app_database(&app_data_dir)?;
+    conn.execute(
+        "UPDATE provider_configs SET status=?1,updated_at=?2 WHERE id=?3",
+        params![
+            if result.healthy { "ready" } else { "error" },
+            now(),
+            provider_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +330,20 @@ mod tests {
             validate_base_url("https://api.example.com/v1/").unwrap(),
             "https://api.example.com/v1"
         );
+    }
+
+    #[test]
+    fn accepts_only_relative_provider_paths() {
+        assert_eq!(
+            validate_endpoint_path(Some("/custom/images"), "/fallback").unwrap(),
+            "/custom/images"
+        );
+        assert_eq!(
+            validate_endpoint_path(None, "/fallback").unwrap(),
+            "/fallback"
+        );
+        assert!(validate_endpoint_path(Some("images/generations"), "/fallback").is_err());
+        assert!(validate_endpoint_path(Some("https://evil.example/images"), "/fallback").is_err());
+        assert!(validate_endpoint_path(Some("/images?model=x"), "/fallback").is_err());
     }
 }

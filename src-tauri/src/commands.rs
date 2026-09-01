@@ -5,7 +5,7 @@ use crate::database::{
 use base64::Engine;
 use rusqlite::params;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,14 @@ pub struct WorkspaceInfo {
 pub struct MediaData {
     pub mime_type: String,
     pub data: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportProductionPackageResult {
+    pub directory: String,
+    pub file_count: usize,
+    pub warnings: Vec<String>,
 }
 
 #[tauri::command]
@@ -95,6 +103,174 @@ pub fn open_project(project_path: String) -> AppResult<ProjectDescriptor> {
     let path = PathBuf::from(project_path);
     let conn = open_database(&path)?;
     descriptor_from_conn(&conn, &path)
+}
+
+#[tauri::command]
+pub fn export_production_package(
+    project_path: String,
+    generation_task_id: Option<String>,
+) -> AppResult<ExportProductionPackageResult> {
+    let project_root = PathBuf::from(&project_path);
+    let canonical_root = project_root
+        .canonicalize()
+        .map_err(|e| format!("读取项目目录失败：{e}"))?;
+    let conn = open_database(&canonical_root)?;
+    let state = project_state(&conn)?;
+    let object = state
+        .as_object()
+        .ok_or_else(|| "项目数据格式无效".to_string())?;
+    let project = object
+        .get("projects")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+        .cloned()
+        .ok_or_else(|| "项目记录不存在".to_string())?;
+    let tasks = object
+        .get("generationTasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let task = generation_task_id
+        .as_deref()
+        .and_then(|id| {
+            tasks
+                .iter()
+                .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+        })
+        .or_else(|| tasks.first())
+        .cloned();
+    if generation_task_id.is_some() && task.is_none() {
+        return Err("制作批次不存在".into());
+    }
+
+    let export_id = format!(
+        "{}-{}",
+        chrono::Utc::now().format("%Y%m%d-%H%M%S"),
+        &new_id()[..8]
+    );
+    let export_dir = canonical_root.join("exports").join(export_id);
+    fs::create_dir_all(&export_dir).map_err(|e| format!("创建导出目录失败：{e}"))?;
+
+    let task_id = task
+        .as_ref()
+        .and_then(|row| row.get("id"))
+        .and_then(Value::as_str);
+    let task_shots = object
+        .get("generationTaskShots")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    task_id.is_none()
+                        || row.get("generation_task_id").and_then(Value::as_str) == task_id
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let compilations = object
+        .get("promptCompilations")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter(|row| {
+                    task_id.is_none()
+                        || row.get("generation_task_id").and_then(Value::as_str) == task_id
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let manifest = json!({
+        "formatVersion": 1,
+        "exportedAt": now(),
+        "project": project,
+        "contentUnits": object.get("contentUnits").cloned().unwrap_or_else(|| json!([])),
+        "scripts": object.get("scripts").cloned().unwrap_or_else(|| json!([])),
+        "scenes": object.get("scenes").cloned().unwrap_or_else(|| json!([])),
+        "shots": object.get("shots").cloned().unwrap_or_else(|| json!([])),
+        "assets": object.get("assets").cloned().unwrap_or_else(|| json!([])),
+        "assetMedia": object.get("assetMedia").cloned().unwrap_or_else(|| json!([])),
+        "shotAssets": object.get("shotAssets").cloned().unwrap_or_else(|| json!([])),
+        "keyframes": object.get("keyframes").cloned().unwrap_or_else(|| json!([])),
+        "generationTask": task,
+        "generationTaskShots": task_shots,
+        "promptCompilations": compilations,
+    });
+    fs::write(
+        export_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("写入 manifest.json 失败：{e}"))?;
+
+    let project_name = project
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("未命名项目");
+    let task_name = task
+        .as_ref()
+        .and_then(|row| row.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("全部内容");
+    let target_model = task
+        .as_ref()
+        .and_then(|row| row.get("target_model"))
+        .and_then(Value::as_str)
+        .unwrap_or("未指定");
+    let prompt = task
+        .as_ref()
+        .and_then(|row| row.get("prompt"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mut warnings = Vec::new();
+    if task.is_none() {
+        warnings.push("项目尚未建立制作批次，已导出全部创作资料".into());
+    } else if prompt.trim().is_empty() {
+        warnings.push("当前制作批次尚无正式提示词".into());
+    }
+    let prompt_markdown = format!("# {project_name}\n\n## 制作批次\n\n{task_name}\n\n## 目标模型\n\n{target_model}\n\n## 正式提示词\n\n{prompt}\n");
+    fs::write(export_dir.join("prompt.md"), prompt_markdown)
+        .map_err(|e| format!("写入 prompt.md 失败：{e}"))?;
+
+    let media_paths = object
+        .get("assetMedia")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            object
+                .get("keyframes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter_map(|row| row.get("file_path").and_then(Value::as_str))
+        .filter(|path| !path.trim().is_empty())
+        .collect::<HashSet<_>>();
+    let mut file_count = 2;
+    for relative in media_paths {
+        let source = canonical_root.join(relative);
+        let Ok(canonical_source) = source.canonicalize() else {
+            warnings.push(format!("素材不存在：{relative}"));
+            continue;
+        };
+        let Ok(safe_relative) = canonical_source.strip_prefix(&canonical_root) else {
+            warnings.push(format!("已跳过项目目录外的素材：{relative}"));
+            continue;
+        };
+        let destination = export_dir.join(safe_relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建素材导出目录失败：{e}"))?;
+        }
+        fs::copy(&canonical_source, &destination).map_err(|e| format!("复制素材失败：{e}"))?;
+        file_count += 1;
+    }
+
+    Ok(ExportProductionPackageResult {
+        directory: export_dir.to_string_lossy().to_string(),
+        file_count,
+        warnings,
+    })
 }
 
 #[tauri::command]
@@ -432,6 +608,43 @@ fn mime_from_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exports_prompt_manifest_and_referenced_media() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = create_project(
+            temp.path().to_string_lossy().to_string(),
+            "交付项目".into(),
+            "short".into(),
+        )
+        .unwrap();
+        let root = PathBuf::from(&project.path);
+        fs::write(root.join("assets/characters/hero.png"), b"hero").unwrap();
+        fs::write(root.join("keyframes/frame.png"), b"frame").unwrap();
+        let conn = open_database(&root).unwrap();
+        let timestamp = now();
+        conn.execute("INSERT INTO content_units (id,project_id,type,name,created_at,updated_at) VALUES ('unit',?1,'short','正片',?2,?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO scripts (id,content_unit_id,title,created_at,updated_at) VALUES ('script','unit','剧本',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO scenes (id,script_id,title,created_at,updated_at) VALUES ('scene','script','场景',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shots (id,scene_id,title,created_at,updated_at) VALUES ('shot','scene','镜头',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO assets (id,project_id,type,name,created_at,updated_at) VALUES ('asset',?1,'character','主角',?2,?2)", params![project.id, timestamp]).unwrap();
+        conn.execute("INSERT INTO asset_media (id,asset_id,file_path,created_at,updated_at) VALUES ('media','asset','assets/characters/hero.png',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO keyframes (id,shot_id,type,file_path,status,created_at,updated_at) VALUES ('frame','shot','single','keyframes/frame.png','ready',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO generation_tasks (id,content_unit_id,name,target_model,prompt,created_at,updated_at) VALUES ('task','unit','第一批','video-model','正式提示词',?1,?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO generation_task_shots (generation_task_id,shot_id,sort_order) VALUES ('task','shot',0)", []).unwrap();
+        drop(conn);
+
+        let exported = export_production_package(project.path, Some("task".into())).unwrap();
+        let output = PathBuf::from(exported.directory);
+        assert!(output.join("manifest.json").is_file());
+        assert!(fs::read_to_string(output.join("prompt.md"))
+            .unwrap()
+            .contains("正式提示词"));
+        assert!(output.join("assets/characters/hero.png").is_file());
+        assert!(output.join("keyframes/frame.png").is_file());
+        assert_eq!(exported.file_count, 4);
+        assert!(exported.warnings.is_empty());
+    }
 
     #[test]
     fn project_lifecycle_creates_required_directories() {

@@ -38,7 +38,6 @@ pub fn execute_tool(
     request: ToolGatewayRequest,
 ) -> AppResult<Value> {
     let mut conn = open_database(project_path)?;
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
     let (
         session_id,
         agent_type,
@@ -55,7 +54,7 @@ pub fn execute_tool(
         String,
         Option<String>,
         Option<String>,
-    ) = tx
+    ) = conn
         .query_row(
             "SELECT session_id, agent_type, task_type, selection_json, write_scope_json,
                     model_provider, model_name
@@ -77,13 +76,13 @@ pub fn execute_tool(
     if session_id != request.session_id {
         return Err("TOOL_SCOPE_DENIED: Tool Call 与 AgentSession 不匹配".into());
     }
-    let (project_id, revision): (String, i64) = tx
+    let (project_id, revision): (String, i64) = conn
         .query_row("SELECT id, revision FROM projects LIMIT 1", [], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(|e| e.to_string())?;
     let started_at = now();
-    tx.execute(
+    conn.execute(
         "INSERT INTO agent_tool_calls
          (id, task_id, session_id, agent_type, tool_name, arguments_json,
           project_revision, status, started_at)
@@ -122,34 +121,49 @@ pub fn execute_tool(
                 validate_arguments(&request.tool_name, arguments)?;
                 ensure_tool_allowed(&agent_type, &task_type, &request.tool_name)?;
                 match request.tool_name.as_str() {
-                    "call_expert" => start_expert(
-                        &tx,
-                        app_data_dir,
-                        project_path,
-                        &project_id,
-                        revision,
-                        &request.task_id,
-                        &session_id,
-                        &agent_type,
-                        &selection,
-                        model_provider.clone(),
-                        model_name.clone(),
-                        arguments,
-                    ),
-                    "complete_expert" => complete_expert(
-                        &tx,
-                        &request.task_id,
-                        &session_id,
-                        arguments,
-                    ),
-                    "fail_expert" => fail_expert(
-                        &tx,
-                        &request.task_id,
-                        &session_id,
-                        arguments,
-                    ),
+                    "call_expert" => {
+                        let tx = conn.transaction().map_err(|e| e.to_string())?;
+                        let value = start_expert(
+                            &tx,
+                            app_data_dir,
+                            project_path,
+                            &project_id,
+                            revision,
+                            &request.task_id,
+                            &session_id,
+                            &agent_type,
+                            &selection,
+                            model_provider.clone(),
+                            model_name.clone(),
+                            arguments,
+                        )?;
+                        tx.commit().map_err(|e| e.to_string())?;
+                        Ok(value)
+                    }
+                    "complete_expert" => {
+                        let tx = conn.transaction().map_err(|e| e.to_string())?;
+                        let value = complete_expert(
+                            &tx,
+                            &request.task_id,
+                            &session_id,
+                            arguments,
+                        )?;
+                        tx.commit().map_err(|e| e.to_string())?;
+                        Ok(value)
+                    }
+                    "fail_expert" => {
+                        let tx = conn.transaction().map_err(|e| e.to_string())?;
+                        let value = fail_expert(
+                            &tx,
+                            &request.task_id,
+                            &session_id,
+                            arguments,
+                        )?;
+                        tx.commit().map_err(|e| e.to_string())?;
+                        Ok(value)
+                    }
                     _ => execute_inner(
-                        &tx,
+                        &conn,
                         app_data_dir,
                         project_path,
                         &project_id,
@@ -197,6 +211,7 @@ pub fn execute_tool(
         ),
         Err(error) => ("failed", audit_text(&json!({ "error": error }))),
     };
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
         "UPDATE agent_tool_calls
          SET result_summary_json=?1, status=?2, completed_at=?3 WHERE id=?4",

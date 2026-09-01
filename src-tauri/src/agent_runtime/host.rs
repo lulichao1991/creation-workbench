@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +20,7 @@ const MAX_TERMINAL_TASKS: usize = 256;
 struct HostCommand {
     program: PathBuf,
     args: Vec<String>,
+    current_dir: Option<PathBuf>,
     display: String,
 }
 
@@ -50,16 +51,19 @@ impl HostProcess {
             .unwrap_or_else(std::env::temp_dir)
             .join("creation-workbench")
             .join("agent-host");
-        let mut child = Command::new(&command.program)
+        let mut process_command = Command::new(&command.program);
+        process_command
             .args(&command.args)
             .env("WORKBENCH_AGENT_DATA_DIR", data_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| {
-                format!("无法启动 Pi SDK Agent Host（{}）：{error}", command.display)
-            })?;
+            .stderr(Stdio::piped());
+        if let Some(current_dir) = &command.current_dir {
+            process_command.current_dir(current_dir);
+        }
+        let mut child = process_command.spawn().map_err(|error| {
+            format!("无法启动 Pi SDK Agent Host（{}）：{error}", command.display)
+        })?;
         let stdin = Arc::new(Mutex::new(
             child.stdin.take().ok_or("Agent Host stdin 不可用")?,
         ));
@@ -73,6 +77,8 @@ impl HostProcess {
         let reader_tasks = Arc::clone(&tasks);
         let reader_terminal_tasks = Arc::clone(&terminal_tasks);
         let reader_stdin = Arc::clone(&stdin);
+        let stderr_tail = Arc::new(Mutex::new(String::new()));
+        let reader_stderr_tail = Arc::clone(&stderr_tail);
         let reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 match line {
@@ -91,20 +97,29 @@ impl HostProcess {
                     Err(_) => break,
                 }
             }
-            fail_live_tasks(
-                &reader_tasks,
-                &reader_terminal_tasks,
-                "Pi SDK Agent Host 已停止",
-            );
+            let stopped_error = host_stopped_error(&reader_stderr_tail);
+            fail_live_tasks(&reader_tasks, &reader_terminal_tasks, &stopped_error);
             if let Ok(mut pending) = reader_pending.lock() {
                 for (_, sender) in pending.drain() {
-                    let _ = sender.send(Err("Pi SDK Agent Host 已停止".into()));
+                    let _ = sender.send(Err(stopped_error.clone()));
                 }
             }
         });
+        let stderr_capture = Arc::clone(&stderr_tail);
         let stderr_reader = thread::spawn(move || {
-            let mut ignored = String::new();
-            let _ = stderr.read_to_string(&mut ignored);
+            for line in BufReader::new(&mut stderr).lines().map_while(Result::ok) {
+                if let Ok(mut tail) = stderr_capture.lock() {
+                    if tail.len() + line.len() > 2_000 {
+                        let trim = (tail.len() + line.len()) - 2_000;
+                        let current_len = tail.len();
+                        tail.drain(..trim.min(current_len));
+                    }
+                    if !tail.is_empty() {
+                        tail.push(' ');
+                    }
+                    tail.push_str(&line);
+                }
+            }
         });
         Ok(Self {
             stdin,
@@ -159,7 +174,13 @@ impl HostProcess {
     }
 
     fn shutdown(&mut self) {
-        let _ = self.request("shutdown", json!({}));
+        if self.is_running().unwrap_or(false) {
+            let _ = self.request("shutdown", json!({}));
+        }
+        self.terminate();
+    }
+
+    fn terminate(&mut self) {
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
@@ -215,7 +236,7 @@ impl PiSdkRuntimeAdapter {
         };
         if stopped {
             if let Some(mut process) = self.process.take() {
-                process.shutdown();
+                process.terminate();
             }
             self.sessions.clear();
         }
@@ -224,6 +245,50 @@ impl PiSdkRuntimeAdapter {
         }
         Ok(self.process.as_ref().expect("process initialized"))
     }
+
+    fn management_request(&mut self, request_type: &str, body: Value) -> AppResult<Value> {
+        let first = self.process()?.request(request_type, body.clone());
+        let Err(first_error) = first else {
+            return first;
+        };
+        if !is_restartable_host_error(&first_error) {
+            return Err(first_error);
+        }
+        #[cfg(debug_assertions)]
+        eprintln!("Agent Host 请求 {request_type} 中断，正在重启：{first_error}");
+        if let Some(mut process) = self.process.take() {
+            process.terminate();
+        }
+        self.sessions.clear();
+        let retry = self
+            .process()?
+            .request(request_type, body)
+            .map_err(|retry_error| format!("Agent Host 自动恢复失败：{retry_error}"));
+        #[cfg(debug_assertions)]
+        if let Err(retry_error) = &retry {
+            eprintln!("Agent Host 请求 {request_type} 自动恢复失败：{retry_error}");
+        }
+        retry
+    }
+}
+
+fn host_stopped_error(stderr_tail: &Mutex<String>) -> String {
+    let detail = stderr_tail
+        .lock()
+        .ok()
+        .map(|tail| tail.trim().replace(['\r', '\n'], " "))
+        .filter(|tail| !tail.is_empty());
+    match detail {
+        Some(detail) => format!("Pi SDK Agent Host 已停止：{detail}"),
+        None => "Pi SDK Agent Host 已停止".into(),
+    }
+}
+
+fn is_restartable_host_error(error: &str) -> bool {
+    error.contains("Agent Host 已停止")
+        || error.contains("Agent Host stopped")
+        || error.contains("broken pipe")
+        || error.contains("管道")
 }
 
 fn host_write_error(error: std::io::Error) -> String {
@@ -408,12 +473,12 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
     }
 
     fn get_models(&mut self) -> AppResult<AgentModelCatalog> {
-        let value = self.process()?.request("get_models", json!({}))?;
+        let value = self.management_request("get_models", json!({}))?;
         serde_json::from_value(value).map_err(|error| format!("解析模型目录失败：{error}"))
     }
 
     fn login_provider(&mut self, provider_id: &str, api_key: &str) -> AppResult<()> {
-        self.process()?.request(
+        self.management_request(
             "login_provider",
             json!({ "providerId": provider_id, "apiKey": api_key }),
         )?;
@@ -421,13 +486,22 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
     }
 
     fn logout_provider(&mut self, provider_id: &str) -> AppResult<()> {
-        self.process()?
-            .request("logout_provider", json!({ "providerId": provider_id }))?;
+        self.management_request("logout_provider", json!({ "providerId": provider_id }))?;
         Ok(())
     }
 
+    fn test_provider(
+        &mut self,
+        provider_id: &str,
+    ) -> AppResult<crate::agent_runtime::runtime::ProviderConnectionTest> {
+        let value =
+            self.management_request("test_provider", json!({ "providerId": provider_id }))?;
+        serde_json::from_value(value)
+            .map_err(|error| format!("解析 Provider 连接测试失败：{error}"))
+    }
+
     fn doctor(&mut self) -> AppResult<RuntimeDiagnostics> {
-        let value = self.process()?.request("doctor", json!({}))?;
+        let value = self.management_request("doctor", json!({}))?;
         serde_json::from_value(value)
             .map_err(|error| format!("解析 Agent Host Doctor 失败：{error}"))
     }
@@ -700,11 +774,12 @@ fn resolve_host_command() -> HostCommand {
 fn bundled_host_command(resource_dir: &std::path::Path) -> HostCommand {
     let host_dir = resource_dir.join("agent-host");
     let program = host_dir.join(if cfg!(windows) { "node.exe" } else { "node" });
-    let script = host_dir.join("dist").join("index.js");
+    let script = PathBuf::from("dist").join("index.js");
     HostCommand {
         display: format!("{} {}", program.display(), script.display()),
         program,
         args: vec![script.to_string_lossy().into_owned()],
+        current_dir: Some(host_dir),
     }
 }
 
@@ -716,6 +791,7 @@ fn command_for_path(path: PathBuf) -> HostCommand {
         HostCommand {
             program: PathBuf::from("node"),
             args: vec![path.to_string_lossy().into_owned()],
+            current_dir: None,
             display: format!("node {}", path.display()),
         }
     } else if cfg!(windows)
@@ -732,12 +808,14 @@ fn command_for_path(path: PathBuf) -> HostCommand {
                 "/c".into(),
                 path.to_string_lossy().into_owned(),
             ],
+            current_dir: None,
             display: path.display().to_string(),
         }
     } else {
         HostCommand {
             program: path.clone(),
             args: Vec::new(),
+            current_dir: None,
             display: path.display().to_string(),
         }
     }
@@ -764,9 +842,10 @@ mod tests {
             command.program,
             PathBuf::from(r"C:\portable\resources\agent-host\node.exe")
         );
+        assert_eq!(command.args, vec![r"dist\index.js"]);
         assert_eq!(
-            command.args,
-            vec![r"C:\portable\resources\agent-host\dist\index.js"]
+            command.current_dir,
+            Some(PathBuf::from(r"C:\portable\resources\agent-host"))
         );
     }
 
@@ -856,6 +935,31 @@ mod tests {
         assert_eq!(
             runtime.doctor().unwrap().sdk_version.as_deref(),
             Some("mock-sdk")
+        );
+        runtime.dispose().unwrap();
+    }
+
+    #[test]
+    fn sdk_adapter_retries_a_management_request_after_the_host_crashes() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("crashed-once.marker");
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data")
+            .join("含中文 空格")
+            .join("mock_flaky_agent_host.mjs");
+        let mut runtime = PiSdkRuntimeAdapter::new(HostCommand {
+            program: PathBuf::from("node"),
+            args: vec![
+                fixture.to_string_lossy().into_owned(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            current_dir: None,
+            display: "flaky fixture".into(),
+        });
+
+        assert_eq!(
+            runtime.doctor().unwrap().sdk_version.as_deref(),
+            Some("recovered-sdk")
         );
         runtime.dispose().unwrap();
     }

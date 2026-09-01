@@ -37,6 +37,11 @@ export interface RuntimeDiagnostics {
   error: string | null;
 }
 
+export interface ProviderConnectionTest {
+  healthy: boolean;
+  message: string;
+}
+
 export interface AgentModel {
   id: string;
   name: string;

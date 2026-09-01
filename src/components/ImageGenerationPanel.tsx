@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
+import { loadProjectMediaDataUrl } from "../services/media";
 import { useAppDialog } from "./AppDialog";
 import {
   generationCostNotice,
@@ -9,7 +10,6 @@ import {
   type ImageResult,
   type ImageTargetType,
   type ProviderConfig,
-  type SaveProviderInput,
 } from "../services/imageGeneration";
 
 interface Props {
@@ -20,6 +20,7 @@ interface Props {
   referenceImages?: string[];
   onSelected: () => Promise<void>;
   onError: (error: unknown) => void;
+  onConfigure?: () => void;
 }
 
 const statusLabels: Record<ImageJob["status"], string> = {
@@ -33,18 +34,7 @@ const statusLabels: Record<ImageJob["status"], string> = {
   interrupted: "已中断",
 };
 
-const initialProvider: SaveProviderInput = {
-  requestId: "openai-images",
-  providerType: "openai_compatible",
-  displayName: "OpenAI Images",
-  baseUrl: "https://api.openai.com/v1",
-  defaultModel: "gpt-image-1",
-  timeoutSeconds: 180,
-  maxConcurrency: 1,
-  allowImageUpload: false,
-};
-
-export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt, referenceImages = [], onSelected, onError }: Props) {
+export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt, referenceImages = [], onSelected, onError, onConfigure }: Props) {
   const dialog = useAppDialog();
   const [enabled, setEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -52,10 +42,8 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
   const [providerId, setProviderId] = useState("");
   const [jobs, setJobs] = useState<ImageJob[]>([]);
   const [options, setOptions] = useState<ImageOptions>({ size: "1024x1024", quality: "auto", count: 1, background: "auto" });
-  const [saving, setSaving] = useState(false);
   const [confirmingGeneration, setConfirmingGeneration] = useState(false);
   const [confirmingSelectionId, setConfirmingSelectionId] = useState<string | null>(null);
-  const [providerForm, setProviderForm] = useState<SaveProviderInput>(initialProvider);
 
   const refresh = useCallback(async () => {
     const [nextProviders, nextJobs] = await Promise.all([
@@ -81,6 +69,12 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
     return () => { active = false; };
   }, [refresh]);
 
+  useEffect(() => {
+    const onProvidersUpdated = () => { void refresh().catch(onError); };
+    window.addEventListener("workbench:image-providers-updated", onProvidersUpdated);
+    return () => window.removeEventListener("workbench:image-providers-updated", onProvidersUpdated);
+  }, [refresh, onError]);
+
   const hasActiveJob = jobs.some((job) => !terminalImageStatuses.has(job.status));
   useEffect(() => {
     if (!enabled || !hasActiveJob) return;
@@ -100,28 +94,6 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
       setEnabled(true);
       await refresh();
     } catch (error) { onError(error); }
-  };
-
-  const saveProvider = async () => {
-    setSaving(true);
-    try {
-      const saved = await api.providerSave(providerForm);
-      await refresh();
-      setProviderId(saved.id);
-      setProviderForm((value) => ({ ...value, apiKey: "" }));
-    } catch (error) { onError(error); } finally { setSaving(false); }
-  };
-
-  const chooseProviderType = (providerType: ProviderConfig["providerType"]) => {
-    setProviderForm(providerType === "mock" ? {
-      ...initialProvider,
-      requestId: "mock-images",
-      providerType,
-      displayName: "Mock 图片服务（验收）",
-      baseUrl: "http://127.0.0.1",
-      defaultModel: "mock-image-1",
-      allowImageUpload: true,
-    } : initialProvider);
   };
 
   const generate = async () => {
@@ -147,6 +119,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
         referenceImages,
         options,
       });
+      window.dispatchEvent(new Event("workbench:image-jobs-updated"));
       await refresh();
     } catch (error) { onError(error); }
   };
@@ -159,6 +132,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
     setConfirmingSelectionId(null);
     try {
       await api.imageSelectResult(projectPath, result.id);
+      window.dispatchEvent(new Event("workbench:image-jobs-updated"));
       await Promise.all([refresh(), onSelected()]);
     } catch (error) { onError(error); }
   };
@@ -167,8 +141,30 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
     if (state === "deleted" && !await dialog.confirm("候选文件会从本地永久移除，此操作无法撤销。", { title: "永久删除候选图片？", confirmLabel: "永久删除", danger: true })) return;
     try {
       await api.imageUpdateResultState(projectPath, result.id, state);
+      window.dispatchEvent(new Event("workbench:image-jobs-updated"));
       await refresh();
     } catch (error) { onError(error); }
+  };
+
+  const retry = async (job: ImageJob) => {
+    try {
+      await api.imageGenerate(projectPath, {
+        requestId: crypto.randomUUID(),
+        targetType,
+        targetId,
+        providerId: job.provider,
+        model: job.model,
+        prompt: job.prompt,
+        referenceImages: job.referenceImages,
+        options: job.options,
+      });
+      window.dispatchEvent(new Event("workbench:image-jobs-updated"));
+      await refresh();
+    } catch (error) { onError(error); }
+  };
+
+  const copyPrompt = async () => {
+    try { await navigator.clipboard.writeText(prompt); } catch (error) { onError(error); }
   };
 
   if (loading) return <div className="image-generation-panel"><span className="label">静态生图加载中…</span></div>;
@@ -183,21 +179,10 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
     <div className="image-generation-panel">
       <div className="image-generation-heading">
         <div><span className="label">STATIC IMAGE GENERATION</span><strong>候选区（非正式图片）</strong></div>
-        <small>候选必须手动选择后才进入正式目录</small>
+        <div><small>候选必须手动选择后才进入正式目录</small><button className="ghost" disabled={!prompt.trim()} onClick={() => void copyPrompt()}>复制提示词</button></div>
       </div>
 
-      <details className="provider-settings" open={providers.length === 0}>
-        <summary>Provider 配置 · 密钥由 Windows 凭据管理器保存</summary>
-        <div className="provider-form">
-          <label>类型<select value={providerForm.providerType} onChange={(event) => chooseProviderType(event.target.value as ProviderConfig["providerType"])}><option value="openai_compatible">OpenAI Compatible</option><option value="mock">Mock 验收服务</option></select></label>
-          <label>配置名称<input value={providerForm.displayName} onChange={(event) => setProviderForm({ ...providerForm, displayName: event.target.value })} /></label>
-          <label>Base URL<input value={providerForm.baseUrl} onChange={(event) => setProviderForm({ ...providerForm, baseUrl: event.target.value })} /></label>
-          <label>默认模型<input value={providerForm.defaultModel} onChange={(event) => setProviderForm({ ...providerForm, defaultModel: event.target.value })} /></label>
-          {providerForm.providerType !== "mock" && <label>API Key<input type="password" autoComplete="off" value={providerForm.apiKey ?? ""} placeholder="不会写入项目数据库" onChange={(event) => setProviderForm({ ...providerForm, apiKey: event.target.value })} /></label>}
-          {providerForm.providerType !== "mock" && <label><input type="checkbox" checked={providerForm.allowImageUpload ?? false} onChange={(event) => setProviderForm({ ...providerForm, allowImageUpload: event.target.checked })} /> 允许向该 Provider 上传项目参考图</label>}
-          <button className="secondary" disabled={saving || !providerForm.displayName.trim() || !providerForm.defaultModel.trim()} onClick={() => void saveProvider()}>{saving ? "保存中…" : "保存 Provider"}</button>
-        </div>
-      </details>
+      {providers.length === 0 && <div className="image-provider-empty"><div><strong>尚未配置图片生成服务</strong><small>你仍可导入图片或复制提示词；配置后可在当前位置直接生成。</small></div>{onConfigure && <button className="secondary" onClick={onConfigure}>前往全局设置</button>}</div>}
 
       {providers.length > 0 && <div className="generation-controls">
         <label>Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.displayName} · {provider.defaultModel}</option>)}</select></label>
@@ -209,7 +194,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
         {confirmingGeneration && <button className="ghost generation-confirm-cancel" onClick={() => setConfirmingGeneration(false)}>取消</button>}
       </div>}
 
-      {jobs.length > 0 && <div className="image-job-list">{jobs.slice(0, 4).map((job) => <div className={`image-job ${job.status}`} key={job.id}><span>{statusLabels[job.status]}</span><small>{job.model || providers.find((item) => item.id === job.provider)?.defaultModel}</small>{job.error?.message && <em>{job.error.message}</em>}{!terminalImageStatuses.has(job.status) && <button className="danger-text" onClick={() => void api.imageCancel(projectPath, job.id).then(refresh).catch(onError)}>取消</button>}</div>)}</div>}
+      {jobs.length > 0 && <div className="image-job-list">{jobs.slice(0, 4).map((job) => <div className={`image-job ${job.status}`} key={job.id}><span>{statusLabels[job.status]}</span><small>{job.model || providers.find((item) => item.id === job.provider)?.defaultModel}</small>{job.error?.message && <em>{job.error.message}</em>}{!terminalImageStatuses.has(job.status) && <button className="danger-text" onClick={() => void api.imageCancel(projectPath, job.id).then(async () => { window.dispatchEvent(new Event("workbench:image-jobs-updated")); await refresh(); }).catch(onError)}>取消</button>}{["failed", "interrupted", "cancelled"].includes(job.status) && <button className="ghost" disabled={hasActiveJob} onClick={() => void retry(job)}>重试</button>}</div>)}</div>}
 
       {candidates.length > 0 && <div className="candidate-grid">{candidates.map(({ result }) => <article className={`candidate-card ${result.selectionState}`} key={result.id}><CandidateImage projectPath={projectPath} result={result} /><div><strong>{result.selectionState === "selected" ? "已选为正式图片" : result.selectionState === "available" ? "候选图片" : result.selectionState === "rejected" ? "已拒绝" : "已归档"}</strong><small>候选文件 · 不会自动使用</small></div><div className="card-actions">{result.selectionState === "available" && <><button className="primary" onClick={() => void select(result)}>{confirmingSelectionId === result.id ? "再次点击，写入正式目录" : "选为正式"}</button><button className="ghost" onClick={() => void updateState(result, "rejected")}>拒绝</button></>}{result.selectionState === "rejected" && <button className="ghost" onClick={() => void updateState(result, "archived")}>归档</button>}{result.selectionState !== "selected" && <button className="danger-text" onClick={() => void updateState(result, "deleted")}>删除</button>}</div></article>)}</div>}
       {providers.length > 0 && jobs.length === 0 && <p className="candidate-empty">尚无候选。填写上方提示词后，由你确认参数并发起一次生成。</p>}
@@ -219,12 +204,14 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
 
 function CandidateImage({ projectPath, result }: { projectPath: string; result: ImageResult }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   useEffect(() => {
     let active = true;
-    void api.readProjectMedia(projectPath, result.filePath)
-      .then((media) => { if (active) setSrc(`data:${media.mimeType};base64,${media.data}`); })
-      .catch(() => { if (active) setSrc(null); });
+    setFailed(false);
+    void loadProjectMediaDataUrl(projectPath, result.filePath)
+      .then((value) => { if (active) setSrc(value); })
+      .catch(() => { if (active) { setSrc(null); setFailed(true); } });
     return () => { active = false; };
   }, [projectPath, result.filePath]);
-  return src ? <img src={src} alt="静态生图候选" /> : <div className="image-placeholder">候选不可预览</div>;
+  return src ? <img src={src} alt="静态生图候选" /> : <div className="image-placeholder">{failed ? "候选不可预览" : "正在加载候选…"}</div>;
 }

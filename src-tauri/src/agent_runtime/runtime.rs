@@ -68,6 +68,13 @@ pub struct RuntimeDiagnostics {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionTest {
+    pub healthy: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderAuthDiagnostic {
     pub provider_id: String,
     pub configured: bool,
@@ -184,6 +191,9 @@ pub trait AgentRuntime: Send {
     }
     fn logout_provider(&mut self, _provider_id: &str) -> AppResult<()> {
         Err("当前 Runtime 不支持应用内 Provider 注销".into())
+    }
+    fn test_provider(&mut self, _provider_id: &str) -> AppResult<ProviderConnectionTest> {
+        Err("当前 Runtime 不支持 Provider 连接测试".into())
     }
     fn doctor(&mut self) -> AppResult<RuntimeDiagnostics> {
         Err("当前 Runtime 不支持 Agent Host Doctor".into())

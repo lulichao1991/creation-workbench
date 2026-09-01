@@ -32,7 +32,7 @@ $productName $version Windows x64 portable edition
 2. Keep the agent-host folder beside the executable; it contains the private Pi SDK runtime.
 3. The target computer does not need Pi, Node.js, or npm installed.
 4. Before using an Agent, open AI model settings and select a provider/model and enter its API key.
-5. Projects are stored under Documents\AI Video Workbench, not inside this portable folder.
+5. Projects are stored in the project root selected on the home screen, not inside this portable folder.
 "@ | Set-Content -LiteralPath (Join-Path $packageDir "README.txt") -Encoding UTF8
 
 Compress-Archive -LiteralPath $packageDir -DestinationPath $zipPath -CompressionLevel Optimal

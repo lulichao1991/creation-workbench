@@ -29,7 +29,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 base64 = "0.22"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "rustls"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 keyring = { version = "4.2.0", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 
 [dev-dependencies]
