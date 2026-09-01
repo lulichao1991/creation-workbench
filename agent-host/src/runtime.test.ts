@@ -337,6 +337,90 @@ test("records a failed professional task when its Pi AgentSession cannot start",
   }
 });
 
+test("runs three independent professional AgentSessions in parallel with distinct tool loops", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-team-"));
+  const faux = fauxProvider({ provider: "workbench-team-test", tokensPerSecond: 0 });
+  const respond = (context: any) => {
+    const transcript = JSON.stringify(context.messages);
+    const role = transcript.includes("writer-task")
+      ? "writer"
+      : transcript.includes("director-task")
+        ? "director"
+        : "cinematography";
+    const tool = role === "writer"
+      ? "read_story_structure"
+      : role === "director"
+        ? "read_scene"
+        : "read_shot_context";
+    assert.match(JSON.stringify(context.tools), new RegExp(tool));
+    assert.doesNotMatch(JSON.stringify(context.tools), /call_expert/);
+    if (!transcript.includes("projectRevision")) {
+      const args = tool === "read_story_structure"
+        ? { scopeType: "project" }
+        : tool === "read_scene"
+          ? { sceneId: "scene01" }
+          : { shotId: "shot04" };
+      return fauxAssistantMessage([fauxToolCall(tool, args, { id: `${role}-read` })], { stopReason: "toolUse" });
+    }
+    return fauxAssistantMessage(`${role} 独立专业意见`);
+  };
+  faux.setResponses([respond, respond, respond, respond, respond, respond]);
+  const events: Record<string, unknown>[] = [];
+  const calls: Array<{ sessionId: string; taskId: string; toolName: string }> = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      calls.push({ sessionId: request.sessionId, taskId: request.taskId, toolName: request.toolName });
+      return { projectRevision: 9, data: { verifiedBy: request.toolName } };
+    },
+  );
+  const roles = [
+    { role: "writer", tool: "read_story_structure" },
+    { role: "director", tool: "read_scene" },
+    { role: "cinematography", tool: "read_shot_context" },
+  ];
+  try {
+    for (const { role, tool } of roles) {
+      await host.handle({
+        id: `create-${role}`,
+        type: "create_session",
+        sessionId: `team-${role}-session`,
+        provider: faux.provider.id,
+        model: faux.getModel().id,
+        systemPrompt: `你是 ${role} 专业 Agent，只能独立分析。`,
+        allowedTools: [tool],
+        allowCallExpert: false,
+      });
+    }
+    await Promise.all(roles.map(({ role }) => host.handle({
+      id: `send-${role}`,
+      type: "send_message",
+      sessionId: `team-${role}-session`,
+      taskId: `team-${role}-task`,
+      message: `${role}-task：独立分析同一场戏`,
+    })));
+    await Promise.all(roles.map(({ role }) => waitForEvent(events, "task_completed", `team-${role}-task`)));
+    assert.equal(new Set(calls.map((call) => call.sessionId)).size, 3);
+    assert.deepEqual(calls.map((call) => call.toolName).sort(), [
+      "read_scene",
+      "read_shot_context",
+      "read_story_structure",
+    ]);
+    for (const { role } of roles) {
+      const text = events
+        .filter((event) => event.event === "message_delta" && event.taskId === `team-${role}-task`)
+        .map((event) => event.delta)
+        .join("");
+      assert.match(text, new RegExp(`${role} 独立专业意见`));
+    }
+    assert.equal(faux.state.callCount, 6);
+  } finally {
+    host.dispose();
+  }
+});
+
 async function waitForEvent(events: Record<string, unknown>[], eventName: string, taskId: string): Promise<void> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {

@@ -974,12 +974,14 @@ fn prepare_task_for_runtime(
             model,
             system_prompt: None,
             thinking_level: None,
+            allowed_tools: None,
+            allow_call_expert: pi_sdk_runtime.then_some(true),
             attachments,
         }),
     })
 }
 
-fn visual_attachments(
+pub(crate) fn visual_attachments(
     project_path: &Path,
     conn: &rusqlite::Connection,
     expert_type: &str,

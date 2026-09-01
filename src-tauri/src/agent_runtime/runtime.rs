@@ -26,6 +26,10 @@ pub struct RuntimeTaskInput {
     #[serde(default)]
     pub thinking_level: Option<String>,
     #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_call_expert: Option<bool>,
+    #[serde(default)]
     pub attachments: Vec<RuntimeAttachment>,
 }
 

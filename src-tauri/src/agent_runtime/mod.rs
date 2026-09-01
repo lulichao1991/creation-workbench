@@ -190,6 +190,8 @@ mod tests {
             model: None,
             system_prompt: None,
             thinking_level: None,
+            allowed_tools: None,
+            allow_call_expert: None,
             attachments: Vec::new(),
         }
     }

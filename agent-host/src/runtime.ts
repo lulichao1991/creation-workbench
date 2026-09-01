@@ -128,6 +128,8 @@ export class WorkbenchAgentHost {
     const model = selectModel(this.modelRuntime, optionalString(request, "provider"), optionalString(request, "model"));
     const cwd = this.dataDir;
     const resourceLoader = isolatedResourceLoader(optionalString(request, "systemPrompt") ?? MAIN_SYSTEM_PROMPT);
+    const allowedToolNames = optionalStringArray(request, "allowedTools");
+    const allowCallExpert = optionalBoolean(request, "allowCallExpert") ?? true;
     const settingsManager = SettingsManager.inMemory({
       compaction: { enabled: true },
       retry: { enabled: true, maxRetries: 2 },
@@ -141,7 +143,8 @@ export class WorkbenchAgentHost {
       thinkingLevel: optionalThinkingLevel(request),
       noTools: "builtin",
       customTools: createWorkbenchTools(sessionId, () => entry?.activeTaskId, this.gateway, {
-        callExpert: (input) => this.callExpert(sessionId, entry, input),
+        allowedToolNames,
+        callExpert: allowCallExpert ? (input) => this.callExpert(sessionId, entry, input) : undefined,
       }),
       resourceLoader,
       settingsManager,
@@ -444,6 +447,22 @@ function optionalString(value: HostRequest, key: string): string | undefined {
   const field = value[key];
   if (field === undefined || field === null || field === "") return undefined;
   if (typeof field !== "string") throw new Error(`${key} 必须是字符串`);
+  return field;
+}
+
+function optionalStringArray(value: HostRequest, key: string): string[] | undefined {
+  const field = value[key];
+  if (field === undefined || field === null) return undefined;
+  if (!Array.isArray(field) || !field.every((item) => typeof item === "string")) {
+    throw new Error(`${key} 必须是字符串数组`);
+  }
+  return field;
+}
+
+function optionalBoolean(value: HostRequest, key: string): boolean | undefined {
+  const field = value[key];
+  if (field === undefined || field === null) return undefined;
+  if (typeof field !== "boolean") throw new Error(`${key} 必须是布尔值`);
   return field;
 }
 

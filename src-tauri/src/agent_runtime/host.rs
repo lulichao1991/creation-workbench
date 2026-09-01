@@ -202,6 +202,8 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
                     "model": input.model,
                     "systemPrompt": input.system_prompt,
                     "thinkingLevel": input.thinking_level,
+                    "allowedTools": input.allowed_tools,
+                    "allowCallExpert": input.allow_call_expert,
                 }),
             )?;
             let runtime_session_id = result
@@ -685,6 +687,8 @@ mod tests {
                     model: None,
                     system_prompt: None,
                     thinking_level: None,
+                    allowed_tools: None,
+                    allow_call_expert: None,
                     attachments: Vec::new(),
                 },
                 sink,
@@ -763,6 +767,8 @@ mod tests {
                     model: None,
                     system_prompt: None,
                     thinking_level: None,
+                    allowed_tools: None,
+                    allow_call_expert: None,
                     attachments: Vec::new(),
                 },
                 sink,

@@ -219,3 +219,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - Main Agent 新增 `call_expert`，可自主创建 Writer、Director、Cinematography、Art、Keyframe、Prompt 六类短生命周期 Pi `AgentSession`；每次调用都持久化父子 Session、专业 Task、Pi Session ID、结果和 Tool 审计。
 - 每类专业 Session 使用独立系统指令和最小只读工具白名单，不能递归调用其他专家；Provider/模型沿用项目专业覆盖，摄影、美术、关键帧和提示词角色可接收当前正式视觉附件。
 - 自动化使用真实 Pi SDK 跑通 `MainAgent → call_expert(cinematography) → read_shot_context → 专业意见 → MainAgent 综合`，并覆盖六类配置、专业工具审计、失败收口及专业 Session 禁止递归。
+
+## V2 Beta 2 Goal31 专家团 Pi 化
+
+- 保留既有“专家团申请 + 高成本确认”双卡硬边界；确认前仍不会创建成员 Task、Pi Session、ContextPackage 或 Runtime 调用。
+- 确认后每位成员获得独立数据库子 Session、Pi `AgentSession`、专业系统指令和最小只读工具白名单；Pi 路径不再预打包项目 ContextPackage，而是在各自 Tool Loop 中按需读取事实，且不能调用其他专家。
+- 编剧、导演和摄影 Session 可并行运行、互不读取彼此输出并产生角色化意见；摄影等视觉角色会直接收到当前选区关联的正式图片，所有成员 WriteScope 始终为空。
+- 全部成员结束后由原 MainAgentSession 综合共识、分歧、建议、问题和风险；成员 Session 生命周期、Pi Session ID、结果、失败、取消、stale 与只读约束均持久化，任何 Patch 或扩权请求都会被丢弃。
+- 自动化覆盖真实 Pi SDK 三 Session 并行三种 Tool Loop、不同专业输出，以及 Rust 侧确认边界、无预打包上下文、正式视觉附件、成员 Session 关闭和 Main 综合。

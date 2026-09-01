@@ -306,15 +306,13 @@ fn start_expert(
     )
     .map_err(|e| e.to_string())?;
     let allowed_tools = expert_tool_names(&expert_type);
+    let system_prompt = professional_system_prompt(&expert_type)?;
     Ok(json!({
         "expertType": expert_type,
         "expertSessionId": expert_session_id,
         "expertTaskId": expert_task_id,
         "runtimeSessionId": expert_session_id,
-        "systemPrompt": format!(
-            "你是创作工作台的{}。{} 你拥有独立 Pi AgentSession，只能使用当前开放的只读工作台工具核对项目事实；不得猜测，不得调用其他专业 Agent，不得访问文件、Shell、PowerShell 或数据库。你只返回结构化专业意见，修改建议交给主 Agent 综合，不能直接写入项目。",
-            definition.display_name, definition.system_instruction
-        ),
+        "systemPrompt": system_prompt,
         "allowedTools": allowed_tools,
         "provider": provider,
         "model": model,
@@ -435,7 +433,7 @@ fn focus_refs(
         .collect()
 }
 
-fn expert_tool_names(expert_type: &str) -> &'static [&'static str] {
+pub(crate) fn expert_tool_names(expert_type: &str) -> &'static [&'static str] {
     match expert_type {
         "writer" => &[
             "get_selection",
@@ -477,6 +475,15 @@ fn expert_tool_names(expert_type: &str) -> &'static [&'static str] {
         ],
         _ => &[],
     }
+}
+
+pub(crate) fn professional_system_prompt(expert_type: &str) -> AppResult<String> {
+    let definition = expert(expert_type)
+        .ok_or_else(|| format!("TOOL_ARGUMENT_INVALID: 未知专业 Agent：{expert_type}"))?;
+    Ok(format!(
+        "你是创作工作台的{}。{} 你拥有独立 Pi AgentSession，只能使用当前开放的只读工作台工具核对项目事实；不得猜测，不得调用其他专业 Agent，不得访问文件、Shell、PowerShell 或数据库。你只返回结构化专业意见，修改建议交给主 Agent 综合，不能直接写入项目。",
+        definition.display_name, definition.system_instruction
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]

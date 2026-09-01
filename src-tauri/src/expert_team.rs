@@ -1,8 +1,11 @@
 use crate::agent_application::{
     build_expert_prompt, ensure_expert_agents_enabled, expert, expert_model_override,
+    visual_attachments,
 };
+use crate::agent_gateway::{expert_tool_names, professional_system_prompt};
 use crate::agent_runtime::{
-    RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput, RUNTIME_EVENT_NAME,
+    use_pi_sdk_runtime, RuntimeEvent, RuntimeEventSink, RuntimeState, RuntimeTaskInput,
+    RUNTIME_EVENT_NAME,
 };
 use crate::app_database::load_feature_flags;
 use crate::context::{build_context_with_memories, BuildContextInput, SelectionSnapshot};
@@ -143,7 +146,9 @@ pub fn expert_team_confirm(
         .path()
         .app_data_dir()
         .map_err(|e| format!("读取应用数据目录失败：{e}"))?;
-    let memories = if load_feature_flags(&app_data_dir)?.get("memory") == Some(&true) {
+    let memories = if !use_pi_sdk_runtime()
+        && load_feature_flags(&app_data_dir)?.get("memory") == Some(&true)
+    {
         Some(active_global_memories(&app_data_dir)?)
     } else {
         None
@@ -156,6 +161,7 @@ pub fn expert_team_confirm(
         Path::new(&project_path),
         input,
         memories.as_deref(),
+        Some(&app_data_dir),
         runtime.inner().clone(),
         Some(emitter),
     )
@@ -303,8 +309,30 @@ fn confirm_consultation(
     project_path: &Path,
     input: ConfirmExpertTeamInput,
     global_memories: Option<&[MemoryContextEntry]>,
+    app_data_dir: Option<&Path>,
     runtime: RuntimeState,
     emitter: Option<EventEmitter>,
+) -> AppResult<ExpertTeamConsultation> {
+    confirm_consultation_for_runtime(
+        project_path,
+        input,
+        global_memories,
+        app_data_dir,
+        runtime,
+        emitter,
+        use_pi_sdk_runtime(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn confirm_consultation_for_runtime(
+    project_path: &Path,
+    input: ConfirmExpertTeamInput,
+    global_memories: Option<&[MemoryContextEntry]>,
+    app_data_dir: Option<&Path>,
+    runtime: RuntimeState,
+    emitter: Option<EventEmitter>,
+    pi_sdk_runtime: bool,
 ) -> AppResult<ExpertTeamConsultation> {
     if !input.confirmed {
         return Err("CONFIRMATION_REQUIRED: 必须显式确认专家和高成本后才能启动".into());
@@ -361,7 +389,13 @@ fn confirm_consultation(
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
 
-    let prepared = match prepare_member_tasks(project_path, &current, global_memories) {
+    let prepared = match prepare_member_tasks(
+        project_path,
+        &current,
+        global_memories,
+        app_data_dir,
+        pi_sdk_runtime,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => {
             fail_consultation(project_path, &current.id, &error)?;
@@ -370,27 +404,64 @@ fn confirm_consultation(
     };
     for task in prepared {
         let sink = member_event_sink(project_path.to_path_buf(), runtime.clone(), emitter.clone());
-        if let Err(error) = runtime.start_task(task.input.clone(), sink) {
-            mark_member_failed(
-                project_path,
-                task.input.task_id.as_deref().unwrap_or_default(),
-                &error,
-            )?;
-            maybe_start_synthesis(project_path, &runtime, emitter.clone())?;
+        let task_id = task.input.task_id.as_deref().unwrap_or_default();
+        match runtime.start_task(task.input.clone(), sink) {
+            Ok(handle) => {
+                if let Some(runtime_session_id) = handle.runtime_session_id.as_deref() {
+                    bind_member_runtime_session(project_path, task_id, runtime_session_id)?;
+                }
+            }
+            Err(error) => {
+                mark_member_failed(project_path, task_id, &error)?;
+                maybe_start_synthesis(project_path, &runtime, emitter.clone())?;
+            }
         }
     }
     let conn = open_database(project_path)?;
     load_consultation(&conn, &input.consultation_id)
 }
 
+fn bind_member_runtime_session(
+    project_path: &Path,
+    task_id: &str,
+    runtime_session_id: &str,
+) -> AppResult<()> {
+    let conn = open_database(project_path)?;
+    let timestamp = now();
+    conn.execute(
+        "UPDATE agent_tasks SET pi_session_id=?1 WHERE id=?2 AND task_type='expert_team_member'",
+        params![runtime_session_id, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE expert_team_members SET pi_session_id=?1, updated_at=?2 WHERE task_id=?3",
+        params![runtime_session_id, timestamp, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agent_sessions SET runtime_session_id=?1, last_active_at=?2, updated_at=?2
+         WHERE id=(SELECT session_id FROM agent_tasks WHERE id=?3) AND session_kind='expert_team'",
+        params![runtime_session_id, timestamp, task_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn prepare_member_tasks(
     project_path: &Path,
     consultation: &ExpertTeamConsultation,
     global_memories: Option<&[MemoryContextEntry]>,
+    app_data_dir: Option<&Path>,
+    pi_sdk_runtime: bool,
 ) -> AppResult<Vec<PreparedRuntimeTask>> {
     let mut prepared = Vec::new();
     for member in &consultation.members {
         let task_id = format!("{}:task", member.id);
+        let member_session_id = if pi_sdk_runtime {
+            format!("{}:session", member.id)
+        } else {
+            consultation.session_id.clone()
+        };
         let mut conn = open_database(project_path)?;
         let (project_id, revision): (String, i64) = conn
             .query_row("SELECT id, revision FROM projects LIMIT 1", [], |row| {
@@ -415,55 +486,156 @@ fn prepare_member_tasks(
             request_model,
         )?;
         let timestamp = now();
+        if pi_sdk_runtime {
+            conn.execute(
+                "INSERT INTO agent_sessions
+                 (id, project_id, scope_type, scope_id, title, status, runtime_session_id,
+                  session_kind, parent_session_id, expert_type, session_status,
+                  last_active_at, created_at, updated_at)
+                 VALUES (?1, ?2, 'selection', ?3, ?4, 'active', ?1, 'expert_team',
+                         ?5, ?6, 'active', ?7, ?7, ?7)",
+                params![
+                    member_session_id,
+                    project_id,
+                    consultation
+                        .selection
+                        .center
+                        .as_ref()
+                        .map(|value| value.object_id.as_str()),
+                    format!(
+                        "专家团 · {}",
+                        expert(&member.expert_type).unwrap().display_name
+                    ),
+                    consultation.session_id,
+                    member.expert_type,
+                    timestamp,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO agent_tasks
+                 (id, session_id, task_type, interaction_mode, agent_type, selection_json,
+                  read_scope_json, write_scope_json, context_revision, base_revision, status,
+                  model_provider, model_name, pi_session_id, created_at)
+                 VALUES (?1, ?2, 'expert_team_member', 'discussion', ?3, ?4, ?5, ?6,
+                         ?7, ?7, 'queued', ?8, ?9, ?2, ?10)",
+                params![
+                    task_id,
+                    member_session_id,
+                    member.expert_type,
+                    serde_json::to_string(&consultation.selection).map_err(|e| e.to_string())?,
+                    serde_json::to_string(&consultation.selection.selected)
+                        .map_err(|e| e.to_string())?,
+                    serde_json::to_string(&WriteScope::default()).map_err(|e| e.to_string())?,
+                    revision,
+                    provider,
+                    model,
+                    timestamp,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO agent_messages
+                 (id, session_id, role, agent_type, content, created_at)
+                 VALUES (?1, ?2, 'user', ?3, ?4, ?5)",
+                params![
+                    format!("{task_id}:user"),
+                    member_session_id,
+                    member.expert_type,
+                    consultation.user_request,
+                    timestamp,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute(
+                "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, 'expert_team_member', ?3, ?4, ?5, ?6, ?7, 'context_building', ?8, ?9, ?10)",
+                params![task_id, consultation.session_id, member.expert_type, serde_json::to_string(&consultation.selection).map_err(|e| e.to_string())?, serde_json::to_string(&consultation.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&WriteScope::default()).map_err(|e| e.to_string())?, revision, provider, model, timestamp],
+            ).map_err(|e| e.to_string())?;
+        }
         conn.execute(
-            "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, 'expert_team_member', ?3, ?4, ?5, ?6, ?7, 'context_building', ?8, ?9, ?10)",
-            params![task_id, consultation.session_id, member.expert_type, serde_json::to_string(&consultation.selection).map_err(|e| e.to_string())?, serde_json::to_string(&consultation.selection.selected).map_err(|e| e.to_string())?, serde_json::to_string(&WriteScope::default()).map_err(|e| e.to_string())?, revision, provider, model, timestamp],
-        ).map_err(|e| e.to_string())?;
-        conn.execute(
-            "UPDATE expert_team_members SET task_id=?1, status='queued', updated_at=?2 WHERE id=?3",
-            params![task_id, timestamp, member.id],
+            "UPDATE expert_team_members
+             SET task_id=?1, pi_session_id=?2, status='queued', updated_at=?3 WHERE id=?4",
+            params![
+                task_id,
+                pi_sdk_runtime.then_some(member_session_id.as_str()),
+                timestamp,
+                member.id
+            ],
         )
         .map_err(|e| e.to_string())?;
-        let package = build_context_with_memories(
-            &mut conn,
-            BuildContextInput {
-                task_id: task_id.clone(),
-                selection: consultation.selection.clone(),
-                task_intent: "expert_team_consultation".into(),
-                expert_type: member.expert_type.clone(),
-                token_budget: consultation.token_budget,
-            },
-            global_memories,
-        )?;
-        let prompt = build_expert_prompt(
-            &member.expert_type,
-            "discussion",
-            &format!(
-                "专家团独立只读会诊。请只从你的专业职责分析，不参考或猜测其他专家意见。会诊问题：{}",
-                consultation.user_request
-            ),
-            &WriteScope::default(),
-            &package,
-            None,
-        )?;
-        conn.execute(
-            "UPDATE agent_tasks SET status='queued' WHERE id=?1",
-            [&task_id],
-        )
-        .map_err(|e| e.to_string())?;
+        let (prompt, system_prompt, allowed_tools, attachments) = if pi_sdk_runtime {
+            (
+                format!(
+                    "专家团独立只读会诊。会诊问题：{}\n启动选区引用：{}\n项目事实没有预先打包；先调用 get_selection，再使用你白名单内的读取工具核对事实。只从你的专业职责分析，不得参考、猜测或请求其他专家意见。最终只返回 JSON，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks；patchProposal 必须为 null，permissionRequests 必须为空。",
+                    consultation.user_request,
+                    serde_json::to_string(&consultation.selection).map_err(|e| e.to_string())?,
+                ),
+                Some(professional_system_prompt(&member.expert_type)?),
+                Some(
+                    expert_tool_names(&member.expert_type)
+                        .iter()
+                        .map(|value| (*value).to_string())
+                        .collect(),
+                ),
+                visual_attachments(
+                    project_path,
+                    &conn,
+                    &member.expert_type,
+                    &consultation.selection,
+                )?,
+            )
+        } else {
+            let package = build_context_with_memories(
+                &mut conn,
+                BuildContextInput {
+                    task_id: task_id.clone(),
+                    selection: consultation.selection.clone(),
+                    task_intent: "expert_team_consultation".into(),
+                    expert_type: member.expert_type.clone(),
+                    token_budget: consultation.token_budget,
+                },
+                global_memories,
+            )?;
+            (
+                build_expert_prompt(
+                    &member.expert_type,
+                    "discussion",
+                    &format!(
+                        "专家团独立只读会诊。请只从你的专业职责分析，不参考或猜测其他专家意见。会诊问题：{}",
+                        consultation.user_request
+                    ),
+                    &WriteScope::default(),
+                    &package,
+                    None,
+                )?,
+                None,
+                None,
+                Vec::new(),
+            )
+        };
+        if !pi_sdk_runtime {
+            conn.execute(
+                "UPDATE agent_tasks SET status='queued' WHERE id=?1",
+                [&task_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         prepared.push(PreparedRuntimeTask {
             input: RuntimeTaskInput {
                 task_id: Some(task_id.clone()),
-                session_id: Some(task_id),
-                runtime_session_id: None,
+                session_id: Some(member_session_id.clone()),
+                runtime_session_id: pi_sdk_runtime.then_some(member_session_id),
                 project_path: Some(project_path.to_string_lossy().into_owned()),
-                app_data_dir: None,
+                app_data_dir: app_data_dir.map(|path| path.to_string_lossy().into_owned()),
                 prompt,
                 provider,
                 model,
-                system_prompt: None,
-                thinking_level: None,
-                attachments: Vec::new(),
+                system_prompt,
+                thinking_level: pi_sdk_runtime.then(|| "medium".into()),
+                allowed_tools,
+                allow_call_expert: pi_sdk_runtime.then_some(false),
+                attachments,
             },
         });
     }
@@ -478,18 +650,43 @@ fn member_event_sink(
     let buffer = Arc::new(Mutex::new(String::new()));
     Arc::new(move |event| {
         handle_member_event(&project_path, &buffer, &event);
-        if matches!(
-            event,
-            RuntimeEvent::TaskCompleted { .. }
-                | RuntimeEvent::TaskFailed { .. }
-                | RuntimeEvent::TaskCancelled { .. }
-        ) {
-            let _ = maybe_start_synthesis(&project_path, &runtime, emitter.clone());
+        let terminal_task_id = match &event {
+            RuntimeEvent::TaskCompleted { task_id }
+            | RuntimeEvent::TaskFailed { task_id, .. }
+            | RuntimeEvent::TaskCancelled { task_id } => Some(task_id.clone()),
+            _ => None,
+        };
+        if let Some(task_id) = terminal_task_id {
+            let continuation_path = project_path.clone();
+            let continuation_runtime = runtime.clone();
+            let continuation_emitter = emitter.clone();
+            std::thread::spawn(move || {
+                if let Ok(Some(session_id)) = member_runtime_session(&continuation_path, &task_id) {
+                    let _ = continuation_runtime.close_session(&session_id);
+                }
+                let _ = maybe_start_synthesis(
+                    &continuation_path,
+                    &continuation_runtime,
+                    continuation_emitter,
+                );
+            });
         }
         if let Some(emit) = emitter.as_ref() {
             emit(event);
         }
     })
+}
+
+fn member_runtime_session(project_path: &Path, task_id: &str) -> AppResult<Option<String>> {
+    let conn = open_database(project_path)?;
+    conn.query_row(
+        "SELECT s.id FROM agent_tasks t JOIN agent_sessions s ON s.id=t.session_id
+         WHERE t.id=?1 AND s.session_kind='expert_team'",
+        [task_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 fn handle_member_event(project_path: &Path, buffer: &Mutex<String>, event: &RuntimeEvent) {
@@ -526,11 +723,12 @@ fn handle_member_event(project_path: &Path, buffer: &Mutex<String>, event: &Runt
 
 fn complete_member(project_path: &Path, task_id: &str, raw: &str) -> AppResult<()> {
     let mut conn = open_database(project_path)?;
-    let current_status: String = conn
+    let (current_status, member_session_id): (String, String) = conn
         .query_row(
-            "SELECT status FROM agent_tasks WHERE id=?1 AND task_type='expert_team_member'",
+            "SELECT status, session_id FROM agent_tasks
+             WHERE id=?1 AND task_type='expert_team_member'",
             [task_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|_| "OBJECT_NOT_FOUND: 专家团成员任务不存在".to_string())?;
     if current_status == "cancelled" {
@@ -576,6 +774,27 @@ fn complete_member(project_path: &Path, task_id: &str, raw: &str) -> AppResult<(
         "UPDATE expert_team_members SET status='completed', result_json=?1, updated_at=?2 WHERE task_id=?3 AND status<>'cancelled'",
         params![result.to_string(), timestamp, task_id],
     ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET status='closed', session_status='closed',
+         last_active_at=?1, updated_at=?1 WHERE id=?2 AND session_kind='expert_team'",
+        params![timestamp, member_session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT OR REPLACE INTO agent_messages
+         (id, session_id, role, agent_type, content, structured_json, created_at)
+         SELECT ?1, ?2, 'assistant', ?3, ?4, ?5, ?6
+         FROM agent_sessions WHERE id=?2 AND session_kind='expert_team'",
+        params![
+            format!("{task_id}:assistant"),
+            member_session_id,
+            expert_type,
+            result["summary"].as_str().unwrap_or_default(),
+            result.to_string(),
+            timestamp,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -607,6 +826,16 @@ fn update_member_status(
         params![status, timestamp, task_id],
     )
     .map_err(|e| e.to_string())?;
+    if !started {
+        tx.execute(
+            "UPDATE agent_sessions SET status='closed', session_status='closed',
+             last_active_at=?1, updated_at=?1
+             WHERE id=(SELECT session_id FROM agent_tasks WHERE id=?2)
+               AND session_kind='expert_team'",
+            params![timestamp, task_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -624,6 +853,14 @@ fn mark_member_failed(project_path: &Path, task_id: &str, error: &str) -> AppRes
         "UPDATE expert_team_members SET status='failed', error_json=?1, updated_at=?2 WHERE task_id=?3 AND status<>'cancelled'",
         params![error_json, timestamp, task_id],
     ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET status='closed', session_status='closed',
+         last_active_at=?1, updated_at=?1
+         WHERE id=(SELECT session_id FROM agent_tasks WHERE id=?2)
+           AND session_kind='expert_team'",
+        params![timestamp, task_id],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -745,6 +982,13 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+    let runtime_session_id: Option<String> = tx
+        .query_row(
+            "SELECT runtime_session_id FROM agent_sessions WHERE id=?1",
+            [&session_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO agent_tasks (id, session_id, task_type, agent_type, selection_json, read_scope_json, write_scope_json, context_revision, status, model_provider, model_name, created_at) VALUES (?1, ?2, 'expert_team_synthesis', 'main', ?3, '[]', ?4, ?5, 'queued', ?6, ?7, ?8)",
         params![synthesis_task_id, session_id, selection_json, serde_json::to_string(&WriteScope::default()).map_err(|e| e.to_string())?, base_revision, provider, model, timestamp],
@@ -758,7 +1002,7 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
     Ok(Some(RuntimeTaskInput {
         task_id: Some(synthesis_task_id),
         session_id: Some(session_id),
-        runtime_session_id: None,
+        runtime_session_id,
         project_path: Some(project_path.to_string_lossy().into_owned()),
         app_data_dir: None,
         prompt,
@@ -766,6 +1010,8 @@ fn prepare_synthesis(project_path: &Path) -> AppResult<Option<RuntimeTaskInput>>
         model,
         system_prompt: None,
         thinking_level: None,
+        allowed_tools: Some(Vec::new()),
+        allow_call_expert: Some(false),
         attachments: Vec::new(),
     }))
 }
@@ -951,6 +1197,16 @@ fn fail_consultation(project_path: &Path, consultation_id: &str, error: &str) ->
         "UPDATE agent_tasks SET status='failed', error_json=?1, completed_at=?2 WHERE id=?3 OR id IN (SELECT task_id FROM expert_team_members WHERE consultation_id=?4)",
         params![error_json.to_string(), timestamp, consultation.request_task_id, consultation_id],
     ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET status='closed', session_status='closed',
+         last_active_at=?1, updated_at=?1
+         WHERE session_kind='expert_team' AND id IN (
+           SELECT t.session_id FROM agent_tasks t
+           JOIN expert_team_members m ON m.task_id=t.id WHERE m.consultation_id=?2
+         )",
+        params![timestamp, consultation_id],
+    )
+    .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -992,6 +1248,16 @@ fn cancel_consultation(
         "UPDATE agent_tasks SET status='cancelled', result_json=?1, completed_at=?2 WHERE id=?3 OR id IN (SELECT task_id FROM expert_team_members WHERE consultation_id=?4) OR id=?5",
         params![result.to_string(), timestamp, consultation.request_task_id, consultation_id, consultation.synthesis_task_id],
     ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE agent_sessions SET status='closed', session_status='closed',
+         last_active_at=?1, updated_at=?1
+         WHERE session_kind='expert_team' AND id IN (
+           SELECT t.session_id FROM agent_tasks t
+           JOIN expert_team_members m ON m.task_id=t.id WHERE m.consultation_id=?2
+         )",
+        params![timestamp, consultation_id],
+    )
+    .map_err(|e| e.to_string())?;
     tx.execute(
         "UPDATE ai_cards SET status='dismissed', resolution_json=?1, resolved_at=?2 WHERE task_id=?3 AND status='open'",
         params![json!({"action": "cancelled"}).to_string(), timestamp, consultation.request_task_id],
@@ -1204,6 +1470,7 @@ mod tests {
                 confirmed: false,
             },
             None,
+            None,
             runtime,
             None,
         )
@@ -1231,6 +1498,175 @@ mod tests {
     }
 
     #[test]
+    fn pi_team_prepares_independent_tool_driven_professional_sessions() {
+        let (temp, project_id, mut selection) = setup();
+        std::fs::create_dir_all(temp.path().join("media")).unwrap();
+        std::fs::write(
+            temp.path().join("media").join("hero.png"),
+            b"\x89PNG\r\n\x1a\n",
+        )
+        .unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let timestamp = now();
+        conn.execute("INSERT INTO content_units (id, project_id, type, name, sort_order, created_at, updated_at) VALUES ('episode', ?1, 'episode', '第1集', 0, ?2, ?2)", params![project_id, timestamp]).unwrap();
+        conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'episode', '第1集', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场1', 0, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, created_at, updated_at) VALUES ('shot04', 'scene', 0, '镜头04', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO assets (id, project_id, type, name, created_at, updated_at) VALUES ('hero', ?1, 'character', '主角', ?2, ?2)", params![project_id, timestamp]).unwrap();
+        conn.execute("INSERT INTO asset_media (id, asset_id, file_path, label, is_primary, created_at, updated_at) VALUES ('hero-image', 'hero', 'media/hero.png', '正式角色图', 1, ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("INSERT INTO shot_assets (id, shot_id, asset_id, role, created_at, updated_at) VALUES ('shot-hero', 'shot04', 'hero', 'subject', ?1, ?1)", [&timestamp]).unwrap();
+        drop(conn);
+        selection.center = Some(ObjectRef {
+            project_id: project_id.clone(),
+            object_type: "shot".into(),
+            object_id: "shot04".into(),
+            field: Some("composition".into()),
+        });
+        selection.selected = vec![selection.center.clone().unwrap()];
+        request_consultation(temp.path(), request_input(selection)).unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let consultation = load_consultation(&conn, "consultation").unwrap();
+        drop(conn);
+        let prepared = prepare_member_tasks(temp.path(), &consultation, None, None, true).unwrap();
+        assert_eq!(prepared.len(), 3);
+        let session_ids = prepared
+            .iter()
+            .map(|task| task.input.session_id.clone().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(session_ids.len(), 3);
+        for task in &prepared {
+            let session_id = task.input.session_id.as_deref().unwrap();
+            assert_eq!(task.input.runtime_session_id.as_deref(), Some(session_id));
+            assert_eq!(task.input.allow_call_expert, Some(false));
+            assert!(task.input.system_prompt.as_deref().is_some_and(|prompt| {
+                prompt.contains("独立 Pi AgentSession") && prompt.contains("不得调用其他专业 Agent")
+            }));
+            assert!(task.input.prompt.contains("项目事实没有预先打包"));
+            assert!(!task.input.prompt.contains("ContextPackage"));
+            let tools = task.input.allowed_tools.as_ref().unwrap();
+            assert!(!tools.is_empty());
+            assert!(!tools.iter().any(|tool| tool == "call_expert"));
+            if session_id.contains("cinematography") {
+                assert_eq!(task.input.attachments.len(), 1);
+                assert_eq!(task.input.attachments[0].name, "正式角色图");
+            } else {
+                assert!(task.input.attachments.is_empty());
+            }
+        }
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM context_packages", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(DISTINCT s.id) FROM agent_sessions s
+                 JOIN agent_tasks t ON t.session_id=s.id
+                 WHERE s.session_kind='expert_team' AND t.task_type='expert_team_member'
+                   AND t.write_scope_json='{\"refs\":[],\"protectedRefs\":[]}'
+                   AND t.pi_session_id=s.id",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(DISTINCT pi_session_id) FROM expert_team_members
+                 WHERE consultation_id='consultation' AND pi_session_id IS NOT NULL",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn confirmed_pi_team_closes_member_sessions_and_main_synthesizes() {
+        let (temp, _, selection) = setup();
+        request_consultation(temp.path(), request_input(selection)).unwrap();
+        let response = json!({
+            "summary": "独立专业意见",
+            "findings": [{"topic": "节奏"}],
+            "patchProposal": null,
+            "permissionRequests": [],
+            "questions": [],
+            "risks": [],
+            "consensus": ["需要收紧"],
+            "disagreements": [{"topic": "镜头长度"}],
+            "recommendations": ["另行建立修改提案"]
+        })
+        .to_string();
+        let runtime =
+            RuntimeState::with_runtime(MockRuntime::new(vec![response], Duration::from_millis(5)));
+        confirm_consultation_for_runtime(
+            temp.path(),
+            ConfirmExpertTeamInput {
+                consultation_id: "consultation".into(),
+                confirmed: true,
+            },
+            None,
+            None,
+            runtime,
+            None,
+            true,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let completed = loop {
+            let conn = open_database(temp.path()).unwrap();
+            let value = load_consultation(&conn, "consultation").unwrap();
+            if matches!(value.status.as_str(), "completed" | "failed" | "stale") {
+                break value;
+            }
+            assert!(Instant::now() < deadline, "Pi 专家团未在期限内完成");
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(completed.status, "completed");
+        assert!(completed.synthesis_task_id.is_some());
+        assert!(completed
+            .members
+            .iter()
+            .all(|member| member.status == "completed"));
+        assert_eq!(completed.result.as_ref().unwrap()["readOnly"], true);
+        assert_eq!(
+            completed.result.as_ref().unwrap()["patchProposal"],
+            Value::Null
+        );
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_sessions
+                 WHERE session_kind='expert_team' AND session_status='closed'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM context_packages", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_messages m JOIN agent_sessions s ON s.id=m.session_id
+                 WHERE s.session_kind='expert_team' AND m.role='assistant'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
     fn confirmed_team_uses_independent_readonly_contexts_and_main_synthesis() {
         let (temp, _, selection) = setup();
         request_consultation(temp.path(), request_input(selection)).unwrap();
@@ -1253,6 +1689,7 @@ mod tests {
                 consultation_id: "consultation".into(),
                 confirmed: true,
             },
+            None,
             None,
             runtime,
             None,
@@ -1328,6 +1765,7 @@ mod tests {
                 confirmed: true,
             },
             None,
+            None,
             runtime.clone(),
             None,
         )
@@ -1352,6 +1790,7 @@ mod tests {
                 consultation_id: "consultation".into(),
                 confirmed: true,
             },
+            None,
             None,
             stale_runtime,
             None,
