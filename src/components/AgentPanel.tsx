@@ -93,6 +93,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
   const [attachSelection, setAttachSelection] = useState(true);
   const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
   const [activeExpert, setActiveExpert] = useState<ExpertType | "main">("main");
+  const [activeToolName, setActiveToolName] = useState<string | null>(null);
   const [streamingText, setStreamingText] = useState("");
   const [proposal, setProposal] = useState<PatchProposal | null>(null);
   const [cards, setCards] = useState<AICard[]>([]);
@@ -132,6 +133,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     setActiveTask(null);
     activeTaskIdRef.current = null;
     setStreamingText("");
+    setActiveToolName(null);
     setProposal(null);
     setCards([]);
     setSelectedPatchIds(new Set());
@@ -213,7 +215,12 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         setStreamingText((value) => value + runtimeEvent.delta);
       } else if (runtimeEvent.type === "task_started") {
         setActiveTask((task) => task ? { ...task, status: "running" } : task);
+      } else if (runtimeEvent.type === "tool_call_requested") {
+        setActiveToolName(runtimeEvent.tool_name);
+      } else if (runtimeEvent.type === "tool_call_completed") {
+        setActiveToolName(null);
       } else if (["task_completed", "task_failed", "task_cancelled"].includes(runtimeEvent.type)) {
+        setActiveToolName(null);
         void refreshTask(runtimeEvent.task_id);
       }
     }).then((cleanup) => {
@@ -230,6 +237,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     const task = await api.agentGetTask(project.path, taskId);
     setActiveTask(task);
     setStreamingText("");
+    setActiveToolName(null);
     if (sessionId) setMessages(await api.agentListMessages(project.path, sessionId));
     const result = task.result as AgentResult | null;
     const nextProposal = result?.patchProposal ?? null;
@@ -304,6 +312,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
         setActiveTask(null);
         activeTaskIdRef.current = null;
         setStreamingText("");
+        setActiveToolName(null);
         setProposal(null);
         setCards([]);
         setConsultation(null);
@@ -323,6 +332,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     setProposal(null);
     setCards([]);
     setStreamingText("");
+    setActiveToolName(null);
     try {
       const requestId = crypto.randomUUID();
       const dispatch = await api.agentSendMessage(project.path, {
@@ -358,6 +368,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
     setProposal(null);
     setCards([]);
     setStreamingText("");
+    setActiveToolName(null);
     try {
       if (!flags?.change_analysis) {
         setFlags(await api.setFeatureFlag("change_analysis", true));
@@ -583,7 +594,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, active
       <section className="agent-status-row" aria-live="polite">
         <span className={`agent-status-dot ${taskRunning ? "running" : ""}`} />
         <strong>{expertLabels[activeExpert]}</strong>
-        <small>{activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
+        <small>{activeToolName ? `正在读取：${activeToolName}` : activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
         {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
         {!taskRunning && !teamRunning && <button className="agent-stop" disabled={diagnosing} onClick={() => void diagnoseRuntime()}>{diagnosing ? "检测中" : "Runtime 检测"}</button>}

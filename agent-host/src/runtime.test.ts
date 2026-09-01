@@ -3,7 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 
 import { WorkbenchAgentHost } from "./runtime.js";
 
@@ -121,6 +121,54 @@ test("restores a persisted Pi SDK session after host restart", async () => {
     assert.equal(faux.state.callCount, 3);
   } finally {
     secondHost.dispose();
+  }
+});
+
+test("runs multiple Workbench tools inside the real Pi Tool Loop", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-tools-"));
+  const faux = fauxProvider({ provider: "workbench-tools-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("get_selection", {}, { id: "tool-selection" }),
+      fauxToolCall("read_shot_context", { shotId: "shot04" }, { id: "tool-shot" }),
+    ], { stopReason: "toolUse" }),
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /projectRevision/);
+      assert.match(transcript, /shot04/);
+      return fauxAssistantMessage("压迫感不足来自主体尺度和前景遮挡不足");
+    },
+  ]);
+  const calls: Array<{ toolName: string; arguments: Record<string, unknown> }> = [];
+  const events: Record<string, unknown>[] = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      calls.push({ toolName: request.toolName, arguments: request.arguments });
+      return request.toolName === "get_selection"
+        ? { projectRevision: 7, data: { center: { objectType: "shot", objectId: "shot04" } } }
+        : { projectRevision: 7, data: { shot: { id: "shot04", composition: "平视中景" } } };
+    },
+  );
+  const sessionId = "00000000-0000-4000-8000-000000000004";
+  try {
+    await host.handle({
+      id: "create-tools",
+      type: "create_session",
+      sessionId,
+      provider: faux.provider.id,
+      model: faux.getModel().id,
+    });
+    await host.handle({ id: "tool-turn", type: "send_message", sessionId, taskId: "tool-task", message: "这个镜头为什么不够有压迫感？" });
+    await waitForEvent(events, "task_completed", "tool-task");
+    assert.deepEqual(calls.map((call) => call.toolName).sort(), ["get_selection", "read_shot_context"]);
+    assert.equal(events.filter((event) => event.event === "tool_call_requested").length, 2);
+    assert.equal(events.filter((event) => event.event === "tool_call_completed").length, 2);
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    host.dispose();
   }
 });
 

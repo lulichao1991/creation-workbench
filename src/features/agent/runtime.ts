@@ -2,6 +2,7 @@ export interface RuntimeTaskInput {
   taskId?: string;
   sessionId?: string;
   runtimeSessionId?: string;
+  projectPath?: string;
   prompt: string;
   provider?: string;
   model?: string;

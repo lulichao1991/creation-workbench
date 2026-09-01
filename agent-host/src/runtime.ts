@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { HostEvent, HostRequest } from "./protocol.js";
+import { createWorkbenchTools, type ToolGateway } from "./tools.js";
 
 type Emit = (event: HostEvent) => void;
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -32,7 +33,12 @@ interface ImageInput {
 
 const MAIN_SYSTEM_PROMPT = `你是创作工作台的主创作 Agent，定位接近制片人和创作总协调者。
 你不拥有项目事实，也不能直接修改项目。项目事实只能通过工作台工具读取。
+先根据用户问题调用必要的读取工具；信息不足时继续调用工具，不要猜测项目事实。
 需要专业判断时调用相应专业 Agent。所有修改只能通过 propose_patch 提交，由工作台决定是否应用。`;
+
+const unavailableGateway: ToolGateway = async () => {
+  throw new Error("工作台 Tool Gateway 不可用");
+};
 
 export class WorkbenchAgentHost {
   readonly sdkVersion = VERSION;
@@ -43,12 +49,14 @@ export class WorkbenchAgentHost {
     private readonly sessionDir: string,
     private readonly modelRuntime: ModelRuntime,
     private readonly emit: Emit,
+    private readonly gateway: ToolGateway,
   ) {}
 
   static async create(
     dataDir: string,
     emit: Emit,
     configureRuntime?: (runtime: ModelRuntime) => void,
+    gateway: ToolGateway = unavailableGateway,
   ): Promise<WorkbenchAgentHost> {
     await mkdir(dataDir, { recursive: true });
     const sessionDir = path.join(dataDir, "sessions");
@@ -60,7 +68,7 @@ export class WorkbenchAgentHost {
       refreshOnCreate: false,
     });
     configureRuntime?.(modelRuntime);
-    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit);
+    return new WorkbenchAgentHost(dataDir, sessionDir, modelRuntime, emit, gateway);
   }
 
   doctor(): Record<string, unknown> {
@@ -122,6 +130,7 @@ export class WorkbenchAgentHost {
       compaction: { enabled: true },
       retry: { enabled: true, maxRetries: 2 },
     });
+    let entry: SessionEntry | undefined;
     const { session } = await createAgentSession({
       cwd,
       agentDir: this.dataDir,
@@ -129,14 +138,14 @@ export class WorkbenchAgentHost {
       model,
       thinkingLevel: optionalThinkingLevel(request),
       noTools: "builtin",
-      customTools: [],
+      customTools: createWorkbenchTools(sessionId, () => entry?.activeTaskId, this.gateway),
       resourceLoader,
       settingsManager,
       sessionManager: prior
         ? SessionManager.open(prior.path, this.sessionDir, cwd)
         : SessionManager.create(cwd, this.sessionDir, { id: runtimeSessionId }),
     });
-    const entry: SessionEntry = { session, unsubscribe: () => {} };
+    entry = { session, unsubscribe: () => {} };
     entry.unsubscribe = session.subscribe((event) => this.forwardSessionEvent(sessionId, entry, event));
     this.sessions.set(sessionId, entry);
     return { sessionId, runtimeSessionId: session.sessionId, resumed: Boolean(prior) };

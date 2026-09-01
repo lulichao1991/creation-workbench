@@ -369,7 +369,10 @@ pub fn search_project(
          INSERT INTO temp.context_search_fts SELECT 'scene', id, title, location_text || ' ' || time_text || ' ' || summary || ' ' || content FROM scenes;
          INSERT INTO temp.context_search_fts SELECT 'shot', id, title, narrative_purpose || ' ' || new_information || ' ' || subjects || ' ' || action || ' ' || dialogue || ' ' || environment FROM shots;
          INSERT INTO temp.context_search_fts SELECT 'asset', id, name, description FROM assets;
-         INSERT INTO temp.context_search_fts SELECT 'relation', id, relation_type, description FROM relations;",
+         INSERT INTO temp.context_search_fts SELECT 'relation', id, relation_type, description FROM relations;
+         INSERT INTO temp.context_search_fts SELECT 'storyElement', id, name, description FROM story_elements;
+         INSERT INTO temp.context_search_fts SELECT 'storyElementOccurrence', id, occurrence_type, description FROM story_element_occurrences;
+         INSERT INTO temp.context_search_fts SELECT 'projectMemory', id, category, content FROM project_memories WHERE status='active';",
     )
     .map_err(|e| format!("建立 FTS 索引失败：{e}"))?;
     let project_id: String = conn
@@ -444,7 +447,11 @@ fn validate_ref_project(reference: &ObjectRef, project_id: &str) -> AppResult<()
     Ok(())
 }
 
-fn object_value(conn: &Connection, reference: &ObjectRef, compact: bool) -> AppResult<Value> {
+pub(crate) fn object_value(
+    conn: &Connection,
+    reference: &ObjectRef,
+    compact: bool,
+) -> AppResult<Value> {
     let table = table_for_type(&reference.object_type)?;
     let sql = format!("SELECT * FROM {table} WHERE id=?1 LIMIT 1");
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
@@ -724,7 +731,7 @@ fn table_for_type(object_type: &str) -> AppResult<&'static str> {
     }
 }
 
-fn parent_ref(conn: &Connection, reference: &ObjectRef) -> AppResult<Option<ObjectRef>> {
+pub(crate) fn parent_ref(conn: &Connection, reference: &ObjectRef) -> AppResult<Option<ObjectRef>> {
     let parent = match reference.object_type.as_str() {
         "changeSet" => parent_id(
             conn,
@@ -848,7 +855,7 @@ fn make_ref(parent: &ObjectRef, object_type: &str, object_id: String) -> ObjectR
     }
 }
 
-fn neighbor_refs(
+pub(crate) fn neighbor_refs(
     conn: &Connection,
     reference: &ObjectRef,
     count: usize,

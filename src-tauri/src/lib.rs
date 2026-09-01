@@ -1,4 +1,5 @@
 mod agent_application;
+mod agent_gateway;
 mod agent_runtime;
 mod app_database;
 mod commands;

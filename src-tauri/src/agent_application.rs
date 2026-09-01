@@ -366,9 +366,11 @@ pub fn agent_send_message(
         None
     };
     let prepared = prepare_task(Path::new(&project_path), input, global_memories.as_deref())?;
-    let Some(runtime_input) = prepared.runtime_input else {
+    let Some(mut runtime_input) = prepared.runtime_input else {
         return Ok(prepared.dispatch);
     };
+    runtime_input.project_path = Some(project_path.clone());
+    runtime_input.app_data_dir = Some(app_data_dir.to_string_lossy().into_owned());
     let task_id = prepared.dispatch.task_id.clone();
     let buffer = Arc::new(Mutex::new(String::new()));
     let sink_buffer = Arc::clone(&buffer);
@@ -929,6 +931,8 @@ fn prepare_task(
             task_id: Some(task_id),
             session_id: Some(input.session_id),
             runtime_session_id,
+            project_path: None,
+            app_data_dir: None,
             prompt,
             provider,
             model,

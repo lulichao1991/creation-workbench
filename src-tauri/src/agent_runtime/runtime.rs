@@ -14,6 +14,10 @@ pub struct RuntimeTaskInput {
     pub session_id: Option<String>,
     #[serde(default)]
     pub runtime_session_id: Option<String>,
+    #[serde(default)]
+    pub project_path: Option<String>,
+    #[serde(default)]
+    pub app_data_dir: Option<String>,
     pub prompt: String,
     pub provider: Option<String>,
     pub model: Option<String>,

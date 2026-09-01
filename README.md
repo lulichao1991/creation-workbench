@@ -197,3 +197,11 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - Agent 面板支持新建、切换、结束和恢复讨论，不再使用项目级硬编码会话 ID。
 - Pi SDK 模式由 `AgentSession` 自己维护多轮上下文；旧 `SessionWorkingMemory` 仅在 Goal 33 前作为 legacy Runtime 回退。
 - Runtime 桥接同时支持 `steer` 和 `follow_up`，自动化覆盖 Host 重启恢复、数据库映射、生命周期与忙碌会话保护。
+
+## V2 Beta 2 Goal28 Custom Tool Gateway
+
+- 真实 Pi Tool Loop 已注册 `get_selection`、对象/父子/相邻读取、场/镜头/资产/生成任务、故事结构、搜索、记忆和 ChangeSet 共 13 个只读工具。
+- Agent Host 只传递工具名和结构化参数；项目路径、SQLite 与应用数据目录始终留在 Rust 进程，且没有文件系统、Shell、PowerShell 或数据库直连工具。
+- Rust 对任务、会话、项目对象、参数白名单、当前 revision 和 64 KiB 结果上限逐次校验；资产图片仅返回不含本地路径的媒体元数据。
+- 每次调用写入 `agent_tool_calls` 并更新任务 `tool_call_count`；审计摘要会截断并清除 Key、Token、Secret、路径和图片字段。
+- 自动化覆盖真实 Pi 多工具循环、Rust↔Host 双向 IPC、全部首批读取工具、SQL 注入字符串、任意文件尝试、结果限额、revision 更新和审计。

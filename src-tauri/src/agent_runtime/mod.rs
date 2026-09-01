@@ -183,6 +183,8 @@ mod tests {
             task_id: Some(task_id.into()),
             session_id: None,
             runtime_session_id: None,
+            project_path: None,
+            app_data_dir: None,
             prompt: prompt.into(),
             provider: None,
             model: None,

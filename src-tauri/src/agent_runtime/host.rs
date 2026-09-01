@@ -12,6 +12,7 @@ use super::runtime::{
     AgentRuntime, RuntimeDiagnostics, RuntimeEvent, RuntimeEventSink, RuntimeTaskHandle,
     RuntimeTaskInput, RuntimeTaskState,
 };
+use crate::agent_gateway::{execute_tool, ToolGatewayRequest};
 use crate::database::{new_id, AppResult};
 
 struct HostCommand {
@@ -22,6 +23,8 @@ struct HostCommand {
 
 struct HostTask {
     session_id: String,
+    project_path: Option<PathBuf>,
+    app_data_dir: Option<PathBuf>,
     state: RuntimeTaskState,
     sink: RuntimeEventSink,
 }
@@ -54,7 +57,9 @@ impl HostProcess {
             .map_err(|error| {
                 format!("无法启动 Pi SDK Agent Host（{}）：{error}", command.display)
             })?;
-        let stdin = child.stdin.take().ok_or("Agent Host stdin 不可用")?;
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().ok_or("Agent Host stdin 不可用")?,
+        ));
         let stdout = child.stdout.take().ok_or("Agent Host stdout 不可用")?;
         let mut stderr = child.stderr.take().ok_or("Agent Host stderr 不可用")?;
         let child = Arc::new(Mutex::new(child));
@@ -62,12 +67,18 @@ impl HostProcess {
         let tasks = Arc::new(Mutex::new(HashMap::<String, HostTask>::new()));
         let reader_pending = Arc::clone(&pending);
         let reader_tasks = Arc::clone(&tasks);
+        let reader_stdin = Arc::clone(&stdin);
         let reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 match line {
                     Ok(line) if !line.trim().is_empty() => {
                         if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                            handle_host_message(value, &reader_pending, &reader_tasks);
+                            handle_host_message(
+                                value,
+                                &reader_pending,
+                                &reader_tasks,
+                                &reader_stdin,
+                            );
                         }
                     }
                     Ok(_) => {}
@@ -86,7 +97,7 @@ impl HostProcess {
             let _ = stderr.read_to_string(&mut ignored);
         });
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin,
             child,
             pending,
             tasks,
@@ -215,6 +226,8 @@ impl AgentRuntime for PiSdkRuntimeAdapter {
                 task_id.clone(),
                 HostTask {
                     session_id: session_id.clone(),
+                    project_path: input.project_path.map(PathBuf::from),
+                    app_data_dir: input.app_data_dir.map(PathBuf::from),
                     state: RuntimeTaskState::Running,
                     sink: event_sink,
                 },
@@ -389,6 +402,7 @@ fn handle_host_message(
     value: Value,
     pending: &Mutex<HashMap<String, PendingResponse>>,
     tasks: &Mutex<HashMap<String, HostTask>>,
+    stdin: &Mutex<ChildStdin>,
 ) {
     if value.get("type").and_then(Value::as_str) == Some("response") {
         let Some(id) = value.get("id").and_then(Value::as_str) else {
@@ -410,6 +424,10 @@ fn handle_host_message(
             };
             let _ = sender.send(result);
         }
+        return;
+    }
+    if value.get("type").and_then(Value::as_str) == Some("tool_request") {
+        handle_tool_request(value, tasks, stdin);
         return;
     }
     if value.get("type").and_then(Value::as_str) != Some("event") {
@@ -487,6 +505,78 @@ fn handle_host_message(
     sink(event);
 }
 
+fn handle_tool_request(
+    value: Value,
+    tasks: &Mutex<HashMap<String, HostTask>>,
+    stdin: &Mutex<ChildStdin>,
+) {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let result = (|| -> AppResult<Value> {
+        let task_id = value
+            .get("taskId")
+            .and_then(Value::as_str)
+            .ok_or("Tool Gateway 请求缺少 taskId")?;
+        let session_id = value
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or("Tool Gateway 请求缺少 sessionId")?;
+        let (project_path, app_data_dir, expected_session_id) = {
+            let tasks = tasks
+                .lock()
+                .map_err(|_| "Agent Host task 锁损坏".to_string())?;
+            let task = tasks
+                .get(task_id)
+                .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
+            (
+                task.project_path
+                    .clone()
+                    .ok_or("当前 Agent 任务没有项目作用域")?,
+                task.app_data_dir.clone(),
+                task.session_id.clone(),
+            )
+        };
+        if expected_session_id != session_id {
+            return Err("Tool Gateway 请求的 Session 不匹配".into());
+        }
+        execute_tool(
+            &project_path,
+            app_data_dir.as_deref(),
+            ToolGatewayRequest {
+                tool_call_id: value
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .ok_or("Tool Gateway 请求缺少 toolCallId")?
+                    .to_string(),
+                task_id: task_id.to_string(),
+                session_id: session_id.to_string(),
+                tool_name: value
+                    .get("toolName")
+                    .and_then(Value::as_str)
+                    .ok_or("Tool Gateway 请求缺少 toolName")?
+                    .to_string(),
+                arguments: value.get("arguments").cloned().unwrap_or_else(|| json!({})),
+            },
+        )
+    })();
+    let response = match result {
+        Ok(result) => {
+            json!({ "id": id, "type": "tool_response", "success": true, "result": result })
+        }
+        Err(error) => {
+            json!({ "id": id, "type": "tool_response", "success": false, "error": error })
+        }
+    };
+    if let Ok(mut stdin) = stdin.lock() {
+        let _ = serde_json::to_writer(&mut *stdin, &response);
+        let _ = stdin.write_all(b"\n");
+        let _ = stdin.flush();
+    }
+}
+
 fn fail_live_tasks(tasks: &Mutex<HashMap<String, HostTask>>, error: &str) {
     let Ok(mut tasks) = tasks.lock() else {
         return;
@@ -559,6 +649,7 @@ fn command_for_path(path: PathBuf) -> HostCommand {
 mod tests {
     use super::*;
     use crate::agent_runtime::runtime::{RuntimeEvent, RuntimeTaskInput};
+    use crate::database::{init_database, now, open_database};
     use std::sync::mpsc;
 
     #[test]
@@ -585,6 +676,8 @@ mod tests {
                     task_id: Some("sdk-task".into()),
                     session_id: Some("sdk-session".into()),
                     runtime_session_id: None,
+                    project_path: None,
+                    app_data_dir: None,
                     prompt: "继续讨论".into(),
                     provider: None,
                     model: None,
@@ -612,6 +705,88 @@ mod tests {
             runtime.get_task_state("sdk-task").unwrap(),
             RuntimeTaskState::Completed
         );
+        runtime.dispose().unwrap();
+    }
+
+    #[test]
+    fn sdk_adapter_round_trips_tool_calls_through_rust_gateway() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "Gateway IPC", "short").unwrap();
+        let conn = open_database(temp.path()).unwrap();
+        let timestamp = now();
+        conn.execute(
+            "INSERT INTO agent_sessions
+             (id, project_id, scope_type, title, status, session_kind, session_status,
+              last_active_at, created_at, updated_at)
+             VALUES ('sdk-session', ?1, 'project', 'IPC', 'active', 'main', 'active', ?2, ?2, ?2)",
+            rusqlite::params![project.id, timestamp],
+        )
+        .unwrap();
+        let selection = json!({
+            "projectId": project.id,
+            "center": { "projectId": project.id, "objectType": "project", "objectId": project.id, "field": null },
+            "selected": [],
+            "projectRevision": 0,
+        });
+        conn.execute(
+            "INSERT INTO agent_tasks
+             (id, session_id, task_type, interaction_mode, agent_type, selection_json,
+              read_scope_json, write_scope_json, context_revision, status, created_at)
+             VALUES ('sdk-tool-task', 'sdk-session', 'discussion', 'discussion', 'main',
+                     ?1, '[]', '{\"refs\":[],\"protectedRefs\":[]}', 0, 'queued', ?2)",
+            rusqlite::params![selection.to_string(), timestamp],
+        )
+        .unwrap();
+        drop(conn);
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test-data")
+            .join("含中文 空格")
+            .join("mock_tool_agent_host.mjs");
+        let mut runtime = PiSdkRuntimeAdapter::new(command_for_path(fixture));
+        let (tx, rx) = mpsc::channel();
+        let sink: RuntimeEventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        runtime
+            .start_task(
+                RuntimeTaskInput {
+                    task_id: Some("sdk-tool-task".into()),
+                    session_id: Some("sdk-session".into()),
+                    runtime_session_id: None,
+                    project_path: Some(temp.path().to_string_lossy().into_owned()),
+                    app_data_dir: None,
+                    prompt: "读取当前选区".into(),
+                    provider: None,
+                    model: None,
+                    system_prompt: None,
+                    thinking_level: None,
+                    attachments: Vec::new(),
+                },
+                sink,
+            )
+            .unwrap();
+        let mut events = Vec::new();
+        while events.len() < 8 {
+            let event = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            let completed = matches!(event, RuntimeEvent::TaskCompleted { .. });
+            events.push(event);
+            if completed {
+                break;
+            }
+        }
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::ToolCallRequested { tool_name, .. } if tool_name == "get_selection")));
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::ToolCallCompleted { tool_name, .. } if tool_name == "get_selection")));
+        let text = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(text.contains("projectRevision"));
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM agent_tool_calls WHERE id='fixture-tool' AND status='completed'", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
         runtime.dispose().unwrap();
     }
 }
