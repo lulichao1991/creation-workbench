@@ -212,3 +212,10 @@ GitHub Actions 会在 Windows 上持续执行前端测试、TypeScript 构建、
 - `ContextPolicy v3` 直接约束 `read_shot_context` 与 `read_story_structure` 等组合读取，Agent 可在同一 Tool Loop 中按需读取并再次读取当前项目事实。
 - 工具网关同时限制约 12K token 和 64 KiB 结果，返回当前 policy、revision 与 token 估算；超限调用进入失败审计，不会把大结果送入模型。
 - 相同任务、项目 revision、工具与参数的结果使用有界内存缓存；revision 变化自动产生新缓存键，确保后续读取取得新事实。
+
+## V2 Beta 2 Goal30 Professional AgentSession
+
+- Pi SDK 普通对话统一由真实 `MainAgentSession` 启动，Rust 关键词解析只保留给 legacy 回退和显式解析接口，不再预先决定 Pi 主流程的专业角色。
+- Main Agent 新增 `call_expert`，可自主创建 Writer、Director、Cinematography、Art、Keyframe、Prompt 六类短生命周期 Pi `AgentSession`；每次调用都持久化父子 Session、专业 Task、Pi Session ID、结果和 Tool 审计。
+- 每类专业 Session 使用独立系统指令和最小只读工具白名单，不能递归调用其他专家；Provider/模型沿用项目专业覆盖，摄影、美术、关键帧和提示词角色可接收当前正式视觉附件。
+- 自动化使用真实 Pi SDK 跑通 `MainAgent → call_expert(cinematography) → read_shot_context → 专业意见 → MainAgent 综合`，并覆盖六类配置、专业工具审计、失败收口及专业 Session 禁止递归。

@@ -4,16 +4,19 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
+use crate::agent_application::{expert, expert_model_override};
 use crate::app_database::load_feature_flags;
 use crate::context::{
-    neighbor_refs, object_value, parent_ref, search_project, ContextPolicy, ObjectRef,
-    SelectionSnapshot, CONTEXT_POLICY_VERSION,
+    estimate_tokens, neighbor_refs, object_value, parent_ref, search_project, ContextPolicy,
+    ObjectRef, SelectionSnapshot, CONTEXT_POLICY_VERSION,
 };
-use crate::database::{now, open_database, AppResult};
+use crate::database::{new_id, now, open_database, AppResult};
 use crate::memory::{active_global_memories, active_project_memories, MemoryContextEntry};
 
 const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_RESULT_TOKENS: usize = 12_000;
+const MAX_EXPERT_RESULT_BYTES: usize = 60 * 1024;
+const MAX_EXPERT_RESULT_TOKENS: usize = 11_500;
 const MAX_AUDIT_TEXT_BYTES: usize = 4 * 1024;
 const MAX_CACHE_ENTRIES: usize = 256;
 static TOOL_CACHE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
@@ -34,15 +37,26 @@ pub fn execute_tool(
 ) -> AppResult<Value> {
     let mut conn = open_database(project_path)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let (session_id, agent_type, task_type, selection_json, write_scope_json): (
+    let (
+        session_id,
+        agent_type,
+        task_type,
+        selection_json,
+        write_scope_json,
+        model_provider,
+        model_name,
+    ): (
         String,
         String,
         String,
         String,
         String,
+        Option<String>,
+        Option<String>,
     ) = tx
         .query_row(
-            "SELECT session_id, agent_type, task_type, selection_json, write_scope_json
+            "SELECT session_id, agent_type, task_type, selection_json, write_scope_json,
+                    model_provider, model_name
              FROM agent_tasks WHERE id=?1",
             [&request.task_id],
             |row| {
@@ -52,6 +66,8 @@ pub fn execute_tool(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
@@ -76,7 +92,7 @@ pub fn execute_tool(
             request.session_id,
             agent_type,
             request.tool_name,
-            audit_text(&request.arguments),
+            audit_arguments(&request.tool_name, &request.arguments),
             revision,
             started_at,
         ],
@@ -86,6 +102,7 @@ pub fn execute_tool(
     let selection: SelectionSnapshot =
         serde_json::from_str(&selection_json).map_err(|e| format!("读取任务选区失败：{e}"))?;
     let policy = ContextPolicy::for_intent(&task_type);
+    let cacheable = is_read_tool(&request.tool_name);
     let cache_key = format!(
         "{}\n{}\n{}\n{}\n{}",
         project_path.display(),
@@ -94,31 +111,54 @@ pub fn execute_tool(
         request.tool_name,
         request.arguments
     );
-    let cached = cache_get(&cache_key);
+    let cached = cacheable.then(|| cache_get(&cache_key)).flatten();
     let cache_hit = cached.is_some();
     let result = cached
         .map(Ok)
         .unwrap_or_else(|| {
             argument_object(&request.arguments).and_then(|arguments| {
                 validate_arguments(&request.tool_name, arguments)?;
-                execute_inner(
-                    &tx,
-                    app_data_dir,
-                    &project_id,
-                    &selection,
-                    &write_scope_json,
-                    &policy,
-                    &request.tool_name,
-                    arguments,
-                )
+                match request.tool_name.as_str() {
+                    "call_expert" => start_expert(
+                        &tx,
+                        &project_id,
+                        revision,
+                        &request.task_id,
+                        &session_id,
+                        &agent_type,
+                        &selection,
+                        model_provider.clone(),
+                        model_name.clone(),
+                        arguments,
+                    ),
+                    "complete_expert" => complete_expert(
+                        &tx,
+                        &request.task_id,
+                        &session_id,
+                        arguments,
+                    ),
+                    "fail_expert" => fail_expert(
+                        &tx,
+                        &request.task_id,
+                        &session_id,
+                        arguments,
+                    ),
+                    _ => execute_inner(
+                        &tx,
+                        app_data_dir,
+                        &project_id,
+                        &selection,
+                        &write_scope_json,
+                        &policy,
+                        &request.tool_name,
+                        arguments,
+                    ),
+                }
             })
         })
         .and_then(|data| {
-            let token_estimate = serde_json::to_string(&data)
-                .map_err(|e| e.to_string())?
-                .chars()
-                .count()
-                .div_ceil(4);
+            let token_estimate =
+                estimate_tokens(&serde_json::to_string(&data).map_err(|e| e.to_string())?);
             if token_estimate > MAX_TOOL_RESULT_TOKENS {
                 return Err(format!(
                     "TOOL_RESULT_TOO_LARGE: 工具结果约 {token_estimate} tokens，最大允许 {MAX_TOOL_RESULT_TOKENS} tokens"
@@ -137,7 +177,7 @@ pub fn execute_tool(
                     "TOOL_RESULT_TOO_LARGE: 工具结果 {bytes} bytes，最大允许 {MAX_TOOL_RESULT_BYTES} bytes"
                 ));
             }
-            if !cache_hit {
+            if cacheable && !cache_hit {
                 cache_put(cache_key.clone(), data);
             }
             Ok((wrapped, bytes))
@@ -164,6 +204,279 @@ pub fn execute_tool(
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     result.map(|(value, _)| value)
+}
+
+fn is_read_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "get_selection"
+            | "read_object"
+            | "read_parent"
+            | "read_children"
+            | "read_neighbors"
+            | "read_scene"
+            | "read_shot_context"
+            | "read_asset"
+            | "read_generation_task"
+            | "read_story_structure"
+            | "search_project"
+            | "read_active_memories"
+            | "read_change_set"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_expert(
+    conn: &Connection,
+    project_id: &str,
+    revision: i64,
+    parent_task_id: &str,
+    parent_session_id: &str,
+    parent_agent_type: &str,
+    parent_selection: &SelectionSnapshot,
+    provider: Option<String>,
+    model: Option<String>,
+    arguments: &Map<String, Value>,
+) -> AppResult<Value> {
+    if parent_agent_type != "main" {
+        return Err("TOOL_SCOPE_DENIED: 只有主 Agent 可以调用专业 Agent".into());
+    }
+    let expert_type = string_arg(arguments, "expertType")?;
+    let definition = expert(&expert_type)
+        .ok_or_else(|| format!("TOOL_ARGUMENT_INVALID: 未知专业 Agent：{expert_type}"))?;
+    let task = long_string_arg(arguments, "task", 4_000)?;
+    let focus_refs = focus_refs(conn, project_id, arguments.get("focusRefs"))?;
+    let mut selection = parent_selection.clone();
+    if !focus_refs.is_empty() {
+        selection.center = focus_refs.first().cloned();
+        selection.selected = focus_refs.clone();
+    }
+    selection.project_revision = revision;
+    let (provider, model) = expert_model_override(conn, project_id, &expert_type, provider, model)?;
+    let expert_session_id = new_id();
+    let expert_task_id = new_id();
+    let timestamp = now();
+    let scope_id = selection
+        .center
+        .as_ref()
+        .map(|reference| reference.object_id.as_str());
+    conn.execute(
+        "INSERT INTO agent_sessions
+         (id, project_id, scope_type, scope_id, title, status, runtime_session_id,
+          session_kind, parent_session_id, expert_type, session_status,
+          last_active_at, created_at, updated_at)
+         VALUES (?1, ?2, 'selection', ?3, ?4, 'active', ?1, 'expert', ?5, ?6,
+                 'active', ?7, ?7, ?7)",
+        params![
+            expert_session_id,
+            project_id,
+            scope_id,
+            format!("{}：{}", definition.display_name, truncate_utf8(&task, 80)),
+            parent_session_id,
+            expert_type,
+            timestamp,
+        ],
+    )
+    .map_err(|e| format!("创建专业 AgentSession 失败：{e}"))?;
+    conn.execute(
+        "INSERT INTO agent_tasks
+         (id, session_id, task_type, interaction_mode, agent_type, selection_json,
+          read_scope_json, write_scope_json, context_revision, base_revision, status,
+          model_provider, model_name, pi_session_id, created_at, started_at)
+         VALUES (?1, ?2, 'professional_consultation', 'suggestion', ?3, ?4, ?5,
+                 '{\"refs\":[],\"protectedRefs\":[]}', ?6, ?6, 'running', ?7, ?8, ?2, ?9, ?9)",
+        params![
+            expert_task_id,
+            expert_session_id,
+            expert_type,
+            serde_json::to_string(&selection).map_err(|e| e.to_string())?,
+            serde_json::to_string(&focus_refs).map_err(|e| e.to_string())?,
+            revision,
+            provider,
+            model,
+            timestamp,
+        ],
+    )
+    .map_err(|e| format!("创建专业 AgentTask 失败：{e}"))?;
+    conn.execute(
+        "INSERT INTO agent_messages
+         (id, session_id, role, agent_type, content, created_at)
+         VALUES (?1, ?2, 'user', ?3, ?4, ?5)",
+        params![new_id(), expert_session_id, expert_type, task, timestamp],
+    )
+    .map_err(|e| e.to_string())?;
+    let allowed_tools = expert_tool_names(&expert_type);
+    Ok(json!({
+        "expertType": expert_type,
+        "expertSessionId": expert_session_id,
+        "expertTaskId": expert_task_id,
+        "runtimeSessionId": expert_session_id,
+        "systemPrompt": format!(
+            "你是创作工作台的{}。{} 你拥有独立 Pi AgentSession，只能使用当前开放的只读工作台工具核对项目事实；不得猜测，不得调用其他专业 Agent，不得访问文件、Shell、PowerShell 或数据库。你只返回结构化专业意见，修改建议交给主 Agent 综合，不能直接写入项目。",
+            definition.display_name, definition.system_instruction
+        ),
+        "allowedTools": allowed_tools,
+        "provider": provider,
+        "model": model,
+        "thinkingLevel": "medium",
+        "allowImages": matches!(expert_type.as_str(), "cinematography" | "art" | "keyframe" | "prompt"),
+        "parentTaskId": parent_task_id,
+    }))
+}
+
+fn complete_expert(
+    conn: &Connection,
+    task_id: &str,
+    session_id: &str,
+    arguments: &Map<String, Value>,
+) -> AppResult<Value> {
+    let runtime_session_id = string_arg(arguments, "runtimeSessionId")?;
+    let output = long_string_arg(arguments, "result", MAX_EXPERT_RESULT_BYTES)?;
+    let token_estimate = estimate_tokens(&output);
+    if token_estimate > MAX_EXPERT_RESULT_TOKENS {
+        return Err(format!(
+            "TOOL_RESULT_TOO_LARGE: 专业 Agent 结果约 {token_estimate} tokens，最大允许 {MAX_EXPERT_RESULT_TOKENS} tokens"
+        ));
+    }
+    let result =
+        serde_json::from_str::<Value>(&output).unwrap_or_else(|_| json!({ "summary": output }));
+    let timestamp = now();
+    let changed = conn
+        .execute(
+            "UPDATE agent_tasks
+             SET status='completed', result_json=?1, completed_at=?2
+             WHERE id=?3 AND session_id=?4 AND task_type='professional_consultation'
+               AND status IN ('queued','running')",
+            params![result.to_string(), timestamp, task_id, session_id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("SESSION_BUSY: 专业 AgentTask 已结束或不匹配".into());
+    }
+    conn.execute(
+        "UPDATE agent_sessions
+         SET status='closed', session_status='closed', runtime_session_id=?1,
+             last_active_at=?2, updated_at=?2 WHERE id=?3 AND session_kind='expert'",
+        params![runtime_session_id, timestamp, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO agent_messages
+         (id, session_id, role, agent_type, content, structured_json, created_at)
+         SELECT ?1, ?2, 'assistant', expert_type, ?3, ?4, ?5
+         FROM agent_sessions WHERE id=?2",
+        params![new_id(), session_id, output, result.to_string(), timestamp],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "completed": true,
+        "expertSessionId": session_id,
+        "result": result,
+    }))
+}
+
+fn fail_expert(
+    conn: &Connection,
+    task_id: &str,
+    session_id: &str,
+    arguments: &Map<String, Value>,
+) -> AppResult<Value> {
+    let error = long_string_arg(arguments, "error", 4_000)?;
+    let timestamp = now();
+    conn.execute(
+        "UPDATE agent_tasks SET status='failed', error_json=?1, completed_at=?2
+         WHERE id=?3 AND session_id=?4 AND task_type='professional_consultation'
+           AND status IN ('queued','running')",
+        params![
+            json!({ "message": error }).to_string(),
+            timestamp,
+            task_id,
+            session_id
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE agent_sessions SET status='closed', session_status='closed',
+         last_active_at=?1, updated_at=?1 WHERE id=?2 AND session_kind='expert'",
+        params![timestamp, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(json!({ "failed": true, "expertSessionId": session_id }))
+}
+
+fn focus_refs(
+    conn: &Connection,
+    project_id: &str,
+    value: Option<&Value>,
+) -> AppResult<Vec<ObjectRef>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let items = value
+        .as_array()
+        .filter(|items| items.len() <= 8)
+        .ok_or("TOOL_ARGUMENT_INVALID: focusRefs 必须是最多 8 项的数组")?;
+    items
+        .iter()
+        .map(|item| {
+            let item = item
+                .as_object()
+                .ok_or("TOOL_ARGUMENT_INVALID: focusRefs 项必须是对象")?;
+            if item
+                .keys()
+                .any(|key| !matches!(key.as_str(), "objectType" | "objectId"))
+            {
+                return Err("TOOL_ARGUMENT_INVALID: focusRefs 含未知字段".into());
+            }
+            let reference = object_ref(project_id, item)?;
+            object_value(conn, &reference, true)?;
+            Ok(reference)
+        })
+        .collect()
+}
+
+fn expert_tool_names(expert_type: &str) -> &'static [&'static str] {
+    match expert_type {
+        "writer" => &[
+            "get_selection",
+            "read_object",
+            "read_parent",
+            "read_children",
+            "read_neighbors",
+            "read_story_structure",
+            "search_project",
+            "read_active_memories",
+        ],
+        "director" => &[
+            "get_selection",
+            "read_scene",
+            "read_shot_context",
+            "read_neighbors",
+            "read_asset",
+            "search_project",
+        ],
+        "cinematography" => &[
+            "get_selection",
+            "read_shot_context",
+            "read_asset",
+            "read_neighbors",
+        ],
+        "art" => &[
+            "get_selection",
+            "read_asset",
+            "read_shot_context",
+            "search_project",
+            "read_active_memories",
+        ],
+        "keyframe" => &["get_selection", "read_shot_context", "read_asset"],
+        "prompt" => &[
+            "get_selection",
+            "read_generation_task",
+            "read_shot_context",
+            "read_asset",
+        ],
+        _ => &[],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -639,6 +952,9 @@ fn validate_arguments(tool_name: &str, arguments: &Map<String, Value>) -> AppRes
         "search_project" => &["query", "limit"],
         "read_active_memories" => &["objectType", "objectId"],
         "read_change_set" => &["changeSetId"],
+        "call_expert" => &["expertType", "task", "focusRefs"],
+        "complete_expert" => &["runtimeSessionId", "result"],
+        "fail_expert" => &["error"],
         _ => return Err(format!("TOOL_NOT_ALLOWED: 不支持的工作台工具：{tool_name}")),
     };
     if let Some(key) = arguments
@@ -665,6 +981,20 @@ fn optional_string_arg(arguments: &Map<String, Value>, key: &str) -> AppResult<O
         .get(key)
         .map(|_| string_arg(arguments, key))
         .transpose()
+}
+
+fn long_string_arg(
+    arguments: &Map<String, Value>,
+    key: &str,
+    maximum_bytes: usize,
+) -> AppResult<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= maximum_bytes)
+        .map(str::to_string)
+        .ok_or_else(|| format!("TOOL_ARGUMENT_INVALID: {key} 不能为空或超过 {maximum_bytes} bytes"))
 }
 
 fn usize_arg(
@@ -706,6 +1036,16 @@ fn cache_put(key: String, value: Value) {
 fn audit_text(value: &Value) -> String {
     let redacted = redact(value);
     truncate_utf8(&redacted.to_string(), MAX_AUDIT_TEXT_BYTES)
+}
+
+fn audit_arguments(tool_name: &str, arguments: &Value) -> String {
+    if tool_name == "complete_expert" {
+        return audit_text(&json!({
+            "runtimeSessionId": arguments.get("runtimeSessionId"),
+            "result": "[stored in professional AgentTask]",
+        }));
+    }
+    audit_text(arguments)
 }
 
 fn redact(value: &Value) -> Value {
@@ -797,13 +1137,24 @@ mod tests {
     }
 
     fn call(path: &Path, id: &str, tool_name: &str, arguments: Value) -> AppResult<Value> {
+        call_as(path, id, "task", "session", tool_name, arguments)
+    }
+
+    fn call_as(
+        path: &Path,
+        id: &str,
+        task_id: &str,
+        session_id: &str,
+        tool_name: &str,
+        arguments: Value,
+    ) -> AppResult<Value> {
         execute_tool(
             path,
             None,
             ToolGatewayRequest {
                 tool_call_id: id.into(),
-                task_id: "task".into(),
-                session_id: "session".into(),
+                task_id: task_id.into(),
+                session_id: session_id.into(),
                 tool_name: tool_name.into(),
                 arguments,
             },
@@ -880,6 +1231,111 @@ mod tests {
             )
             .unwrap(),
             14
+        );
+    }
+
+    #[test]
+    fn creates_all_six_professional_sessions_with_bounded_tools_and_results() {
+        let (temp, _) = setup_project();
+        for expert_type in [
+            "writer",
+            "director",
+            "cinematography",
+            "art",
+            "keyframe",
+            "prompt",
+        ] {
+            let launch = call(
+                temp.path(),
+                &format!("call-{expert_type}"),
+                "call_expert",
+                json!({
+                    "expertType": expert_type,
+                    "task": "判断镜头04的专业问题",
+                    "focusRefs": [{ "objectType": "shot", "objectId": "shot04" }],
+                }),
+            )
+            .unwrap();
+            assert_eq!(launch["cached"], false);
+            assert_eq!(launch["data"]["expertType"], expert_type);
+            assert!(launch["data"]["systemPrompt"]
+                .as_str()
+                .is_some_and(|value| value.contains("独立 Pi AgentSession")));
+            let tools = launch["data"]["allowedTools"].as_array().unwrap();
+            assert!(!tools.is_empty());
+            assert!(!tools.iter().any(|tool| tool == "call_expert"));
+            let session_id = launch["data"]["expertSessionId"].as_str().unwrap();
+            let task_id = launch["data"]["expertTaskId"].as_str().unwrap();
+            if expert_type == "cinematography" {
+                let context = call_as(
+                    temp.path(),
+                    "cinema-read",
+                    task_id,
+                    session_id,
+                    "read_shot_context",
+                    json!({ "shotId": "shot04" }),
+                )
+                .unwrap();
+                assert_eq!(context["data"]["shot"]["id"], "shot04");
+                assert!(call_as(
+                    temp.path(),
+                    "recursive-expert",
+                    task_id,
+                    session_id,
+                    "call_expert",
+                    json!({
+                        "expertType": "director",
+                        "task": "继续调用导演",
+                        "focusRefs": [],
+                    }),
+                )
+                .unwrap_err()
+                .starts_with("TOOL_SCOPE_DENIED"));
+            }
+            call_as(
+                temp.path(),
+                &format!("complete-{expert_type}"),
+                task_id,
+                session_id,
+                "complete_expert",
+                json!({
+                    "runtimeSessionId": session_id,
+                    "result": format!(r#"{{"summary":"{expert_type} 专业意见"}}"#),
+                }),
+            )
+            .unwrap();
+        }
+        let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_sessions
+                 WHERE session_kind='expert' AND session_status='closed'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            6
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_tasks
+                 WHERE task_type='professional_consultation' AND status='completed'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            6
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM agent_tool_calls
+                 WHERE task_id IN (SELECT id FROM agent_tasks WHERE agent_type='cinematography')
+                   AND tool_name='read_shot_context' AND agent_type='cinematography'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
         );
     }
 

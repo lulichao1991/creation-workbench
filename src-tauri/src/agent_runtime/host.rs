@@ -524,13 +524,15 @@ fn handle_tool_request(
             .get("sessionId")
             .and_then(Value::as_str)
             .ok_or("Tool Gateway 请求缺少 sessionId")?;
+        let parent_task_id = value.get("parentTaskId").and_then(Value::as_str);
+        let lookup_task_id = parent_task_id.unwrap_or(task_id);
         let (project_path, app_data_dir, expected_session_id) = {
             let tasks = tasks
                 .lock()
                 .map_err(|_| "Agent Host task 锁损坏".to_string())?;
             let task = tasks
-                .get(task_id)
-                .ok_or_else(|| format!("Agent 任务不存在：{task_id}"))?;
+                .get(lookup_task_id)
+                .ok_or_else(|| format!("Agent 任务不存在：{lookup_task_id}"))?;
             (
                 task.project_path
                     .clone()
@@ -539,7 +541,7 @@ fn handle_tool_request(
                 task.session_id.clone(),
             )
         };
-        if expected_session_id != session_id {
+        if parent_task_id.is_none() && expected_session_id != session_id {
             return Err("Tool Gateway 请求的 Session 不匹配".into());
         }
         execute_tool(

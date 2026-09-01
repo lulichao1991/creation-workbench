@@ -5,6 +5,7 @@ export interface ToolGatewayRequest {
   toolCallId: string;
   sessionId: string;
   taskId: string;
+  parentTaskId?: string;
   toolName: string;
   arguments: Record<string, unknown>;
 }
@@ -16,6 +17,20 @@ interface ToolSpec {
   label: string;
   description: string;
   parameters: TSchema;
+}
+
+export interface CallExpertInput {
+  toolCallId: string;
+  expertType: string;
+  task: string;
+  focusRefs: Array<{ objectType: string; objectId: string }>;
+  signal?: AbortSignal;
+}
+
+interface WorkbenchToolOptions {
+  allowedToolNames?: readonly string[];
+  parentTaskId?: string;
+  callExpert?: (input: CallExpertInput) => Promise<unknown>;
 }
 
 const objectRef = {
@@ -43,8 +58,12 @@ export function createWorkbenchTools(
   sessionId: string,
   currentTaskId: () => string | undefined,
   gateway: ToolGateway,
+  options: WorkbenchToolOptions = {},
 ): ToolDefinition[] {
-  return toolSpecs.map((spec) => ({
+  const allowed = options.allowedToolNames && new Set(options.allowedToolNames);
+  const tools: ToolDefinition[] = toolSpecs
+    .filter((spec) => !allowed || allowed.has(spec.name))
+    .map((spec): ToolDefinition => ({
     name: spec.name,
     label: spec.label,
     description: spec.description,
@@ -58,6 +77,7 @@ export function createWorkbenchTools(
         toolCallId,
         sessionId,
         taskId,
+        parentTaskId: options.parentTaskId,
         toolName: spec.name,
         arguments: params as Record<string, unknown>,
       }, signal);
@@ -66,7 +86,49 @@ export function createWorkbenchTools(
         details: {},
       };
     },
-  }));
+    }));
+  if (options.callExpert) {
+    tools.push({
+      name: "call_expert",
+      label: "调用专业 Agent",
+      description: "创建一个独立专业 Pi AgentSession，让其自行读取项目事实并返回结构化专业意见。仅在需要专业判断时调用。",
+      promptSnippet: "call_expert: 调用 writer、director、cinematography、art、keyframe 或 prompt 专业 Agent；专业 Agent 会独立读取事实，禁止猜测。",
+      parameters: Type.Object({
+        expertType: Type.Union([
+          Type.Literal("writer"),
+          Type.Literal("director"),
+          Type.Literal("cinematography"),
+          Type.Literal("art"),
+          Type.Literal("keyframe"),
+          Type.Literal("prompt"),
+        ]),
+        task: Type.String({ minLength: 1, maxLength: 4_000 }),
+        focusRefs: Type.Optional(Type.Array(Type.Object(objectRef, { additionalProperties: false }), { maxItems: 8 })),
+      }, { additionalProperties: false }),
+      executionMode: "sequential",
+      execute: async (toolCallId, params, signal) => {
+        const input = params as {
+          expertType: string;
+          task: string;
+          focusRefs?: Array<{ objectType: string; objectId: string }>;
+        };
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify(await options.callExpert!({
+              toolCallId,
+              expertType: input.expertType,
+              task: input.task,
+              focusRefs: input.focusRefs ?? [],
+              signal,
+            })),
+          }],
+          details: {},
+        };
+      },
+    });
+  }
+  return tools;
 }
 
-export const WORKBENCH_TOOL_NAMES = toolSpecs.map((spec) => spec.name);
+export const WORKBENCH_TOOL_NAMES = [...toolSpecs.map((spec) => spec.name), "call_expert"];

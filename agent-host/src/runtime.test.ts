@@ -172,6 +172,171 @@ test("runs multiple Workbench tools inside the real Pi Tool Loop", async () => {
   }
 });
 
+test("main AgentSession calls an independent cinematography AgentSession and synthesizes its result", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-expert-"));
+  const faux = fauxProvider({ provider: "workbench-expert-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("call_expert", {
+        expertType: "cinematography",
+        task: "判断镜头04为什么缺少压迫感",
+        focusRefs: [{ objectType: "shot", objectId: "shot04" }],
+      }, { id: "call-cinematography" }),
+    ], { stopReason: "toolUse" }),
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /判断镜头04为什么缺少压迫感/);
+      assert.match(JSON.stringify(context.tools), /read_shot_context/);
+      assert.doesNotMatch(JSON.stringify(context.tools), /call_expert/);
+      return fauxAssistantMessage([
+        fauxToolCall("read_shot_context", { shotId: "shot04" }, { id: "expert-read-shot" }),
+      ], { stopReason: "toolUse" });
+    },
+    (context) => {
+      assert.match(JSON.stringify(context.messages), /平视中景/);
+      return fauxAssistantMessage('{"summary":"摄影专业结论：降低机位并增加前景遮挡","findings":["主体尺度不足"],"patchProposal":null,"questions":[],"risks":[]}');
+    },
+    (context) => {
+      const transcript = JSON.stringify(context.messages);
+      assert.match(transcript, /摄影专业结论/);
+      assert.match(transcript, /expertSessionId/);
+      return fauxAssistantMessage("主 Agent 综合：压迫感不足来自平视机位、主体尺度和前景层次不足。");
+    },
+  ]);
+  const calls: Array<{ toolName: string; sessionId: string; taskId: string; parentTaskId?: string }> = [];
+  const events: Record<string, unknown>[] = [];
+  const expertSessionId = "00000000-0000-4000-8000-000000000030";
+  const expertTaskId = "expert-task-cinematography";
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      calls.push({
+        toolName: request.toolName,
+        sessionId: request.sessionId,
+        taskId: request.taskId,
+        parentTaskId: request.parentTaskId,
+      });
+      if (request.toolName === "call_expert") {
+        return {
+          projectRevision: 7,
+          data: {
+            expertType: "cinematography",
+            expertSessionId,
+            expertTaskId,
+            runtimeSessionId: expertSessionId,
+            systemPrompt: "你是摄影 Agent，只从摄影语言和空间关系提出建议。",
+            allowedTools: ["get_selection", "read_shot_context", "read_asset", "read_neighbors"],
+            provider: faux.provider.id,
+            model: faux.getModel().id,
+            thinkingLevel: "off",
+            allowImages: false,
+          },
+        };
+      }
+      if (request.toolName === "read_shot_context") {
+        return { projectRevision: 7, data: { shot: { id: "shot04", composition: "平视中景" } } };
+      }
+      if (request.toolName === "complete_expert") return { completed: true };
+      throw new Error(`意外工具：${request.toolName}`);
+    },
+  );
+  const mainSessionId = "00000000-0000-4000-8000-000000000005";
+  try {
+    await host.handle({
+      id: "create-main",
+      type: "create_session",
+      sessionId: mainSessionId,
+      provider: faux.provider.id,
+      model: faux.getModel().id,
+    });
+    await host.handle({
+      id: "ask-main",
+      type: "send_message",
+      sessionId: mainSessionId,
+      taskId: "main-expert-task",
+      message: "这个镜头为什么不够有压迫感？",
+    });
+    await waitForEvent(events, "task_completed", "main-expert-task");
+    assert.deepEqual(calls.map((call) => call.toolName), [
+      "call_expert",
+      "read_shot_context",
+      "complete_expert",
+    ]);
+    assert.equal(calls[1].sessionId, expertSessionId);
+    assert.equal(calls[1].taskId, expertTaskId);
+    assert.equal(calls[1].parentTaskId, "main-expert-task");
+    assert.equal(faux.state.callCount, 4);
+    const text = events.filter((event) => event.event === "message_delta").map((event) => event.delta).join("");
+    assert.match(text, /主 Agent 综合/);
+    assert.doesNotMatch(text, /摄影专业结论：降低机位/);
+  } finally {
+    host.dispose();
+  }
+});
+
+test("records a failed professional task when its Pi AgentSession cannot start", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-expert-failure-"));
+  const faux = fauxProvider({ provider: "workbench-expert-failure-test", tokensPerSecond: 0 });
+  faux.setResponses([
+    fauxAssistantMessage([
+      fauxToolCall("call_expert", {
+        expertType: "cinematography",
+        task: "检查镜头04",
+        focusRefs: [{ objectType: "shot", objectId: "shot04" }],
+      }, { id: "call-broken-expert" }),
+    ], { stopReason: "toolUse" }),
+    fauxAssistantMessage("专业 Agent 启动失败，主 Agent 已明确报告。"),
+  ]);
+  const calls: string[] = [];
+  const events: Record<string, unknown>[] = [];
+  const host = await WorkbenchAgentHost.create(
+    dataDir,
+    (event) => events.push(event),
+    (runtime) => runtime.registerNativeProvider(faux.provider),
+    async (request) => {
+      calls.push(request.toolName);
+      if (request.toolName === "fail_expert") return { failed: true };
+      return {
+        data: {
+          expertType: "cinematography",
+          expertSessionId: "00000000-0000-4000-8000-000000000031",
+          expertTaskId: "broken-expert-task",
+          runtimeSessionId: "00000000-0000-4000-8000-000000000031",
+          systemPrompt: "你是摄影 Agent。",
+          allowedTools: ["read_shot_context"],
+          provider: "missing-provider",
+          model: "missing-model",
+          thinkingLevel: "off",
+          allowImages: false,
+        },
+      };
+    },
+  );
+  const sessionId = "00000000-0000-4000-8000-000000000006";
+  try {
+    await host.handle({
+      id: "create-failure-main",
+      type: "create_session",
+      sessionId,
+      provider: faux.provider.id,
+      model: faux.getModel().id,
+    });
+    await host.handle({
+      id: "ask-failure-main",
+      type: "send_message",
+      sessionId,
+      taskId: "main-failure-task",
+      message: "请咨询摄影 Agent",
+    });
+    await waitForEvent(events, "task_completed", "main-failure-task");
+    assert.deepEqual(calls, ["call_expert", "fail_expert"]);
+  } finally {
+    host.dispose();
+  }
+});
+
 async function waitForEvent(events: Record<string, unknown>[], eventName: string, taskId: string): Promise<void> {
   const deadline = Date.now() + 2000;
   while (Date.now() < deadline) {

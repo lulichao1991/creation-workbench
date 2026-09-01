@@ -768,6 +768,14 @@ fn prepare_task_for_runtime(
             reason: "用户主动触发 ChangeSet 分析".into(),
             clarification_question: None,
         }
+    } else if pi_sdk_runtime {
+        ResolvedIntent {
+            task_type: "main_agent".into(),
+            expert_type: Some("main".into()),
+            confidence: 1.0,
+            reason: "由 MainAgentSession 自主读取事实并决定是否调用专业 Agent".into(),
+            clarification_question: None,
+        }
     } else {
         resolve_intent(&ResolveIntentInput {
             message: input.message.clone(),
@@ -890,7 +898,7 @@ fn prepare_task_for_runtime(
             },
         )
     };
-    let (provider, model) = if is_change_analysis {
+    let (provider, model) = if is_change_analysis || expert_type == "main" {
         (input.provider, input.model)
     } else {
         expert_model_override(&conn, &project_id, expert_type, input.provider, input.model)?
@@ -979,7 +987,7 @@ fn visual_attachments(
 ) -> AppResult<Vec<RuntimeAttachment>> {
     if !matches!(
         expert_type,
-        "art" | "keyframe" | "cinematography" | "prompt"
+        "main" | "art" | "keyframe" | "cinematography" | "prompt"
     ) {
         return Ok(Vec::new());
     }
@@ -1107,16 +1115,24 @@ fn build_tool_driven_prompt(
     selection: &SelectionSnapshot,
     write_scope: &WriteScope,
 ) -> AppResult<String> {
-    let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
+    let (display_name, system_instruction) = if expert_type == "main" {
+        (
+            "主 Agent",
+            "先自行读取项目事实；只有需要专业判断时才调用 call_expert，并在专家返回后综合，不得把专业选择预先交给 Rust 关键词路由。",
+        )
+    } else {
+        let definition = expert(expert_type).ok_or_else(|| "未知专业 Agent".to_string())?;
+        (definition.display_name, definition.system_instruction)
+    };
     let mode_rule = if mode == "edit" {
         "如需修改，只能在最终 JSON 中返回 patchProposal；工作台会继续执行权限和 stale 校验。"
     } else {
         "这是只读讨论，最终 JSON 的 patchProposal 必须为 null。"
     };
     Ok(format!(
-        "当前请求由主 Pi AgentSession 处理，专业关注方向是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
-        definition.display_name,
-        definition.system_instruction,
+        "当前请求由真实 Pi MainAgentSession 处理，当前角色是{}。{}\n{}\n项目事实没有预先塞进本轮 Prompt。先调用 get_selection，再按问题调用 read_object、read_parent、read_children、read_neighbors、read_scene、read_shot_context、read_asset、read_generation_task、read_story_structure、search_project、read_active_memories 或 read_change_set；信息不足时继续调用工具，禁止猜测。需要专业判断时由你自行调用 call_expert(writer/director/cinematography/art/keyframe/prompt)，专业 Agent 会在独立 Pi AgentSession 中自行读取事实。工具返回的 projectRevision 才是当前事实版本。不得请求 SQL、文件路径、Shell、PowerShell 或任意文件访问。\n当前用户请求：{}\n启动选区引用：{}\n当前 WriteScope：{}\n最终只返回一个 JSON 对象，键为 summary、findings、patchProposal、relatedImpacts、permissionRequests、questions、risks。patchProposal.items 每项包含 objectType、objectId、fieldName、oldValue、newValue、reason；没有修改则为 null。",
+        display_name,
+        system_instruction,
         mode_rule,
         user_message,
         serde_json::to_string(selection).map_err(|e| e.to_string())?,
@@ -1906,11 +1922,23 @@ mod tests {
             true,
         )
         .unwrap();
+        assert_eq!(prepared.dispatch.route.expert_type.as_deref(), Some("main"));
+        assert_eq!(prepared.dispatch.route.task_type, "main_agent");
         let prompt = prepared.runtime_input.unwrap().prompt;
         assert!(prompt.contains("read_shot_context"));
+        assert!(prompt.contains("call_expert"));
         assert!(!prompt.contains("不应进入启动包的旧构图事实"));
         assert!(prompt.len() < 3_000);
         let conn = open_database(temp.path()).unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT agent_type FROM agent_tasks WHERE id='tool-message:task'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "main"
+        );
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM context_packages", [], |row| row
                 .get::<_, i64>(0))

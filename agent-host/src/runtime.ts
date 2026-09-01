@@ -14,7 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { HostEvent, HostRequest } from "./protocol.js";
-import { createWorkbenchTools, type ToolGateway } from "./tools.js";
+import { createWorkbenchTools, type CallExpertInput, type ToolGateway } from "./tools.js";
 
 type Emit = (event: HostEvent) => void;
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -23,6 +23,7 @@ interface SessionEntry {
   session: AgentSession;
   unsubscribe: () => void;
   activeTaskId?: string;
+  activeImages?: ImageInput[];
 }
 
 interface ImageInput {
@@ -34,7 +35,8 @@ interface ImageInput {
 const MAIN_SYSTEM_PROMPT = `你是创作工作台的主创作 Agent，定位接近制片人和创作总协调者。
 你不拥有项目事实，也不能直接修改项目。项目事实只能通过工作台工具读取。
 先根据用户问题调用必要的读取工具；信息不足时继续调用工具，不要猜测项目事实。
-需要专业判断时调用相应专业 Agent。所有修改只能通过 propose_patch 提交，由工作台决定是否应用。`;
+需要专业判断时自行调用 call_expert；不得用关键词假装已经咨询专家。专业 Agent 的结果只是意见，你必须结合项目事实综合回答。
+所有修改只能在最终结构化结果中提出 patchProposal，由工作台决定是否应用。`;
 
 const unavailableGateway: ToolGateway = async () => {
   throw new Error("工作台 Tool Gateway 不可用");
@@ -138,7 +140,9 @@ export class WorkbenchAgentHost {
       model,
       thinkingLevel: optionalThinkingLevel(request),
       noTools: "builtin",
-      customTools: createWorkbenchTools(sessionId, () => entry?.activeTaskId, this.gateway),
+      customTools: createWorkbenchTools(sessionId, () => entry?.activeTaskId, this.gateway, {
+        callExpert: (input) => this.callExpert(sessionId, entry, input),
+      }),
       resourceLoader,
       settingsManager,
       sessionManager: prior
@@ -151,6 +155,113 @@ export class WorkbenchAgentHost {
     return { sessionId, runtimeSessionId: session.sessionId, resumed: Boolean(prior) };
   }
 
+  private async callExpert(
+    parentSessionId: string,
+    parentEntry: SessionEntry | undefined,
+    input: CallExpertInput,
+  ): Promise<unknown> {
+    const parentTaskId = parentEntry?.activeTaskId;
+    if (!parentTaskId) throw new Error("当前没有可审计的主 Agent 任务");
+    const launch = expertLaunch(gatewayData(await this.gateway({
+      toolCallId: input.toolCallId,
+      sessionId: parentSessionId,
+      taskId: parentTaskId,
+      toolName: "call_expert",
+      arguments: {
+        expertType: input.expertType,
+        task: input.task,
+        focusRefs: input.focusRefs,
+      },
+    }, input.signal)));
+    let session: AgentSession | undefined;
+    let unsubscribe = () => {};
+    const abort = () => void session?.abort();
+    input.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const model = selectModel(this.modelRuntime, launch.provider, launch.model) ?? parentEntry.session.model;
+      const settingsManager = SettingsManager.inMemory({
+        compaction: { enabled: true },
+        retry: { enabled: true, maxRetries: 2 },
+      });
+      ({ session } = await createAgentSession({
+        cwd: this.dataDir,
+        agentDir: this.dataDir,
+        modelRuntime: this.modelRuntime,
+        model,
+        thinkingLevel: launch.thinkingLevel,
+        noTools: "builtin",
+        customTools: createWorkbenchTools(
+          launch.expertSessionId,
+          () => launch.expertTaskId,
+          this.gateway,
+          { allowedToolNames: launch.allowedTools, parentTaskId },
+        ),
+        resourceLoader: isolatedResourceLoader(launch.systemPrompt),
+        settingsManager,
+        sessionManager: SessionManager.create(this.dataDir, this.sessionDir, { id: launch.runtimeSessionId }),
+      }));
+      unsubscribe = session.subscribe((event) => {
+        if (event.type === "tool_execution_start") {
+          this.emit({
+            type: "event",
+            event: "tool_call_requested",
+            sessionId: parentSessionId,
+            taskId: parentTaskId,
+            expertType: launch.expertType,
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            arguments: event.args,
+          });
+        } else if (event.type === "tool_execution_end") {
+          this.emit({
+            type: "event",
+            event: "tool_call_completed",
+            sessionId: parentSessionId,
+            taskId: parentTaskId,
+            expertType: launch.expertType,
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            result: event.result,
+            isError: event.isError,
+          });
+        }
+      });
+      const prompt = `专业任务：${input.task}\n焦点对象：${JSON.stringify(input.focusRefs)}\n先调用必要的工作台读取工具核对事实，再返回专业意见。最终只返回 JSON，键为 summary、findings、patchProposal、questions、risks。`;
+      await session.prompt(prompt, { images: launch.allowImages ? parentEntry.activeImages : undefined });
+      const output = session.getLastAssistantText()?.trim();
+      if (!output) throw new Error(`${launch.expertType} Agent 没有返回结果`);
+      const completed = gatewayData(await this.gateway({
+        toolCallId: `${input.toolCallId}:complete`,
+        sessionId: launch.expertSessionId,
+        taskId: launch.expertTaskId,
+        parentTaskId,
+        toolName: "complete_expert",
+        arguments: { runtimeSessionId: session.sessionId, result: output },
+      }));
+      return {
+        expertType: launch.expertType,
+        expertSessionId: launch.expertSessionId,
+        result: completed && typeof completed === "object" && !Array.isArray(completed) && "result" in completed
+          ? (completed as Record<string, unknown>).result
+          : parseJson(output),
+      };
+    } catch (error) {
+      await this.gateway({
+        toolCallId: `${input.toolCallId}:failed`,
+        sessionId: launch.expertSessionId,
+        taskId: launch.expertTaskId,
+        parentTaskId,
+        toolName: "fail_expert",
+        arguments: { error: error instanceof Error ? error.message : String(error) },
+      }).catch(() => {});
+      throw error;
+    } finally {
+      input.signal?.removeEventListener("abort", abort);
+      unsubscribe();
+      session?.dispose();
+    }
+  }
+
   private sendMessage(request: HostRequest): Record<string, unknown> {
     const sessionId = requiredString(request, "sessionId");
     const taskId = requiredString(request, "taskId");
@@ -160,6 +271,7 @@ export class WorkbenchAgentHost {
     entry.activeTaskId = taskId;
     this.emit({ type: "event", event: "task_started", sessionId, taskId });
     const images = imageInputs(request.images);
+    entry.activeImages = images;
     void entry.session.prompt(message, { images }).then(
       () => {
         if (entry.activeTaskId === taskId) this.emit({ type: "event", event: "task_completed", sessionId, taskId });
@@ -176,7 +288,10 @@ export class WorkbenchAgentHost {
         }
       },
     ).finally(() => {
-      if (entry.activeTaskId === taskId) entry.activeTaskId = undefined;
+      if (entry.activeTaskId === taskId) {
+        entry.activeTaskId = undefined;
+        entry.activeImages = undefined;
+      }
     });
     return { accepted: true, sessionId, taskId };
   }
@@ -200,6 +315,7 @@ export class WorkbenchAgentHost {
     await entry.session.abort();
     if (taskId) this.emit({ type: "event", event: "task_cancelled", sessionId, taskId });
     entry.activeTaskId = undefined;
+    entry.activeImages = undefined;
     return { cancelled: Boolean(taskId) };
   }
 
@@ -228,6 +344,66 @@ export class WorkbenchAgentHost {
     } else if (event.type === "tool_execution_end") {
       this.emit({ type: "event", event: "tool_call_completed", sessionId, taskId, toolCallId: event.toolCallId, toolName: event.toolName, result: event.result, isError: event.isError });
     }
+  }
+}
+
+interface ExpertLaunch {
+  expertType: string;
+  expertSessionId: string;
+  expertTaskId: string;
+  runtimeSessionId: string;
+  systemPrompt: string;
+  allowedTools: string[];
+  provider?: string;
+  model?: string;
+  thinkingLevel?: ThinkingLevel;
+  allowImages: boolean;
+}
+
+function expertLaunch(value: unknown): ExpertLaunch {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("工作台未返回专业 Agent 配置");
+  const record = value as Record<string, unknown>;
+  const allowedTools = record.allowedTools;
+  return {
+    expertType: requiredRecordString(record, "expertType"),
+    expertSessionId: requiredRecordString(record, "expertSessionId"),
+    expertTaskId: requiredRecordString(record, "expertTaskId"),
+    runtimeSessionId: requiredRecordString(record, "runtimeSessionId"),
+    systemPrompt: requiredRecordString(record, "systemPrompt"),
+    allowedTools: Array.isArray(allowedTools) && allowedTools.every((item) => typeof item === "string")
+      ? allowedTools
+      : (() => { throw new Error("专业 Agent 工具白名单无效"); })(),
+    provider: record.provider === null ? undefined : optionalRecordString(record, "provider"),
+    model: record.model === null ? undefined : optionalRecordString(record, "model"),
+    thinkingLevel: optionalRecordString(record, "thinkingLevel") as ThinkingLevel | undefined,
+    allowImages: record.allowImages === true,
+  };
+}
+
+function gatewayData(value: unknown): unknown {
+  return value && typeof value === "object" && !Array.isArray(value) && "data" in value
+    ? (value as Record<string, unknown>).data
+    : value;
+}
+
+function requiredRecordString(value: Record<string, unknown>, key: string): string {
+  const result = optionalRecordString(value, key);
+  if (!result) throw new Error(`专业 Agent 配置缺少 ${key}`);
+  return result;
+}
+
+function optionalRecordString(value: Record<string, unknown>, key: string): string | undefined {
+  const result = value[key];
+  if (result === undefined) return undefined;
+  if (typeof result !== "string") throw new Error(`专业 Agent 配置 ${key} 必须是字符串`);
+  return result;
+}
+
+function parseJson(value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
   }
 }
 

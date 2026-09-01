@@ -1139,7 +1139,7 @@ fn store_context_package(conn: &Connection, package: &ContextPackage) -> AppResu
     Ok(())
 }
 
-fn estimate_tokens(text: &str) -> usize {
+pub(crate) fn estimate_tokens(text: &str) -> usize {
     let mut ascii = 0usize;
     let mut non_ascii = 0usize;
     for character in text.chars() {
