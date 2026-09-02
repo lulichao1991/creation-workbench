@@ -232,7 +232,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
     <div className="ai-settings">
       <section className="ai-settings-section">
         <div className="ai-settings-heading">
-          <div><h3>连接 AI 服务</h3><p>选择服务；支持的登录方式会自动显示。</p></div>
+          <h3>AI 服务</h3>
           <div className="ai-settings-heading-actions">
             <button className="ghost" disabled={disabled || working} onClick={() => void refreshModels()}><RefreshCw size={14} />刷新模型列表</button>
             <button className="secondary" disabled={disabled || working} onClick={() => { setCustomDraft(emptyCustomDraft()); setShowCustomForm(true); }}><Plus size={14} />添加 AI 服务</button>
@@ -244,7 +244,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
             <article className={`ai-provider-card ${provider.authConfigured ? "connected" : ""}`} key={provider.id}>
               <div className="ai-provider-main">
                 <span className={`ai-provider-status ${provider.authConfigured ? "ready" : "idle"}`}>{provider.authConfigured ? <CheckCircle2 size={16} /> : <span />}</span>
-                <div><strong>{providerDisplayName(provider)}</strong><small>{providerDescription(provider)}</small></div>
+                <strong>{providerDisplayName(provider)}</strong>
                 <span className="ai-provider-state">{providerConnectionLabel(provider)}</span>
               </div>
               <div className="ai-provider-actions">
@@ -269,7 +269,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
       </section>
 
       <section className="ai-settings-section">
-        <div className="ai-settings-heading"><div><h3>默认模型</h3><p>新建讨论将使用这里保存的模型。</p></div></div>
+        <div className="ai-settings-heading"><h3>默认模型</h3></div>
         <div className="ai-default-model-grid">
           <label>AI 服务<select value={draft.defaultModel.provider ?? ""} disabled={disabled || working} onChange={(event) => updateDefaultProvider(event.target.value)}><option value="">请选择已连接的服务</option>{providers.filter((provider) => provider.authConfigured && provider.models.length > 0).map((provider) => <option value={provider.id} key={provider.id}>{providerDisplayName(provider)}</option>)}</select></label>
           <label>模型<select value={draft.defaultModel.model ?? ""} disabled={disabled || working || !selectedProvider} onChange={(event) => updateDefaultModel(event.target.value)}><option value="">请选择模型</option>{selectedProvider?.models.map((model) => <option value={model.id} key={model.id}>{model.name}</option>)}</select></label>
@@ -281,7 +281,7 @@ export function AgentModelSettingsPanel({ disabled, onError }: Props) {
 
       <section className="ai-settings-section ai-advanced-section">
         <details>
-          <summary><span><strong>不同专业 Agent 使用不同模型</strong><small>可选；未设置时全部沿用默认模型。</small></span><ChevronDown size={17} /></summary>
+          <summary><strong>专业 Agent 模型</strong><ChevronDown size={17} /></summary>
           <div className="ai-agent-overrides">
             {roles.map(([role, label]) => {
               const choice = draft.professionalOverrides[role];
@@ -320,7 +320,7 @@ function AuthPromptField({ prompt, value, onChange, onSubmit }: { prompt: AgentA
 function CustomProviderForm({ draft, disabled, onChange, onCancel, onSave }: { draft: CustomDraft; disabled: boolean; onChange: (draft: CustomDraft) => void; onCancel: () => void; onSave: () => void }) {
   const valid = draft.name.trim() && draft.baseUrl.trim() && draft.modelId.trim();
   return <div className="ai-custom-provider-form">
-    <div className="ai-settings-heading"><div><h3>{draft.providerId ? "编辑 AI 服务" : "添加 AI 服务"}</h3><p>服务配置只用于当前工作台。</p></div></div>
+    <div className="ai-settings-heading"><h3>{draft.providerId ? "编辑 AI 服务" : "添加 AI 服务"}</h3></div>
     <div className="ai-custom-grid">
       <label>名称<input value={draft.name} disabled={disabled} placeholder="我的本地模型" onChange={(event) => onChange({ ...draft, name: event.target.value })} /></label>
       <label>接口地址<input value={draft.baseUrl} disabled={disabled} onChange={(event) => onChange({ ...draft, baseUrl: event.target.value })} /></label>
@@ -340,14 +340,6 @@ function providerDisplayName(provider: AgentModelProvider): string {
   if (provider.id === "openai-codex") return "ChatGPT Plus / Pro";
   if (provider.id === "openai") return "OpenAI API";
   return provider.name;
-}
-
-function providerDescription(provider: AgentModelProvider): string {
-  if (provider.id === "openai-codex") return "使用 ChatGPT 订阅";
-  if (provider.id === "openai") return "使用 API Key，按 API 用量计费";
-  const subscription = provider.authMethods.find((method) => method.subscription);
-  if (subscription) return subscription.label;
-  return provider.custom ? "自定义 AI 服务" : `${provider.models.length} 个模型`;
 }
 
 function isNoAuthProvider(provider: AgentModelProvider): boolean {

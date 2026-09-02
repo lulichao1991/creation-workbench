@@ -7,6 +7,7 @@ import { SettingsCenter } from "./components/SettingsCenter";
 import { FirstRunOnboarding } from "./components/FirstRunOnboarding";
 import { useSelectionStore } from "./stores/selectionStore";
 import { toUserErrorMessage } from "./domain/userError";
+import { legacySettingsMutations } from "./features/creativeSettings";
 import type {
   BatchMutationRequest,
   BatchMutationResponse,
@@ -129,8 +130,13 @@ function App() {
         typeof projectOrPath === "string"
           ? await api.openProject(projectOrPath)
           : projectOrPath;
-      const next = await api.loadProjectState(project.path);
-      setActiveProject(project);
+      let next = await api.loadProjectState(project.path);
+      const migrations = legacySettingsMutations(next.contentUnits, (key) => localStorage.getItem(key), next.changes);
+      if (migrations.length) {
+        await api.mutateBatch(project.path, { mutations: migrations, changeSetName: "迁移创作设定" });
+        next = await api.loadProjectState(project.path);
+      }
+      setActiveProject({ ...project, revision: next.projects[0]?.revision ?? project.revision });
       setState(next);
       setActiveChangeSetId(null);
       clearSelection();

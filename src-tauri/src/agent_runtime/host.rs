@@ -225,12 +225,15 @@ impl PiSdkRuntimeAdapter {
 
     pub(crate) fn for_resource_dir(resource_dir: PathBuf) -> Self {
         let bundled = bundled_host_command(&resource_dir);
-        if bundled.program.is_file()
-            && bundled
-                .args
-                .first()
-                .is_some_and(|script| PathBuf::from(script).is_file())
-        {
+        let script_is_file = bundled.args.first().is_some_and(|script| {
+            let script = PathBuf::from(script);
+            bundled
+                .current_dir
+                .as_ref()
+                .map_or(script.clone(), |current_dir| current_dir.join(script))
+                .is_file()
+        });
+        if bundled.program.is_file() && script_is_file {
             Self::new(bundled)
         } else {
             Self::default()
@@ -925,6 +928,20 @@ mod tests {
             command.current_dir,
             Some(PathBuf::from(r"C:\portable\resources\agent-host"))
         );
+    }
+
+    #[test]
+    fn bundled_host_resolves_its_script_relative_to_the_private_runtime() {
+        let resource_dir = tempfile::tempdir().unwrap();
+        let host_dir = resource_dir.path().join("agent-host");
+        std::fs::create_dir_all(host_dir.join("dist")).unwrap();
+        std::fs::write(host_dir.join("node.exe"), []).unwrap();
+        std::fs::write(host_dir.join("dist").join("index.js"), []).unwrap();
+
+        let adapter = PiSdkRuntimeAdapter::for_resource_dir(resource_dir.path().to_path_buf());
+
+        assert_eq!(adapter.command.program, host_dir.join("node.exe"));
+        assert_eq!(adapter.command.current_dir, Some(host_dir));
     }
 
     #[test]

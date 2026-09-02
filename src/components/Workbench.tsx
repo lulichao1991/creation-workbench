@@ -15,14 +15,13 @@ import {
   Layers3,
   PanelLeftClose,
   PanelLeftOpen,
-  PanelRightClose,
   PanelRightOpen,
   Plus,
   Sparkles,
   Settings2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { api } from "../api";
 import { assetIdForSelection, defaultObjectForWorkspace, orderedShotsForUnit, shotIdForSelection, supportsWorkspace } from "../domain/projectState";
 import { useSelectionStore } from "../stores/selectionStore";
@@ -53,6 +52,7 @@ import { ImageTaskCenter, useRecentImageJobs } from "./ImageTaskCenter";
 import { PromptCompilerPanel } from "./PromptCompilerPanel";
 import { WorkspaceEmpty } from "./workspaces/WorkspaceEmpty";
 import { useAppDialog, type DialogApi } from "./AppDialog";
+import { ScriptCreation, ScriptStyleSettings } from "./ScriptCreation";
 
 interface Props {
   project: ProjectDescriptor;
@@ -113,8 +113,10 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [leftWidth, setLeftWidth] = useState(() => Number(localStorage.getItem("workbench.leftWidth")) || 210);
-  const [rightWidth, setRightWidth] = useState(() => Number(localStorage.getItem("workbench.rightWidth")) || 380);
+  const [rightWidth, setRightWidth] = useState(() => Math.max(420, Number(localStorage.getItem("workbench.rightWidth")) || 420));
   const [utilityPanel, setUtilityPanel] = useState<"memory" | "images" | null>(null);
+  const [agentRefreshKey, setAgentRefreshKey] = useState(0);
+  const refreshAgentSessions = useCallback(() => setAgentRefreshKey((value) => value + 1), []);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const projectRow = state.projects[0];
   const imageTasks = useRecentImageJobs(project.path);
@@ -135,15 +137,17 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
 
   const currentUnit = state.contentUnits.find((unit) => unit.id === selection.contentUnitId) ?? null;
   useEffect(() => {
+    const script = state.scripts.find((item) => item.content_unit_id === currentUnit?.id);
+    if (selection.workspace === "script" && (!script || (!script.summary.trim() && !state.scenes.some((scene) => scene.script_id === script.id)))) setRightCollapsed(true);
+  }, [selection.workspace, currentUnit?.id]);
+  useEffect(() => {
     if (!supportsWorkspace(currentUnit, selection.workspace)) {
       selection.select({ workspace: "overview", objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null, selectedIds: [] });
     }
   }, [currentUnit?.id, currentUnit?.type, selection.workspace]);
-  const path = contentPath(state.contentUnits, currentUnit?.id ?? null);
   const currentChangeCount = activeChangeSetId
     ? state.changes.filter((change) => change.change_set_id === activeChangeSetId).length
     : 0;
-  const contextLabel = objectDisplayName(state, selection.objectType, selection.objectId, currentUnit);
   const progress = workspaceProgress(state, currentUnit);
 
   const startResize = (side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) => {
@@ -153,7 +157,7 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
     const startWidth = side === "left" ? leftWidth : rightWidth;
     const onMove = (moveEvent: PointerEvent) => {
       const delta = side === "left" ? moveEvent.clientX - startX : startX - moveEvent.clientX;
-      const next = Math.min(side === "left" ? 320 : 520, Math.max(side === "left" ? 180 : 320, startWidth + delta));
+      const next = Math.min(side === "left" ? 320 : 620, Math.max(side === "left" ? 180 : 420, startWidth + delta));
       if (side === "left") setLeftWidth(next); else setRightWidth(next);
     };
     const cleanup = () => {
@@ -274,7 +278,6 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
         <button className="back-button" onClick={() => void leaveProject()} aria-label="返回项目列表"><ArrowLeft size={18} /></button>
         <span className="header-brand-mark"><Clapperboard size={17} /></span>
         <div className="project-title">
-          <p className="eyebrow">创作工作台</p>
           <h1>{projectRow?.name ?? project.name}</h1>
         </div>
         <div className="header-status">
@@ -286,13 +289,6 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
           <span className="revision">修订 {projectRow?.revision ?? project.revision}</span>
         </div>
       </header>
-
-      <div className="breadcrumb-bar">
-        <span>{projectRow?.name ?? project.name}</span>
-        {path.map((unit) => <span key={unit.id}>/ {unit.name}</span>)}
-        <span>/ {tabs.find(([key]) => key === selection.workspace)?.[1]}</span>
-        {selection.field && <strong>/ {selection.field}</strong>}
-      </div>
 
       <nav className="workspace-tabs" aria-label="工作区导航">
         {tabs.map(([key, label]) => {
@@ -357,7 +353,7 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
 
         <main className="center-panel">
           {selection.workspace === "overview" && <OverviewWorkspace project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} />}
-          {selection.workspace === "script" && <ScriptWorkspace state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} />}
+          {selection.workspace === "script" && <ScriptWorkspace key={currentUnit?.id} project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} onTaskSettled={refreshAgentSessions} />}
           {selection.workspace === "shots" && <ShotsWorkspace project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} />}
           {selection.workspace === "assets" && <AssetsWorkspace project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} />}
           {selection.workspace === "keyframes" && <KeyframesWorkspace project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} />}
@@ -367,23 +363,23 @@ export function Workbench({ project, state, busy, saveState, onBack, onMutate, o
 
         <aside className="right-panel">
           {!rightCollapsed && <div className="panel-resizer right-resizer" role="separator" aria-label="调整 Agent 面板宽度" onPointerDown={(event) => startResize("right", event)} />}
-          <div className="inspector-header">
-            <span><Bot size={16} />主 Agent</span>
-            <button className="panel-toggle" aria-label={rightCollapsed ? "展开主 Agent" : "收起主 Agent"} title={rightCollapsed ? "展开主 Agent" : "收起主 Agent"} onClick={() => setRightCollapsed((value) => !value)}>
-              {rightCollapsed ? <PanelRightOpen size={16} /> : <PanelRightClose size={16} />}
+          {rightCollapsed && <div className="inspector-header">
+            <button className="panel-toggle" aria-label="展开主 Agent" title="展开主 Agent" onClick={() => setRightCollapsed(false)}>
+              <PanelRightOpen size={16} />
             </button>
-          </div>
+          </div>}
           {rightCollapsed && <span className="collapsed-rail-icon"><Bot size={17} /></span>}
           <div className="inspector-body agent-inspector">
             <AgentPanel
+              refreshKey={agentRefreshKey}
               project={project}
               revision={projectRow?.revision ?? project.revision}
               workspace={selection.workspace}
               currentUnitId={currentUnit?.id ?? null}
-              contextLabel={contextLabel}
               activeChangeCount={currentChangeCount}
               activeChangeSetId={activeChangeSetId}
               hasActiveChangeSet={Boolean(activeChangeSetId)}
+              onCollapse={() => setRightCollapsed(true)}
               onCloseChangeSet={onCloseChangeSet}
               onRefresh={onRefresh}
               onError={onError}
@@ -465,9 +461,6 @@ async function createContentUnit(parent: ContentUnitRow | null, state: ProjectSt
 function OverviewWorkspace({ project, state, currentUnit, onMutate, onMutateBatch }: { project: ProjectDescriptor; state: ProjectState; currentUnit: ContentUnitRow | null; onMutate: Props["onMutate"]; onMutateBatch: Props["onMutateBatch"] }) {
   const selection = useSelectionStore();
   const dialog = useAppDialog();
-  const visible = currentUnit
-    ? state.contentUnits.filter((unit) => unit.parent_id === currentUnit.id)
-    : state.contentUnits.filter((unit) => unit.parent_id === null);
   const bulkCreateEpisodes = async () => {
     if (!currentUnit) return;
     const requested = Number(await dialog.prompt("批量建立剧集", { label: "补齐后的总集数", defaultValue: "30" }));
@@ -510,62 +503,31 @@ function OverviewWorkspace({ project, state, currentUnit, onMutate, onMutateBatc
   return (
     <div className="workspace-content">
       <div className="workspace-heading">
-        <div><p className="eyebrow">结构总览</p><h2>{currentUnit?.name ?? "作品结构"}</h2><p>{currentUnit?.summary || "从结构、时间轴与语义关系观察作品。"}</p></div>
-        <div className="heading-actions">
-          {currentUnit?.type === "season" && <button className="secondary" onClick={() => void bulkCreateEpisodes()}>批量建立剧集</button>}
-          {currentUnit?.type === "short" && currentUnit.parent_id === null && <button className="secondary" onClick={() => void expandShortToSeries()}>扩展为系列</button>}
-          {currentUnit && <span className={`maturity ${currentUnit.maturity}`}>{maturityLabel(currentUnit.maturity)}</span>}
-        </div>
+        <h2>{currentUnit?.name ?? "作品结构"}</h2>
+        {currentUnit && <span className={`maturity ${currentUnit.maturity}`}>{maturityLabel(currentUnit.maturity)}</span>}
       </div>
       {currentUnit && (
-        <div className="editor-card">
-          <TextField label="摘要" value={currentUnit.summary} multiline onFocus={() => selectField("contentUnit", currentUnit.id, "summary", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { summary: value }, changeSetName: "编辑内容摘要" }).then(() => undefined)} />
-          <div className="field-grid compact">
-            <SelectField label="成熟度" value={currentUnit.maturity} options={[["exploring", "探索中"], ["usable", "可用"], ["stable", "稳定"]]} onFocus={() => selectField("contentUnit", currentUnit.id, "maturity", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { maturity: value }, changeSetName: "更新成熟度" }).then(() => undefined)} />
-            <SelectField label="同步状态" value={currentUnit.sync_status} options={[["normal", "正常"], ["needs_review", "待调整"], ["affected", "受影响"]]} onFocus={() => selectField("contentUnit", currentUnit.id, "sync_status", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { sync_status: value }, changeSetName: "更新同步状态" }).then(() => undefined)} />
+        <details className="overview-details">
+          <summary>基本信息</summary>
+          <div className="editor-card">
+            <TextField label="摘要" value={currentUnit.summary} multiline onFocus={() => selectField("contentUnit", currentUnit.id, "summary", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { summary: value }, changeSetName: "编辑内容摘要" }).then(() => undefined)} />
+            <div className="field-grid compact">
+              <SelectField label="创作阶段" value={currentUnit.maturity} options={[["exploring", "探索中"], ["usable", "可用"], ["stable", "稳定"]]} onFocus={() => selectField("contentUnit", currentUnit.id, "maturity", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { maturity: value }, changeSetName: "更新成熟度" }).then(() => undefined)} />
+              <SelectField label="同步状态" value={currentUnit.sync_status} options={[["normal", "正常"], ["needs_review", "待调整"], ["affected", "受影响"]]} onFocus={() => selectField("contentUnit", currentUnit.id, "sync_status", selection.select)} onSave={(value) => onMutate({ action: "patch", entityType: "contentUnit", objectId: currentUnit.id, values: { sync_status: value }, changeSetName: "更新同步状态" }).then(() => undefined)} />
+            </div>
+            {(currentUnit.type === "season" || (currentUnit.type === "short" && currentUnit.parent_id === null)) && <div className="overview-details-actions">
+              {currentUnit.type === "season" && <button className="secondary" onClick={() => void bulkCreateEpisodes()}>批量建立剧集</button>}
+              {currentUnit.type === "short" && currentUnit.parent_id === null && <button className="secondary" onClick={() => void expandShortToSeries()}>扩展为系列</button>}
+            </div>}
           </div>
-        </div>
+        </details>
       )}
-      <section>
-        <div className="section-heading inline"><div><span className="label">基础时间轴</span><h3>{visible.length ? `${visible.length} 个下级内容` : "暂无下级内容"}</h3></div></div>
-        <div className="timeline">
-          {visible.sort((a, b) => a.sort_order - b.sort_order).map((unit, index) => (
-            <button className="timeline-card" key={unit.id} onClick={() => selection.select({ contentUnitId: unit.id, objectType: "contentUnit", objectId: unit.id, selectionScope: `contentUnit:${unit.id}`, writeScope: `contentUnit:${unit.id}` })}>
-              <span>{String(index + 1).padStart(2, "0")}</span><strong>{unit.name}</strong><small>{unit.summary || "尚未填写摘要"}</small>
-            </button>
-          ))}
-        </div>
-      </section>
-      <RelationEditor project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} />
       <AdvancedStructure project={project} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} />
     </div>
   );
 }
 
-function RelationEditor({ project, state, currentUnit, onMutate }: { project: ProjectDescriptor; state: ProjectState; currentUnit: ContentUnitRow | null; onMutate: Props["onMutate"] }) {
-  const dialog = useAppDialog();
-  const relevant = currentUnit ? state.relations.filter((relation) => relation.source_id === currentUnit.id || relation.target_id === currentUnit.id) : state.relations;
-  const add = async () => {
-    if (!currentUnit) return;
-    const targetId = await dialog.prompt("添加内容关系", { label: "目标内容", options: state.contentUnits.filter((unit) => unit.id !== currentUnit.id).map((unit) => ({ value: unit.id, label: contentPath(state.contentUnits, unit.id).map((part) => part.name).join(" / ") })) });
-    if (!targetId || !state.contentUnits.some((unit) => unit.id === targetId)) return;
-    const relationType = await dialog.prompt("定义内容关系", { label: "关系语义", defaultValue: "主线推进" });
-    if (!relationType) return;
-    await onMutate({ action: "create", entityType: "relation", values: { project_id: project.id, source_type: "contentUnit", source_id: currentUnit.id, relation_type: relationType, target_type: "contentUnit", target_id: targetId, importance: 1 }, changeSetName: "新建关系" });
-  };
-  return (
-    <section>
-      <div className="section-heading inline"><div><span className="label">语义关系</span><h3>关系清单</h3></div><button className="secondary" disabled={!currentUnit} onClick={() => void add()}>＋ 添加关系</button></div>
-      <div className="relation-list">
-        {relevant.length === 0 ? <div className="panel-empty">当前范围还没有关系。</div> : relevant.map((relation) => (
-          <div className="relation-row" key={relation.id}><span>{relationObjectName(state, relation.source_type, relation.source_id)}</span><strong>{relation.relation_type}</strong><span>→ {relationObjectName(state, relation.target_type, relation.target_id)}</span><small>{relation.description || "尚无补充说明"}</small><button className="danger-text" onClick={() => void onMutate({ action: "delete", entityType: "relation", objectId: relation.id, changeSetName: "删除关系" })}>删除</button></div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ScriptWorkspace({ state, currentUnit, onMutate, onMutateBatch }: { state: ProjectState; currentUnit: ContentUnitRow | null; onMutate: Props["onMutate"]; onMutateBatch: Props["onMutateBatch"] }) {
+function ScriptWorkspace({ project, state, currentUnit, onMutate, onMutateBatch, onTaskSettled }: { project: ProjectDescriptor; state: ProjectState; currentUnit: ContentUnitRow | null; onMutate: Props["onMutate"]; onMutateBatch: Props["onMutateBatch"]; onTaskSettled: () => void }) {
   const selection = useSelectionStore();
   const dialog = useAppDialog();
   const script = state.scripts.find((item) => item.content_unit_id === currentUnit?.id);
@@ -573,7 +535,15 @@ function ScriptWorkspace({ state, currentUnit, onMutate, onMutateBatch }: { stat
   const selectedScene = scenes.find((scene) => scene.id === selection.objectId) ?? scenes[0];
   useVisibleObjectSelection(selectedScene ? "scene" : script ? "script" : currentUnit ? "contentUnit" : null, selectedScene?.id ?? script?.id ?? currentUnit?.id ?? null);
   if (!currentUnit) return <WorkspaceEmpty title="请选择内容单元" text="从左侧选择一集、短片或正片。" />;
-  if (!script) return <WorkspaceEmpty title="尚未建立剧本" text={`为“${currentUnit.name}”创建剧本后即可添加场。`} action="创建剧本" onAction={() => void onMutate({ action: "create", entityType: "script", values: { content_unit_id: currentUnit.id, title: currentUnit.name }, changeSetName: "创建剧本" })} />;
+  if (!script || (!scenes.length && !script.summary.trim())) return <ScriptCreation project={project} state={state} unit={currentUnit} onMutateBatch={onMutateBatch} onTaskSettled={onTaskSettled} onManual={async () => {
+    const scriptId = script?.id ?? crypto.randomUUID();
+    const sceneId = crypto.randomUUID();
+    await onMutateBatch({ changeSetName: "开始手动写作", mutations: [
+      ...(!script ? [{ action: "create" as const, entityType: "script", objectId: scriptId, values: { content_unit_id: currentUnit.id, title: currentUnit.name } }] : []),
+      { action: "create", entityType: "scene", objectId: sceneId, values: { script_id: scriptId, title: "场 01", sort_order: 0 } },
+    ] });
+    selection.select({ objectType: "scene", objectId: sceneId, selectionScope: `scene:${sceneId}`, writeScope: `scene:${sceneId}` });
+  }} />;
 
   const addScene = async () => {
     const title = await dialog.prompt("新增场", { label: "场标题", defaultValue: `场 ${String(scenes.length + 1).padStart(2, "0")}` });
@@ -590,6 +560,8 @@ function ScriptWorkspace({ state, currentUnit, onMutate, onMutateBatch }: { stat
     ] });
   };
   return (
+    <div className="script-editor-shell">
+      <ScriptStyleSettings key={currentUnit.id} unit={currentUnit} onMutateBatch={onMutateBatch} />
     <div className="workspace-content split-workspace">
       <div className="sub-list">
         <div className="panel-heading"><div><span className="label">场列表</span><strong>{scenes.length} 场</strong></div><button className="icon-button" aria-label="新增场" title="新增场" onClick={() => void addScene()}>＋</button></div>
@@ -598,6 +570,7 @@ function ScriptWorkspace({ state, currentUnit, onMutate, onMutateBatch }: { stat
       <div className="editor-area">
         {!selectedScene ? <WorkspaceEmpty title="剧本为空" text="添加第一场开始写作。" action="新增场" onAction={() => void addScene()} /> : <SceneEditor scene={selectedScene} onMutate={onMutate} />}
       </div>
+    </div>
     </div>
   );
 }
@@ -608,7 +581,7 @@ function SceneEditor({ scene, onMutate }: { scene: SceneRow; onMutate: Props["on
   const patch = (field: string, value: unknown) => onMutate({ action: "patch", entityType: "scene", objectId: scene.id, values: { [field]: value }, changeSetName: "编辑剧本场" }).then(() => undefined);
   return (
     <div className="editor-card scene-editor">
-      <div className="workspace-heading"><div><p className="eyebrow">剧本场景</p><h2>{scene.title}</h2></div><button className="danger-text" onClick={async () => { if (await dialog.confirm("场内存在镜头时操作会被拒绝。", { title: `删除“${scene.title}”？`, confirmLabel: "删除", danger: true })) void onMutate({ action: "delete", entityType: "scene", objectId: scene.id, changeSetName: "删除场" }); }}>删除场</button></div>
+      <div className="workspace-heading"><h2>{scene.title}</h2><button className="danger-text" onClick={async () => { if (await dialog.confirm("场内存在镜头时操作会被拒绝。", { title: `删除“${scene.title}”？`, confirmLabel: "删除", danger: true })) void onMutate({ action: "delete", entityType: "scene", objectId: scene.id, changeSetName: "删除场" }); }}>删除场</button></div>
       <div className="field-grid">
         <TextField label="标题" value={scene.title} onFocus={() => selectField("scene", scene.id, "title", selection.select)} onSave={(value) => patch("title", value)} />
         <TextField label="地点" value={scene.location_text} onFocus={() => selectField("scene", scene.id, "location_text", selection.select)} onSave={(value) => patch("location_text", value)} />
@@ -653,7 +626,7 @@ function ShotsWorkspace({ project, state, currentUnit, onMutate, onMutateBatch, 
   };
   return (
     <div className="workspace-content">
-      <div className="workspace-heading"><div><p className="eyebrow">分镜表</p><h2>结构化分镜</h2><p>选择镜头后编辑详情；可拖动镜头行调整顺序。</p></div><div className="heading-actions"><select value={sceneId ?? ""} aria-label="当前剧本场" onChange={(event) => setSceneId(event.target.value)}>{scenes.map((scene) => <option value={scene.id} key={scene.id}>{scene.title}</option>)}</select><button className="secondary" onClick={() => void addShot()}>＋ 镜头</button><button className="ghost" disabled={!selectedShot} title={selectedShot ? "复制当前镜头" : "请先选择镜头"} onClick={() => void duplicate()}>复制</button></div></div>
+      <div className="workspace-heading"><h2>分镜</h2><div className="heading-actions"><select value={sceneId ?? ""} aria-label="当前剧本场" onChange={(event) => setSceneId(event.target.value)}>{scenes.map((scene) => <option value={scene.id} key={scene.id}>{scene.title}</option>)}</select><button className="secondary" onClick={() => void addShot()}>＋ 镜头</button><button className="ghost" disabled={!selectedShot} title={selectedShot ? "复制当前镜头" : "请先选择镜头"} onClick={() => void duplicate()}>复制</button></div></div>
       <div className="shot-table-wrap"><table className="shot-table"><thead><tr><th><span className="sr-only">选择</span></th><th>编号</th><th>时长</th><th>景别</th><th>主体</th><th>核心动作</th><th>叙事目的</th><th>成熟度</th><th>顺序</th></tr></thead><tbody>{shots.map((shot, index) => <tr key={shot.id} draggable onDragStart={(event) => event.dataTransfer.setData("shotId", shot.id)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => void reorder(event.dataTransfer.getData("shotId"), shot.id)} className={selectedShot?.id === shot.id ? "selected" : ""} onClick={() => selection.select({ objectType: "shot", objectId: shot.id, selectionScope: `shot:${shot.id}`, writeScope: `shot:${shot.id}` })}><td><input type="checkbox" aria-label={`选择${shot.title}`} checked={selection.selectedIds.includes(shot.id)} onClick={(event) => event.stopPropagation()} onChange={(event) => selection.select({ selectedIds: event.target.checked ? [...selection.selectedIds, shot.id] : selection.selectedIds.filter((id) => id !== shot.id) })} /></td><td>#{String(index + 1).padStart(2, "0")}</td><td>{shot.duration}s</td><td>{shot.shot_size || "—"}</td><td>{shot.subjects || "—"}</td><td>{shot.action || "—"}</td><td>{shot.narrative_purpose || "—"}</td><td><span className={`maturity tiny ${shot.maturity}`}>{maturityLabel(shot.maturity)}</span></td><td className="row-order-actions"><button disabled={index === 0} aria-label={`上移${shot.title}`} title={index === 0 ? "已经是第一个镜头" : "上移"} onClick={(event) => { event.stopPropagation(); void reorder(shot.id, shots[index - 1].id); }}>↑</button><button disabled={index === shots.length - 1} aria-label={`下移${shot.title}`} title={index === shots.length - 1 ? "已经是最后一个镜头" : "下移"} onClick={(event) => { event.stopPropagation(); void reorder(shot.id, shots[index + 1].id); }}>↓</button></td></tr>)}</tbody></table></div>
       {selectedShot ? <ShotEditor project={project} shot={selectedShot} index={shots.findIndex((shot) => shot.id === selectedShot.id)} state={state} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} /> : <WorkspaceEmpty title="还没有镜头" text="添加第一个镜头开始结构化分镜。" action="新增镜头" onAction={() => void addShot()} />}
     </div>
@@ -683,7 +656,7 @@ function ShotEditor({ project, shot, index, state, onMutate, onMutateBatch, onRe
   };
   return (
     <div className="editor-card shot-editor">
-      <div className="workspace-heading"><div><p className="eyebrow">镜头 #{String(index + 1).padStart(2, "0")}</p><h3>{shot.title}</h3></div><button className="danger-text" onClick={async () => { if (await dialog.confirm("关键帧、任务和资产关联会一并移除；本轮修改仍可撤销。", { title: `删除“${shot.title}”？`, confirmLabel: "删除镜头", danger: true })) void onMutate({ action: "delete", entityType: "shot", objectId: shot.id, changeSetName: "删除镜头及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除镜头</button></div>
+      <div className="workspace-heading"><h3>#{String(index + 1).padStart(2, "0")} · {shot.title}</h3><button className="danger-text" onClick={async () => { if (await dialog.confirm("关键帧、任务和资产关联会一并移除；本轮修改仍可撤销。", { title: `删除“${shot.title}”？`, confirmLabel: "删除镜头", danger: true })) void onMutate({ action: "delete", entityType: "shot", objectId: shot.id, changeSetName: "删除镜头及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除镜头</button></div>
       <div className="field-grid three">
         <TextField label="标题" value={shot.title} onFocus={() => focus("title")} onSave={(v) => patch("title", v)} />
         <NumberField label="时长（秒）" value={shot.duration} step={0.1} onFocus={() => focus("duration")} onSave={(v) => patch("duration", v)} />
@@ -701,9 +674,9 @@ function ShotEditor({ project, shot, index, state, onMutate, onMutateBatch, onRe
         <TextField label="起始状态" value={shot.start_state} multiline onFocus={() => focus("start_state")} onSave={(v) => patch("start_state", v)} />
         <TextField label="结束状态" value={shot.end_state} multiline onFocus={() => focus("end_state")} onSave={(v) => patch("end_state", v)} />
       </div>
-      <div className="section-heading inline"><div><span className="label">正式资产引用</span><h3>{links.length} 项</h3></div></div>
+      <div className="section-heading inline"><h3>正式资产 · {links.length}</h3></div>
       <div className="asset-link-grid">{state.assets.map((asset) => <label key={asset.id}><input type="checkbox" checked={linkedIds.has(asset.id)} onChange={(event) => void toggleAsset(asset, event.target.checked)} /><span className={`unit-icon ${asset.type}`}>{unitIcon(asset.type)}</span><span>{asset.name}</span><small>{assetTypeLabel(asset.type)}</small></label>)}</div>
-      <section className="storyboard-image-section"><div className="section-heading inline"><div><span className="label">分镜参考图</span><h3>{storyboardFrame?.file_path ? "已选正式图片" : storyboardFrame ? "等待生成或导入" : "尚未建立图片需求"}</h3></div>{storyboardFrame && <button className="ghost" disabled={!storyboardPrompt} onClick={() => void onMutate({ action: "patch", entityType: "keyframe", objectId: storyboardFrame.id, values: { description: shot.composition || shot.action, prompt_draft: storyboardPrompt }, changeSetName: "同步分镜图提示词" })}>同步镜头描述</button>}</div>{storyboardFrame ? <>{storyboardFrame.file_path && <div className="storyboard-preview"><MediaImage projectPath={project.path} relativePath={storyboardFrame.file_path} alt={`${shot.title} 分镜参考图`} /></div>}<ImageGenerationPanel projectPath={project.path} targetType="keyframe" targetId={storyboardFrame.id} prompt={storyboardFrame.prompt_draft} referenceImages={referenceImages} onSelected={onRefresh} onError={onError} onConfigure={onOpenSettings} /></> : <div className="image-provider-empty"><div><strong>根据当前镜头建立分镜图需求</strong><small>会自动组合景别、机位、构图、动作、环境以及已关联资产，并继承正式资产参考图。</small></div><button className="primary" disabled={!storyboardPrompt} onClick={() => void createStoryboardFrame().catch(onError)}>准备分镜图</button></div>}</section>
+      <section className="storyboard-image-section"><div className="section-heading inline"><h3>分镜参考图 · {storyboardFrame?.file_path ? "已选" : storyboardFrame ? "待生成" : "未建立"}</h3>{storyboardFrame && <button className="ghost" disabled={!storyboardPrompt} onClick={() => void onMutate({ action: "patch", entityType: "keyframe", objectId: storyboardFrame.id, values: { description: shot.composition || shot.action, prompt_draft: storyboardPrompt }, changeSetName: "同步分镜图提示词" })}>同步镜头描述</button>}</div>{storyboardFrame ? <>{storyboardFrame.file_path && <div className="storyboard-preview"><MediaImage projectPath={project.path} relativePath={storyboardFrame.file_path} alt={`${shot.title} 分镜参考图`} /></div>}<ImageGenerationPanel projectPath={project.path} targetType="keyframe" targetId={storyboardFrame.id} prompt={storyboardFrame.prompt_draft} referenceImages={referenceImages} onSelected={onRefresh} onError={onError} onConfigure={onOpenSettings} /></> : <div className="image-provider-empty"><strong>建立分镜图需求</strong><button className="primary" disabled={!storyboardPrompt} onClick={() => void createStoryboardFrame().catch(onError)}>准备分镜图</button></div>}</section>
     </div>
   );
 }
@@ -727,7 +700,7 @@ function AssetsWorkspace({ project, state, currentUnit, onMutate, onMutateBatch,
   };
   return (
     <div className="workspace-content split-workspace">
-      <div className="sub-list"><div className="asset-type-tabs">{(["character", "location", "prop"] as const).map((value) => <button className={type === value ? "active" : ""} key={value} onClick={() => setType(value)}>{assetTypeLabel(value)}</button>)}</div><div className="panel-heading"><div><span className="label">资产</span><strong>{assets.length} 项</strong></div><button className="icon-button" aria-label={`新建${assetTypeLabel(type)}资产`} title={`新建${assetTypeLabel(type)}资产`} onClick={() => void add()}>＋</button></div>{assets.map((asset) => <button className={`sub-list-row ${selected?.id === asset.id ? "selected" : ""}`} key={asset.id} onClick={() => selection.select({ objectType: "asset", objectId: asset.id, selectionScope: `asset:${asset.id}`, writeScope: `asset:${asset.id}` })}><span className={`unit-icon ${asset.type}`}>{unitIcon(asset.type)}</span><strong>{asset.name}</strong><small>{asset.description || "尚无视觉定义"}</small></button>)}</div>
+      <div className="sub-list"><div className="asset-type-tabs">{(["character", "location", "prop"] as const).map((value) => <button className={type === value ? "active" : ""} key={value} onClick={() => setType(value)}>{assetTypeLabel(value)}</button>)}</div><div className="panel-heading"><strong>资产 · {assets.length}</strong><button className="icon-button" aria-label={`新建${assetTypeLabel(type)}资产`} title={`新建${assetTypeLabel(type)}资产`} onClick={() => void add()}>＋</button></div>{assets.map((asset) => <button className={`sub-list-row ${selected?.id === asset.id ? "selected" : ""}`} key={asset.id} onClick={() => selection.select({ objectType: "asset", objectId: asset.id, selectionScope: `asset:${asset.id}`, writeScope: `asset:${asset.id}` })}><span className={`unit-icon ${asset.type}`}>{unitIcon(asset.type)}</span><strong>{asset.name}</strong>{asset.description && <small>{asset.description}</small>}</button>)}</div>
       <div className="editor-area"><BatchImageGenerationBar projectPath={project.path} targets={batchTargets} onConfigure={onOpenSettings} onError={onError} />{selected ? <AssetEditor project={project} asset={selected} state={state} currentUnit={currentUnit} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} /> : <WorkspaceEmpty title={`还没有${assetTypeLabel(type)}资产`} text="建立文字视觉定义，再导入正式图片。" action="新建资产" onAction={() => void add()} />}</div>
     </div>
   );
@@ -787,10 +760,10 @@ function AssetEditor({ project, asset, state, currentUnit, onMutate, onMutateBat
   };
   return (
     <div>
-      <div className="workspace-heading"><div><p className="eyebrow">{assetTypeLabel(asset.type)}资产</p><h2>{asset.name}</h2></div><button className="danger-text" onClick={async () => { if (await dialog.confirm("图片、需求和镜头关联会一并移除；本轮修改仍可撤销。", { title: `删除“${asset.name}”？`, confirmLabel: "删除资产", danger: true })) void onMutate({ action: "delete", entityType: "asset", objectId: asset.id, changeSetName: "删除资产及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除资产</button></div>
+      <div className="workspace-heading"><h2>{asset.name}</h2><button className="danger-text" onClick={async () => { if (await dialog.confirm("图片、需求和镜头关联会一并移除；本轮修改仍可撤销。", { title: `删除“${asset.name}”？`, confirmLabel: "删除资产", danger: true })) void onMutate({ action: "delete", entityType: "asset", objectId: asset.id, changeSetName: "删除资产及关联" }).then(() => selection.select({ objectType: null, objectId: null, field: null, selectionScope: null, writeScope: null })); }}>删除资产</button></div>
       <div className="editor-card"><div className="field-grid"><TextField label="名称" value={asset.name} onFocus={() => selectField("asset", asset.id, "name", selection.select)} onSave={(v) => patch("name", v)} /><SelectField label="作用范围" value={asset.scope_unit_id ?? ""} options={[["", "项目共享"], ...state.contentUnits.map((unit) => [unit.id, unit.name] as [string, string])]} onFocus={() => selectField("asset", asset.id, "scope_unit_id", selection.select)} onSave={(v) => patch("scope_unit_id", v || null)} /><TextField label="文字视觉定义" value={asset.description} multiline onFocus={() => selectField("asset", asset.id, "description", selection.select)} onSave={(v) => patch("description", v)} /></div></div>
-      <section><div className="section-heading inline"><div><span className="label">资产需求</span><h3>{requirements.length} 项需求</h3></div><button className="secondary" onClick={() => void addRequirement()}>＋ 添加需求</button></div>{requirements.map((requirement) => { const sources = state.assetRequirementSources.filter((item) => item.asset_requirement_id === requirement.id); return <div className="requirement-card" key={requirement.id}><TextField label="需求类型" value={requirement.requirement_type} onFocus={() => selectField("assetRequirement", requirement.id, "requirement_type", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { requirement_type: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="描述" value={requirement.description} multiline onFocus={() => selectField("assetRequirement", requirement.id, "description", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { description: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="专业提示词草稿" value={requirement.prompt_draft} multiline onFocus={() => selectField("assetRequirement", requirement.id, "prompt_draft", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { prompt_draft: v }, changeSetName: "编辑资产提示词" }).then(() => undefined)} /><div className="requirement-sources"><span>来源：{sources.length ? sources.map((source) => state.shots.find((shot) => shot.id === source.source_id)?.title ?? source.source_id).join("、") : "未关联镜头"}</span><button className="ghost" onClick={() => void addRequirementSource(requirement.id)}>追加来源</button></div><ImageGenerationPanel projectPath={project.path} targetType="assetRequirement" targetId={requirement.id} prompt={requirement.prompt_draft} referenceImages={media.map((item) => item.file_path)} onSelected={onRefresh} onError={onError} onConfigure={onOpenSettings} /><button className="danger-text" onClick={() => void deleteRequirement(requirement.id)}>删除需求</button></div>; })}</section>
-      <section><div className="section-heading inline"><div><span className="label">正式图片</span><h3>{media.length} 张图片</h3></div><div className="heading-actions"><button className="secondary" onClick={() => void importMedia()}>导入图片</button></div></div><div className="media-grid">{media.map((item) => { const satisfied = state.assetMediaRequirements.filter((link) => link.asset_media_id === item.id).map((link) => requirements.find((requirement) => requirement.id === link.asset_requirement_id)?.requirement_type).filter(Boolean); return <div className={`media-card ${item.is_primary ? "primary-media" : ""}`} key={item.id}><MediaImage projectPath={project.path} relativePath={item.file_path} alt={asset.name} /><div><strong>{item.label || "资产图片"}</strong><small>{satisfied.length ? `满足：${satisfied.join("、")}` : item.is_primary ? "正式主图" : "候选角度"}</small></div><div className="card-actions">{!item.is_primary && <button className="ghost" onClick={() => void setPrimary(item)}>设为主图</button>}<button className="danger-text" onClick={() => void deleteMedia(item.id)}>移除</button></div></div>; })}</div></section>
+      <section><div className="section-heading inline"><h3>资产需求 · {requirements.length}</h3><button className="secondary" onClick={() => void addRequirement()}>＋ 添加需求</button></div>{requirements.map((requirement) => { const sources = state.assetRequirementSources.filter((item) => item.asset_requirement_id === requirement.id); return <div className="requirement-card" key={requirement.id}><TextField label="需求类型" value={requirement.requirement_type} onFocus={() => selectField("assetRequirement", requirement.id, "requirement_type", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { requirement_type: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="描述" value={requirement.description} multiline onFocus={() => selectField("assetRequirement", requirement.id, "description", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { description: v }, changeSetName: "编辑资产需求" }).then(() => undefined)} /><TextField label="专业提示词草稿" value={requirement.prompt_draft} multiline onFocus={() => selectField("assetRequirement", requirement.id, "prompt_draft", selection.select)} onSave={(v) => onMutate({ action: "patch", entityType: "assetRequirement", objectId: requirement.id, values: { prompt_draft: v }, changeSetName: "编辑资产提示词" }).then(() => undefined)} /><div className="requirement-sources"><span>来源：{sources.length ? sources.map((source) => state.shots.find((shot) => shot.id === source.source_id)?.title ?? source.source_id).join("、") : "未关联镜头"}</span><button className="ghost" onClick={() => void addRequirementSource(requirement.id)}>追加来源</button></div><ImageGenerationPanel projectPath={project.path} targetType="assetRequirement" targetId={requirement.id} prompt={requirement.prompt_draft} referenceImages={media.map((item) => item.file_path)} onSelected={onRefresh} onError={onError} onConfigure={onOpenSettings} /><button className="danger-text" onClick={() => void deleteRequirement(requirement.id)}>删除需求</button></div>; })}</section>
+      <section><div className="section-heading inline"><h3>正式图片 · {media.length}</h3><div className="heading-actions"><button className="secondary" onClick={() => void importMedia()}>导入图片</button></div></div><div className="media-grid">{media.map((item) => { const satisfied = state.assetMediaRequirements.filter((link) => link.asset_media_id === item.id).map((link) => requirements.find((requirement) => requirement.id === link.asset_requirement_id)?.requirement_type).filter(Boolean); return <div className={`media-card ${item.is_primary ? "primary-media" : ""}`} key={item.id}><MediaImage projectPath={project.path} relativePath={item.file_path} alt={asset.name} /><div><strong>{item.label || "资产图片"}</strong><small>{satisfied.length ? `满足：${satisfied.join("、")}` : item.is_primary ? "正式主图" : "候选角度"}</small></div><div className="card-actions">{!item.is_primary && <button className="ghost" onClick={() => void setPrimary(item)}>设为主图</button>}<button className="danger-text" onClick={() => void deleteMedia(item.id)}>移除</button></div></div>; })}</div></section>
     </div>
   );
 }
@@ -820,7 +793,7 @@ function KeyframesWorkspace({ project, state, currentUnit, onMutate, onRefresh, 
   };
   if (!selectedShot) return <WorkspaceEmpty title="当前内容还没有镜头" text="建立分镜后才能规划关键帧。" />;
   return (
-    <div className="workspace-content split-workspace"><div className="sub-list"><div className="panel-heading"><div><span className="label">镜头</span><strong>{shots.length} 个</strong></div></div>{shots.map((shot, index) => <button className={`sub-list-row ${selectedShot.id === shot.id ? "selected" : ""}`} key={shot.id} onClick={() => selection.select({ objectType: "shot", objectId: shot.id, selectionScope: `shot:${shot.id}`, writeScope: `shot:${shot.id}` })}><span>#{String(index + 1).padStart(2, "0")}</span><strong>{shot.title}</strong><small>{shot.composition || shot.action || "尚无画面描述"}</small></button>)}</div><div className="editor-area"><BatchImageGenerationBar projectPath={project.path} targets={batchTargets} onConfigure={onOpenSettings} onError={onError} /><div className="workspace-heading"><div><p className="eyebrow">KEYFRAMES</p><h2>{selectedShot.title}</h2><p>{selectedShot.composition || "先根据镜头与资产规划画面。"}</p></div><button className="secondary" onClick={() => void add()}>＋ 关键帧需求</button></div><div className="inherited-assets"><span className="label">继承镜头资产</span><strong>{inheritedAssets.length ? inheritedAssets.map((asset) => asset.name).join(" · ") : "尚未关联正式资产"}</strong></div><div className="keyframe-tabs">{keyframes.map((frame) => <button className={selectedFrame?.id === frame.id ? "active" : ""} key={frame.id} onClick={() => selection.select({ objectType: "keyframe", objectId: frame.id, selectionScope: `keyframe:${frame.id}`, writeScope: `keyframe:${frame.id}` })}>{keyframeTypeLabel(frame.type)} · {frame.status === "ready" ? "已就绪" : "规划中"}</button>)}</div>{selectedFrame ? <KeyframeEditor project={project} frame={selectedFrame} onMutate={onMutate} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} /> : <WorkspaceEmpty title="还没有关键帧需求" text="关键帧可以先只有描述和提示词，之后再导入图片。" action="新建需求" onAction={() => void add()} />}</div></div>
+    <div className="workspace-content split-workspace"><div className="sub-list"><div className="panel-heading"><strong>镜头 · {shots.length}</strong></div>{shots.map((shot, index) => <button className={`sub-list-row ${selectedShot.id === shot.id ? "selected" : ""}`} key={shot.id} onClick={() => selection.select({ objectType: "shot", objectId: shot.id, selectionScope: `shot:${shot.id}`, writeScope: `shot:${shot.id}` })}><span>#{String(index + 1).padStart(2, "0")}</span><strong>{shot.title}</strong>{(shot.composition || shot.action) && <small>{shot.composition || shot.action}</small>}</button>)}</div><div className="editor-area"><BatchImageGenerationBar projectPath={project.path} targets={batchTargets} onConfigure={onOpenSettings} onError={onError} /><div className="workspace-heading"><div><h2>{selectedShot.title}</h2>{selectedShot.composition && <p>{selectedShot.composition}</p>}</div><button className="secondary" onClick={() => void add()}>＋ 关键帧需求</button></div><div className="inherited-assets"><span className="label">继承镜头资产</span><strong>{inheritedAssets.length ? inheritedAssets.map((asset) => asset.name).join(" · ") : "尚未关联正式资产"}</strong></div><div className="keyframe-tabs">{keyframes.map((frame) => <button className={selectedFrame?.id === frame.id ? "active" : ""} key={frame.id} onClick={() => selection.select({ objectType: "keyframe", objectId: frame.id, selectionScope: `keyframe:${frame.id}`, writeScope: `keyframe:${frame.id}` })}>{keyframeTypeLabel(frame.type)} · {frame.status === "ready" ? "已就绪" : "规划中"}</button>)}</div>{selectedFrame ? <KeyframeEditor project={project} frame={selectedFrame} onMutate={onMutate} onRefresh={onRefresh} onError={onError} onOpenSettings={onOpenSettings} /> : <WorkspaceEmpty title="还没有关键帧需求" text="关键帧可以先只有描述和提示词，之后再导入图片。" action="新建需求" onAction={() => void add()} />}</div></div>
   );
 }
 
@@ -855,7 +828,7 @@ function GenerationWorkspace({ project, state, currentUnit, onMutate, onMutateBa
     });
     selection.select({ objectType: "generationTask", objectId: taskId, selectedIds: [], selectionScope: `generationTask:${taskId}`, writeScope: `generationTask:${taskId}` });
   };
-  return <div className="workspace-content"><div className="workspace-heading"><div><p className="eyebrow">制作批次</p><h2>镜头制作批次</h2><p>将需要一起编译提示词或交付生成的镜头组合成批次；创建批次本身不会调用模型。</p></div><button className="primary" disabled={!selectedShots.length} title={selectedShots.length ? "创建镜头集合，不会立即调用模型" : "请先在下方镜头表中勾选镜头"} onClick={() => void create()}>用已选 {selectedShots.length} 个镜头创建批次</button></div><div className="generation-layout"><div className="shot-picker"><span className="label">完整镜头表</span>{shots.map((shot, index) => <label className="picker-row" key={shot.id}><input type="checkbox" checked={selection.selectedIds.includes(shot.id)} onChange={(event) => selection.select({ selectedIds: event.target.checked ? [...selection.selectedIds, shot.id] : selection.selectedIds.filter((id) => id !== shot.id) })} /><span>#{String(index + 1).padStart(2, "0")}</span><strong>{shot.title}</strong><small>{shot.duration}s</small></label>)}</div><div className="task-list"><span className="label">批次</span>{tasks.map((task) => <button className={selectedTask?.id === task.id ? "active" : ""} key={task.id} onClick={() => selection.select({ objectType: "generationTask", objectId: task.id, selectionScope: `generationTask:${task.id}`, writeScope: `generationTask:${task.id}` })}><strong>{task.name}</strong><small>{task.duration}s · {state.generationTaskShots.filter((link) => link.generation_task_id === task.id).length} 镜头</small></button>)}</div></div>{selectedTask ? <GenerationTaskEditor project={project} task={selectedTask} state={state} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} /> : <WorkspaceEmpty title="还没有制作批次" text="先在镜头表中勾选镜头，再创建一个制作批次。" />}</div>;
+  return <div className="workspace-content"><div className="workspace-heading"><h2>制作批次</h2><button className="primary" disabled={!selectedShots.length} title={selectedShots.length ? "创建镜头集合，不会立即调用模型" : "请先在下方镜头表中勾选镜头"} onClick={() => void create()}>用已选 {selectedShots.length} 个镜头创建批次</button></div><div className="generation-layout"><div className="shot-picker"><span className="label">镜头</span>{shots.map((shot, index) => <label className="picker-row" key={shot.id}><input type="checkbox" checked={selection.selectedIds.includes(shot.id)} onChange={(event) => selection.select({ selectedIds: event.target.checked ? [...selection.selectedIds, shot.id] : selection.selectedIds.filter((id) => id !== shot.id) })} /><span>#{String(index + 1).padStart(2, "0")}</span><strong>{shot.title}</strong><small>{shot.duration}s</small></label>)}</div><div className="task-list"><span className="label">批次</span>{tasks.map((task) => <button className={selectedTask?.id === task.id ? "active" : ""} key={task.id} onClick={() => selection.select({ objectType: "generationTask", objectId: task.id, selectionScope: `generationTask:${task.id}`, writeScope: `generationTask:${task.id}` })}><strong>{task.name}</strong><small>{task.duration}s · {state.generationTaskShots.filter((link) => link.generation_task_id === task.id).length} 镜头</small></button>)}</div></div>{selectedTask ? <GenerationTaskEditor project={project} task={selectedTask} state={state} onMutate={onMutate} onMutateBatch={onMutateBatch} onRefresh={onRefresh} onError={onError} /> : <WorkspaceEmpty title="还没有制作批次" text="先在镜头表中勾选镜头，再创建一个制作批次。" />}</div>;
 }
 
 function GenerationTaskEditor({ project, task, state, onMutate, onMutateBatch, onRefresh, onError }: { project: ProjectDescriptor; task: GenerationTaskRow; state: ProjectState; onMutate: Props["onMutate"]; onMutateBatch: Props["onMutateBatch"]; onRefresh: Props["onRefresh"]; onError: Props["onError"] }) {
@@ -889,7 +862,7 @@ function GenerationTaskEditor({ project, task, state, onMutate, onMutateBatch, o
       if (await dialog.confirm(detail, { title: "生产包导出完成", confirmLabel: "打开目录" })) await openPath(result.directory);
     } catch (error) { onError(error); }
   };
-  return <div className="editor-card"><div className="workspace-heading"><div><p className="eyebrow">镜头批次</p><h3>{task.name}</h3></div><div className="heading-actions"><button className="primary" onClick={() => void exportPackage()}>导出生产包</button><button className="ghost" disabled={!selection.selectedIds.length} title={selection.selectedIds.length ? "添加已选镜头" : "请先在镜头表中勾选镜头"} onClick={() => void addSelected()}>添加已选</button><button className="ghost" disabled={!selection.selectedIds.length} title={selection.selectedIds.length ? "用已选镜头替换当前批次" : "请先在镜头表中勾选镜头"} onClick={() => void replaceWithSelected()}>用已选替换</button><button className="danger-text" onClick={async () => { if (await dialog.confirm("批次与镜头的关联会一并移除，镜头本身不会被删除。", { title: `删除“${task.name}”？`, confirmLabel: "删除批次", danger: true })) void deleteTask(); }}>删除批次</button></div></div><div className="field-grid"><TextField label="批次名称" value={task.name} onFocus={() => selectField("generationTask", task.id, "name", selection.select)} onSave={(v) => patch("name", v)} /><TextField label="目标视频模型" value={task.target_model} onFocus={() => selectField("generationTask", task.id, "target_model", selection.select)} onSave={(v) => patch("target_model", v)} /><TextField label="当前正式提示词" value={task.prompt} multiline onFocus={() => selectField("generationTask", task.id, "prompt", selection.select)} onSave={(v) => patch("prompt", v)} /></div><div className="linked-shots"><span className="label">镜头顺序 · 总时长 {task.duration}s</span>{linkedShots.map((shot, index) => <div className="linked-shot" key={shot.id}><span>{index + 1}</span><strong>{shot.title}</strong><small>{shot.duration}s</small><button className="ghost" disabled={index === 0} onClick={() => void move(index, -1)}>↑</button><button className="ghost" disabled={index === linkedShots.length - 1} onClick={() => void move(index, 1)}>↓</button><button className="danger-text" onClick={() => void onMutateBatch({ changeSetName: "移出任务镜头", mutations: [{ action: "delete", entityType: "generationTaskShot", objectId: `${task.id}|${shot.id}` }] })}>移出</button></div>)}</div><PromptCompilerPanel projectPath={project.path} projectId={project.id} taskId={task.id} revision={state.projects[0]?.revision ?? project.revision} officialPrompt={task.prompt} onRefresh={onRefresh} onError={onError} /></div>;
+  return <div className="editor-card"><div className="workspace-heading"><h3>{task.name}</h3><div className="heading-actions"><button className="primary" onClick={() => void exportPackage()}>导出生产包</button><button className="ghost" disabled={!selection.selectedIds.length} title={selection.selectedIds.length ? "添加已选镜头" : "请先在镜头表中勾选镜头"} onClick={() => void addSelected()}>添加已选</button><button className="ghost" disabled={!selection.selectedIds.length} title={selection.selectedIds.length ? "用已选镜头替换当前批次" : "请先在镜头表中勾选镜头"} onClick={() => void replaceWithSelected()}>用已选替换</button><button className="danger-text" onClick={async () => { if (await dialog.confirm("批次与镜头的关联会一并移除，镜头本身不会被删除。", { title: `删除“${task.name}”？`, confirmLabel: "删除批次", danger: true })) void deleteTask(); }}>删除批次</button></div></div><div className="field-grid"><TextField label="批次名称" value={task.name} onFocus={() => selectField("generationTask", task.id, "name", selection.select)} onSave={(v) => patch("name", v)} /><TextField label="目标视频模型" value={task.target_model} onFocus={() => selectField("generationTask", task.id, "target_model", selection.select)} onSave={(v) => patch("target_model", v)} /><TextField label="当前正式提示词" value={task.prompt} multiline onFocus={() => selectField("generationTask", task.id, "prompt", selection.select)} onSave={(v) => patch("prompt", v)} /></div><div className="linked-shots"><span className="label">镜头顺序 · 总时长 {task.duration}s</span>{linkedShots.map((shot, index) => <div className="linked-shot" key={shot.id}><span>{index + 1}</span><strong>{shot.title}</strong><small>{shot.duration}s</small><button className="ghost" disabled={index === 0} onClick={() => void move(index, -1)}>↑</button><button className="ghost" disabled={index === linkedShots.length - 1} onClick={() => void move(index, 1)}>↓</button><button className="danger-text" onClick={() => void onMutateBatch({ changeSetName: "移出任务镜头", mutations: [{ action: "delete", entityType: "generationTaskShot", objectId: `${task.id}|${shot.id}` }] })}>移出</button></div>)}</div><PromptCompilerPanel projectPath={project.path} projectId={project.id} taskId={task.id} revision={state.projects[0]?.revision ?? project.revision} officialPrompt={task.prompt} onRefresh={onRefresh} onError={onError} /></div>;
 }
 
 function HistoryWorkspace({ project, state, onRefresh, onUndo, onError }: { project: ProjectDescriptor; state: ProjectState; onRefresh: () => Promise<void>; onUndo: Props["onUndo"]; onError: Props["onError"] }) {
@@ -899,7 +872,7 @@ function HistoryWorkspace({ project, state, onRefresh, onUndo, onError }: { proj
   const create = async () => { if (!snapshotName.trim()) return; try { await api.createSnapshot(project.path, snapshotName, "用户手动创建"); setSnapshotName(""); await onRefresh(); } catch (error) { onError(error); } };
   const cleanup = async () => { if (!await dialog.confirm("将永久删除数据库未引用的资产和关键帧文件，此操作无法撤销。", { title: "清理孤立媒体？", confirmLabel: "清理文件", danger: true })) return; try { const count = await api.cleanupProjectMedia(project.path); await dialog.alert(`已清理 ${count} 个孤立媒体文件。`, "清理完成"); } catch (error) { onError(error); } };
   const inspect = async (id: string, name: string) => { try { const snapshot = await api.getSnapshot(project.path, id); await dialog.alert(snapshotSummary(snapshot.snapshot_json, name), name); } catch (error) { onError(error); } };
-  return <div className="workspace-content"><div className="workspace-heading"><div><p className="eyebrow">历史记录</p><h2>变更与快照</h2><p>每一次正式写入都有修订号和原子变更记录。</p></div><button className="ghost" onClick={() => void cleanup()}>清理孤立媒体</button></div><section className="snapshot-create"><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} placeholder="快照名称，例如：第一版完整分镜" /><button className="primary" disabled={!snapshotName.trim()} title={snapshotName.trim() ? "保存当前业务数据" : "请先输入快照名称"} onClick={() => void create()}>创建快照</button></section><div className="history-columns"><section><div className="section-heading inline"><div><span className="label">变更集</span><h3>{state.changeSets.length} 轮</h3></div></div><div className="history-list">{[...state.changeSets].reverse().map((set) => <div className="history-row" key={set.id}><div><strong>{set.name}</strong><small>{formatDateTime(set.created_at)} · {changeCount(set.id)} 项</small></div><span className={`history-status ${set.status}`}>{set.status === "undone" ? "已撤销" : "已记录"}</span>{set.status !== "undone" && set.source_type !== "snapshot" && <button className="ghost" onClick={() => void onUndo(set.id).catch(() => undefined)}>撤销</button>}</div>)}</div></section><section><div className="section-heading inline"><div><span className="label">快照</span><h3>{state.snapshots.length} 个</h3></div></div><div className="history-list">{[...state.snapshots].reverse().map((snapshot) => <div className="history-row" key={snapshot.id}><div><strong>{snapshot.name}</strong><small>修订 {snapshot.revision} · {formatDateTime(snapshot.created_at)}</small></div><button className="ghost" onClick={() => void inspect(snapshot.id, snapshot.name)}>查看</button><button className="secondary" onClick={async () => { if (!await dialog.confirm("当前业务数据会替换为快照版本，之后仍会记录一次新的修订。", { title: `恢复“${snapshot.name}”？`, confirmLabel: "恢复快照" })) return; try { await api.restoreSnapshot(project.path, snapshot.id); await onRefresh(); } catch (error) { onError(error); } }}>恢复</button></div>)}</div></section></div></div>;
+  return <div className="workspace-content"><div className="workspace-heading"><h2>历史记录</h2><button className="ghost" onClick={() => void cleanup()}>清理孤立媒体</button></div><section className="snapshot-create"><input value={snapshotName} onChange={(event) => setSnapshotName(event.target.value)} placeholder="快照名称，例如：第一版完整分镜" /><button className="primary" disabled={!snapshotName.trim()} title={snapshotName.trim() ? "保存当前业务数据" : "请先输入快照名称"} onClick={() => void create()}>创建快照</button></section><div className="history-columns"><section><div className="section-heading inline"><h3>变更 · {state.changeSets.length}</h3></div><div className="history-list">{[...state.changeSets].reverse().map((set) => <div className="history-row" key={set.id}><div><strong>{set.name}</strong><small>{formatDateTime(set.created_at)} · {changeCount(set.id)} 项</small></div><span className={`history-status ${set.status}`}>{set.status === "undone" ? "已撤销" : "已记录"}</span>{set.status !== "undone" && set.source_type !== "snapshot" && <button className="ghost" onClick={() => void onUndo(set.id).catch(() => undefined)}>撤销</button>}</div>)}</div></section><section><div className="section-heading inline"><h3>快照 · {state.snapshots.length}</h3></div><div className="history-list">{[...state.snapshots].reverse().map((snapshot) => <div className="history-row" key={snapshot.id}><div><strong>{snapshot.name}</strong><small>修订 {snapshot.revision} · {formatDateTime(snapshot.created_at)}</small></div><button className="ghost" onClick={() => void inspect(snapshot.id, snapshot.name)}>查看</button><button className="secondary" onClick={async () => { if (!await dialog.confirm("当前业务数据会替换为快照版本，之后仍会记录一次新的修订。", { title: `恢复“${snapshot.name}”？`, confirmLabel: "恢复快照" })) return; try { await api.restoreSnapshot(project.path, snapshot.id); await onRefresh(); } catch (error) { onError(error); } }}>恢复</button></div>)}</div></section></div></div>;
 }
 
 function MediaImage({ projectPath, relativePath, alt }: { projectPath: string; relativePath: string; alt: string }) {
@@ -914,27 +887,6 @@ function contentPath(units: ContentUnitRow[], id: string | null) {
   let current = units.find((unit) => unit.id === id);
   while (current) { result.unshift(current); current = units.find((unit) => unit.id === current?.parent_id); }
   return result;
-}
-
-function objectDisplayName(state: ProjectState, objectType: string | null, objectId: string | null, currentUnit: ContentUnitRow | null) {
-  if (!objectType || !objectId) return currentUnit?.name ?? "当前作品";
-  if (objectType === "contentUnit") return state.contentUnits.find((item) => item.id === objectId)?.name ?? currentUnit?.name ?? "内容单元";
-  if (objectType === "script") return state.scripts.find((item) => item.id === objectId)?.title ?? "剧本";
-  if (objectType === "scene") return state.scenes.find((item) => item.id === objectId)?.title ?? "剧本场景";
-  if (objectType === "shot") return state.shots.find((item) => item.id === objectId)?.title ?? "镜头";
-  if (objectType === "asset") return state.assets.find((item) => item.id === objectId)?.name ?? "资产";
-  if (objectType === "keyframe") {
-    const frame = state.keyframes.find((item) => item.id === objectId);
-    const shot = frame && state.shots.find((item) => item.id === frame.shot_id);
-    return `${shot?.title ?? "镜头"} · ${keyframeTypeLabel(frame?.type ?? "single")}`;
-  }
-  if (objectType === "generationTask") return state.generationTasks.find((item) => item.id === objectId)?.name ?? "制作批次";
-  if (objectType === "storyElement") return state.storyElements.find((item) => item.id === objectId)?.name ?? "故事元素";
-  return currentUnit?.name ?? "当前对象";
-}
-
-function relationObjectName(state: ProjectState, objectType: string, objectId: string) {
-  return objectDisplayName(state, objectType, objectId, null);
 }
 
 function selectField(objectType: string, objectId: string, field: string, select: ReturnType<typeof useSelectionStore.getState>["select"]) {

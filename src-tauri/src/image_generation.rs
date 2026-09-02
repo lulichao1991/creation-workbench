@@ -69,6 +69,7 @@ pub struct ImageJob {
     pub provider: String,
     pub model: String,
     pub prompt: String,
+    pub source_prompt: String,
     pub prompt_revision: i64,
     pub reference_images: Vec<String>,
     pub options: ImageOptions,
@@ -433,6 +434,8 @@ fn load_job(conn: &Connection, job_id: &str) -> AppResult<ImageJob> {
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    let request: String = conn.query_row("SELECT request_json FROM image_generation_jobs WHERE id=?1", [job_id], |row| row.get(0)).map_err(|e| e.to_string())?;
+    let source_prompt = serde_json::from_str::<Value>(&request).ok().and_then(|value| value.get("sourcePrompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| row.5.clone());
     Ok(ImageJob {
         id: row.0,
         target_type: row.1,
@@ -440,6 +443,7 @@ fn load_job(conn: &Connection, job_id: &str) -> AppResult<ImageJob> {
         provider: row.3,
         model: row.4,
         prompt: row.5,
+        source_prompt,
         prompt_revision: row.6,
         reference_images: serde_json::from_str(&row.7).unwrap_or_default(),
         options: serde_json::from_str(&row.8).map_err(|e| e.to_string())?,
@@ -464,11 +468,12 @@ fn create_job(project: &Path, input: &GenerateImageInput) -> AppResult<ImageJob>
     }
     validate_references(&conn, project, &input.reference_images)?;
     let revision = prompt_revision(&conn, &input.target_type, &input.target_id)?;
+    let effective_prompt = crate::creative_settings::image_prompt(&conn, &input.target_type, &input.target_id, &input.prompt)?;
     let model = input.model.clone().unwrap_or_default();
     let timestamp = now();
     conn.execute(
         "INSERT INTO image_generation_jobs (id,target_type,target_id,provider,model,prompt,prompt_revision,reference_images_json,options_json,status,request_json,usage_json,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'queued',?10,'{}',?11)",
-        params![input.request_id,input.target_type,input.target_id,input.provider_id,model,input.prompt.trim(),revision,serde_json::to_string(&input.reference_images).map_err(|e|e.to_string())?,serde_json::to_string(&input.options).map_err(|e|e.to_string())?,json!({"targetType":input.target_type,"targetId":input.target_id,"referenceCount":input.reference_images.len()}).to_string(),timestamp]
+        params![input.request_id,input.target_type,input.target_id,input.provider_id,model,effective_prompt,revision,serde_json::to_string(&input.reference_images).map_err(|e|e.to_string())?,serde_json::to_string(&input.options).map_err(|e|e.to_string())?,json!({"targetType":input.target_type,"targetId":input.target_id,"referenceCount":input.reference_images.len(),"sourcePrompt":input.prompt.trim()}).to_string(),timestamp]
     ).map_err(|e|format!("创建生图任务失败：{e}"))?;
     load_job(&conn, &input.request_id)
 }
@@ -707,8 +712,9 @@ fn select_result(project: &Path, result_id: &str) -> AppResult<SelectImageResult
     if state != "available" || !["completed", "partial"].contains(&job.status.as_str()) {
         return Err("IMAGE_RESULT_MISSING: 当前候选不可设为正式".into());
     }
-    if current_prompt(&conn, &job.target_type, &job.target_id)?.trim() != job.prompt.trim() {
-        return Err("REVISION_STALE: 目标提示词已变化，请重新生成".into());
+    let current = current_prompt(&conn, &job.target_type, &job.target_id)?;
+    if crate::creative_settings::image_prompt(&conn, &job.target_type, &job.target_id, &current)?.trim() != job.prompt.trim() {
+        return Err("REVISION_STALE: 目标提示词或创作设定已变化，请重新生成".into());
     }
     let candidate = project.join(&candidate_path);
     if !candidate.is_file() {
@@ -851,6 +857,13 @@ pub fn image_generate(
             .map(|mut v| v.remove(&job_id));
     });
     Ok(job)
+}
+
+#[tauri::command]
+pub fn image_preview_prompt(project_path: String, target_type: String, target_id: String, prompt: String) -> AppResult<String> {
+    let conn = open_database(Path::new(&project_path))?;
+    prompt_revision(&conn, &target_type, &target_id)?;
+    crate::creative_settings::image_prompt(&conn, &target_type, &target_id, &prompt)
 }
 
 #[tauri::command]
@@ -1138,6 +1151,36 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn shared_preferences_apply_once_and_changed_settings_block_old_results() {
+        let (temp, target_id) = setup_asset();
+        let conn = open_database(temp.path()).unwrap();
+        let raw = json!({"contentType":"drama","style":{"dimensions":{"genre":"犯罪题材","visual":"东方水墨画风","platform":"横屏持续观看"}}}).to_string();
+        conn.execute("INSERT INTO content_units (id,project_id,type,name,creative_settings_json,created_at,updated_at) SELECT 'unit',id,'short','正片',?1,?2,?2 FROM projects", params![raw,now()]).unwrap();
+        conn.execute("UPDATE asset_requirements SET content_unit_id='unit' WHERE id=?1", [&target_id]).unwrap();
+        let request = input("styled", &target_id, None);
+        let preview = image_preview_prompt(temp.path().to_string_lossy().into(), request.target_type.clone(), target_id.clone(), request.prompt.clone()).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM image_generation_jobs", [], |row| row.get::<_,i64>(0)).unwrap(), 0);
+        let created = create_job(temp.path(), &request).unwrap();
+        assert_eq!(created.prompt, preview);
+        assert_eq!(created.source_prompt, request.prompt);
+        assert!(created.prompt.contains("东方水墨画风") && created.prompt.contains("横屏持续观看"));
+        assert!(!created.prompt.contains("犯罪题材"));
+        let result = run_mock(temp.path(), &created.id);
+        let mut retry = input("styled-retry", &target_id, None);
+        retry.prompt = result.source_prompt.clone();
+        let repeated = create_job(temp.path(), &retry).unwrap();
+        assert_eq!(repeated.prompt, result.prompt);
+        assert_eq!(repeated.prompt.matches("东方水墨画风").count(), 1);
+        // Existing candidates remain valid while their effective prompt is unchanged.
+        select_result(temp.path(), &result.results[0].id).unwrap();
+        conn.execute("UPDATE content_units SET creative_settings_json='{}' WHERE id='unit'", []).unwrap();
+        assert!(select_result(temp.path(), &result.results[1].id).unwrap_err().contains("REVISION_STALE"));
+        retry.request_id = "cleared-retry".into();
+        assert_eq!(create_job(temp.path(), &retry).unwrap().prompt, request.prompt);
+        assert_eq!(current_prompt(&conn, &request.target_type, &target_id).unwrap(), request.prompt);
     }
 
     #[test]

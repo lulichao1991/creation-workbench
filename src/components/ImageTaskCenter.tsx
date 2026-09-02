@@ -81,10 +81,9 @@ export function ImageTaskCenter({
         <div><span>失败 / 中断</span><strong>{jobs.filter((job) => ["failed", "interrupted"].includes(job.status)).length}</strong></div>
       </div>
       <div className="image-task-toolbar">
-        <p>任务在后台继续运行；切换资产或工作区不会中断。</p>
         <button className="ghost" disabled={loading} onClick={() => void onRefresh().catch(onError)}><RefreshCw size={13} className={loading ? "spin" : ""} />刷新</button>
       </div>
-      {jobs.length === 0 ? <div className="panel-empty">还没有生图任务。请从资产需求、分镜图或关键帧发起生成。</div> : (
+      {jobs.length === 0 ? <div className="panel-empty">暂无生图任务</div> : (
         <div className="image-task-rows">{jobs.map((job) => {
           const active = !terminalImageStatuses.has(job.status);
           return (

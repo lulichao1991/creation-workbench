@@ -26,6 +26,22 @@ test("creates an isolated real Pi SDK session without builtin tools", async () =
   }
 });
 
+test("maps a workbench discussion id to a valid Pi SDK session id", async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-session-id-"));
+  const host = await WorkbenchAgentHost.create(dataDir, () => {});
+  const sessionId = "default:b86f77ab-c35b-4ca0-a3d5-7ff7d5020e04";
+  try {
+    const created = await host.handle({ id: "create", type: "create_session", sessionId });
+    assert.equal(
+      (created as Record<string, unknown>).runtimeSessionId,
+      `workbench-${Buffer.from(sessionId, "utf8").toString("hex")}`,
+    );
+  } finally {
+    host.dispose();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("keeps two real Pi SDK turns in the same AgentSession", async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), "workbench-agent-host-turns-"));
   const faux = fauxProvider({ provider: "workbench-test", tokensPerSecond: 0 });

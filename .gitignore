@@ -14,10 +14,12 @@ dist-ssr
 
 # Local release artifacts
 /portable/
+/创作工作台_*_windows_x64_免安装版*/
 /*.zip
 /*.exe
 /agent-host-runtime/
 /src-tauri/resources/agent-host/
+/.workbuddy/
 
 # Editor directories and files
 .vscode/*

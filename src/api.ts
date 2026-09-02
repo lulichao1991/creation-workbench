@@ -149,6 +149,8 @@ export const api = {
   providerTest: (providerId: string) => invoke<ProviderTestResult>("provider_test", { providerId }),
   imageGenerate: (projectPath: string, input: GenerateImageInput) =>
     invoke<ImageJob>("image_generate", { projectPath, input }),
+  imagePreviewPrompt: (projectPath: string, targetType: GenerateImageInput["targetType"], targetId: string, prompt: string) =>
+    invoke<string>("image_preview_prompt", { projectPath, targetType, targetId, prompt }),
   imageGetJob: (projectPath: string, jobId: string) =>
     invoke<ImageJob>("image_get_job", { projectPath, jobId }),
   imageListJobs: (projectPath: string, targetType: GenerateImageInput["targetType"], targetId: string) =>

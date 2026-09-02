@@ -41,6 +41,14 @@ interface ImageInput {
   mimeType: string;
 }
 
+const PI_SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+function piSessionId(workbenchSessionId: string): string {
+  return PI_SESSION_ID_PATTERN.test(workbenchSessionId)
+    ? workbenchSessionId
+    : `workbench-${Buffer.from(workbenchSessionId, "utf8").toString("hex")}`;
+}
+
 interface AuthFlow {
   id: string;
   providerId: string;
@@ -469,7 +477,7 @@ export class WorkbenchAgentHost {
       return { sessionId, runtimeSessionId: existing.session.sessionId, resumed: true };
     }
 
-    const runtimeSessionId = optionalString(request, "runtimeSessionId") ?? sessionId;
+    const runtimeSessionId = optionalString(request, "runtimeSessionId") ?? piSessionId(sessionId);
     const prior = (await SessionManager.list(this.dataDir, this.sessionDir))
       .find((candidate) => candidate.id === runtimeSessionId);
     const model = selectModel(this.modelRuntime, optionalString(request, "provider"), optionalString(request, "model"));

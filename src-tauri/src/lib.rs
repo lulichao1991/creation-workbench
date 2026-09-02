@@ -5,6 +5,7 @@ mod agent_runtime;
 mod app_database;
 mod commands;
 mod context;
+mod creative_settings;
 mod database;
 mod expert_team;
 mod image_generation;
@@ -42,7 +43,7 @@ use expert_team::{
 };
 use image_generation::{
     image_cancel, image_generate, image_get_job, image_list_jobs, image_list_recent_jobs,
-    image_select_result, image_update_result_state, ImageGenerationState,
+    image_preview_prompt, image_select_result, image_update_result_state, ImageGenerationState,
 };
 use memory::{memory_create, memory_invalidate, memory_list, memory_update};
 use mutation::{
@@ -131,6 +132,7 @@ pub fn run() {
             prompt_list_compilations,
             prompt_set_current,
             image_generate,
+            image_preview_prompt,
             image_get_job,
             image_list_jobs,
             image_list_recent_jobs,

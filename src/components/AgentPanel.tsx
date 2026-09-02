@@ -5,6 +5,8 @@ import {
   Check,
   MessageCircle,
   Coins,
+  PanelRightClose,
+  Plus,
   Send,
   ShieldCheck,
   Sparkles,
@@ -40,14 +42,15 @@ import { useSelectionStore } from "../stores/selectionStore";
 import type { ProjectDescriptor, Workspace } from "../types";
 
 interface Props {
+  refreshKey?: number;
   project: ProjectDescriptor;
   revision: number;
   workspace: Workspace;
   currentUnitId: string | null;
-  contextLabel: string;
   activeChangeCount: number;
   activeChangeSetId: string | null;
   hasActiveChangeSet: boolean;
+  onCollapse: () => void;
   onCloseChangeSet: () => void;
   onRefresh: () => Promise<void>;
   onError: (error: unknown) => void;
@@ -55,12 +58,9 @@ interface Props {
 
 interface AgentResult {
   summary?: string;
-  findings?: unknown[];
   patchProposal?: PatchProposal | null;
   questions?: string[];
   risks?: string[];
-  affectedObjects?: Array<{ objectType?: string; objectId?: string; field?: string }>;
-  recommendedReviewScope?: string[];
   deepAnalysisRequiresConfirmation?: boolean;
   stale?: boolean;
   baseRevision?: number;
@@ -88,7 +88,7 @@ const modeLabels: Record<AgentMode, string> = {
   edit: "编辑",
 };
 
-export function AgentPanel({ project, revision, workspace, currentUnitId, contextLabel, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCloseChangeSet, onRefresh, onError }: Props) {
+export function AgentPanel({ refreshKey = 0, project, revision, workspace, currentUnitId, activeChangeCount, activeChangeSetId, hasActiveChangeSet, onCollapse, onCloseChangeSet, onRefresh, onError }: Props) {
   const selection = useSelectionStore();
   const [flags, setFlags] = useState<FeatureFlags | null>(null);
   const [sessions, setSessions] = useState<AgentSession[]>([]);
@@ -116,6 +116,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
   );
   const [consultation, setConsultation] = useState<ExpertTeamConsultation | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
   const activeTaskIdRef = useRef<string | null>(null);
 
   const agentEnabled = Boolean(flags?.agent_core && flags?.expert_agents);
@@ -138,6 +139,11 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
   useEffect(() => {
     localStorage.setItem("workbench.agentMode", mode);
   }, [mode]);
+
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (conversation) conversation.scrollTop = conversation.scrollHeight;
+  }, [messages, streamingText, cards, proposal]);
 
   const openSession = useCallback(async (session: AgentSession) => {
     setSessionId(session.id);
@@ -165,7 +171,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
   }, [onError]);
 
   useEffect(() => {
-    if (!agentEnabled) return;
+    if (!agentEnabled || taskRunning || teamRunning) return;
     let disposed = false;
     void (async () => {
       let items = await api.agentListSessions(project.path);
@@ -189,7 +195,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
       }
     })().catch(onError);
     return () => { disposed = true; };
-  }, [agentEnabled, project.id, project.path, openSession, onError]);
+  }, [agentEnabled, project.id, project.path, openSession, onError, refreshKey]);
 
   useEffect(() => {
     if (!agentEnabled) return;
@@ -300,34 +306,6 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
         : selected;
       setSessions((items) => items.map((item) => item.id === session.id ? session : item));
       await openSession(session);
-    } catch (error) {
-      onError(error);
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const closeDiscussion = async () => {
-    if (!sessionId || taskRunning || teamRunning || working) return;
-    setWorking(true);
-    try {
-      const closed = await api.agentCloseSession(project.path, sessionId);
-      const nextSessions = sessions.map((item) => item.id === closed.id ? closed : item);
-      setSessions(nextSessions);
-      const next = nextSessions.find((item) => item.status === "active" && item.id !== closed.id);
-      if (next) {
-        await openSession(next);
-      } else {
-        setSessionId(null);
-        setMessages([]);
-        setActiveTask(null);
-        activeTaskIdRef.current = null;
-        setStreamingText("");
-        setActiveToolName(null);
-        setProposal(null);
-        setCards([]);
-        setConsultation(null);
-      }
     } catch (error) {
       onError(error);
     } finally {
@@ -556,12 +534,10 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
     return (
       <div className="agent-enable">
         <div className="agent-avatar"><Sparkles size={15} /></div>
-        <strong>启用主 Agent 工作区</strong>
-        <p>启用后可围绕当前选区调用单一专业 Agent。所有修改仍需预览和确认。</p>
+        <strong>主 Agent</strong>
         <button className="primary full" disabled={working} onClick={() => void enableAgent()}>
           {working ? "正在启用…" : "启用 Agent"}
         </button>
-        <small>Agent 功能已内置；启用后可在顶部设置中连接 AI 服务。</small>
       </div>
     );
   }
@@ -582,44 +558,34 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
             </option>
           ))}
         </select>
-        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning || working} title={taskRunning || teamRunning || working ? "请等待当前任务结束" : "建立新的独立讨论"} onClick={() => void newDiscussion()}>
-          新建讨论
+        <button className="ghost agent-session-action" aria-label="新建讨论" disabled={Boolean(taskRunning) || teamRunning || working} title={taskRunning || teamRunning || working ? "请等待当前任务结束" : "新建讨论"} onClick={() => void newDiscussion()}>
+          <Plus size={13} />
         </button>
-        <button className="ghost" disabled={!sessionId || Boolean(taskRunning) || teamRunning || working} title={!sessionId ? "当前没有讨论" : taskRunning || teamRunning || working ? "请等待当前任务结束" : "结束当前讨论，记录仍会保留"} onClick={() => void closeDiscussion()}>
-          结束讨论
+        <button className="ghost agent-session-action" aria-label="收起 Agent" title="收起 Agent" onClick={onCollapse}>
+          <PanelRightClose size={13} />
         </button>
-      </section>
-      <section className="agent-context-strip">
-        <div><span>当前对象</span><strong>{contextLabel}</strong></div>
-        <div><span>模式 / 修订</span><strong>{modeLabels[mode]} · 第 {revision} 版</strong></div>
-        <div><span>写入 / 保护</span><strong>{writeScope.refs.length} / {writeScope.protectedRefs.length} 字段</strong></div>
       </section>
 
-      <section className="agent-status-row" aria-live="polite">
-        <span className={`agent-status-dot ${taskRunning ? "running" : ""}`} />
-        <strong>{expertLabels[activeExpert]}</strong>
-        <small>{activeToolName ? `正在读取：${activeToolName}` : activeTask ? taskStatusLabel(activeTask.status) : "等待你的请求"}</small>
+      {(taskRunning || teamRunning) && <section className="agent-status-row" aria-live="polite">
+        <span className="agent-status-dot running" />
+        <small>{teamRunning ? teamStatusLabel(consultation?.status ?? "running") : activeToolName ? `正在读取：${activeToolName}` : activeTask ? taskStatusLabel(activeTask.status) : "处理中"}</small>
         {taskRunning && <button className="agent-stop" onClick={() => void stopTask()}><Square size={11} />停止</button>}
         {teamRunning && <button className="agent-stop" onClick={() => void cancelTeam()}><Square size={11} />取消会诊</button>}
-      </section>
+      </section>}
 
-      <section className="agent-change-row">
+      {hasActiveChangeSet && <section className="agent-change-row">
         <span>本轮修改 <strong>{activeChangeCount}</strong> 项</span>
-        {hasActiveChangeSet && (
-          <button
-            className="secondary"
-            disabled={activeChangeCount === 0 || Boolean(taskRunning) || working}
-            onClick={() => void analyzeChangeSet()}
-          >
-            <Sparkles size={11} />{taskRunning ? "分析中…" : "分析本轮修改"}
-          </button>
-        )}
-        {hasActiveChangeSet && <button className="ghost" onClick={onCloseChangeSet}>结束本轮</button>}
-        <button className="ghost" disabled={Boolean(taskRunning) || teamRunning} onClick={() => void openTeamBuilder()}><Users size={11} />专家团</button>
-        <button className="ghost" onClick={() => selection.select({ workspace: "history" })}>历史 / 快照</button>
-      </section>
+        <button
+          className="secondary"
+          disabled={activeChangeCount === 0 || Boolean(taskRunning) || working}
+          onClick={() => void analyzeChangeSet()}
+        >
+          <Sparkles size={11} />{taskRunning ? "分析中…" : "分析修改"}
+        </button>
+        <button className="ghost" onClick={onCloseChangeSet}>结束本轮</button>
+      </section>}
 
-      <section className="agent-conversation" aria-label="Agent 对话">
+      <section className="agent-conversation" aria-label="Agent 对话" ref={conversationRef}>
         {showTeamBuilder && (
           <article className="expert-team-builder">
             <header><Users size={14} /><strong>申请专家团会诊</strong><span>只读 · 高成本</span></header>
@@ -663,8 +629,7 @@ export function AgentPanel({ project, revision, workspace, currentUnitId, contex
         {!messages.length && (
           <div className="agent-welcome">
             <Bot size={22} />
-            <strong>围绕当前选区开始共创</strong>
-            <p>我会先判断专业方向，只读取必要上下文；含糊请求会先澄清。</p>
+            <strong>开始共创</strong>
           </div>
         )}
         {messages.map((message) => <AgentMessageView key={message.id} message={message} onExpertTeamSuggestion={useExpertTeamSuggestion} />)}
@@ -821,9 +786,6 @@ function AgentMessageView({ message, onExpertTeamSuggestion }: {
     <article className={`agent-message ${message.role}`}>
       <header>{message.role === "user" ? <span>你</span> : <Bot size={13} />}<strong>{message.role === "user" ? "用户" : "主 Agent"}</strong></header>
       <p>{message.content}</p>
-      {structured?.findings?.length ? <ul>{structured.findings.map((finding, index) => <li key={index}>{displayValue(finding)}</li>)}</ul> : null}
-      {structured?.affectedObjects?.length ? <p className="agent-impact-list">受影响对象：{structured.affectedObjects.map((reference) => `${objectTypeLabel(reference.objectType)}${reference.field ? ` · ${fieldLabel(reference.field)}` : ""}`).join("、")}</p> : null}
-      {structured?.recommendedReviewScope?.length ? <p className="agent-impact-list">建议复查：{structured.recommendedReviewScope.join("、")}</p> : null}
       {structured?.deepAnalysisRequiresConfirmation && <p className="agent-question">跨剧集深度分析需要你确认后才能继续。</p>}
       {structured?.expertTeamSuggestion && <section className="agent-team-suggestion"><strong>建议专家团复核</strong><p>{structured.expertTeamSuggestion.reason}</p><small>{structured.expertTeamSuggestion.members.map((member) => expertLabels[member]).join(" · ")}</small><button className="secondary" onClick={() => void onExpertTeamSuggestion(structured.expertTeamSuggestion!)}><Users size={11} />建立申请并确认成本</button></section>}
       {structured?.stale && <p className="agent-risk"><AlertTriangle size={12} />分析结果已过期（r{structured.baseRevision} → r{structured.currentRevision}）。</p>}

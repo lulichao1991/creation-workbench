@@ -580,7 +580,7 @@ fn prepare_member_tasks(
             ],
         )
         .map_err(|e| e.to_string())?;
-        let (prompt, system_prompt, allowed_tools, attachments) = if pi_sdk_runtime {
+        let (mut prompt, system_prompt, allowed_tools, attachments) = if pi_sdk_runtime {
             (
                 format!(
                     "专家团独立只读会诊。会诊问题：{}\n启动选区引用：{}\n项目事实没有预先打包；先调用 get_selection，再使用你白名单内的读取工具核对事实。只从你的专业职责分析，不得参考、猜测或请求其他专家意见。结束前必须调用一次 submit_expert_result；patchProposal 必须为 null，permissionRequests 必须为空。不要依赖自由文本 JSON。",
@@ -630,6 +630,7 @@ fn prepare_member_tasks(
                 Vec::new(),
             )
         };
+        prompt.push_str(&crate::creative_settings::selection_prompt(&conn, &consultation.selection)?);
         if !pi_sdk_runtime {
             conn.execute(
                 "UPDATE agent_tasks SET status='queued' WHERE id=?1",

@@ -54,18 +54,13 @@ export function ProjectHome({
       <header className="home-header">
         <div className="brand-lockup">
           <span className="brand-mark"><Film size={21} strokeWidth={1.8} /></span>
-          <div>
-            <strong>创作工作台</strong>
-            <small>本地创作系统</small>
-          </div>
+          <strong>创作工作台</strong>
         </div>
         <div className="heading-actions"><button className="ghost" onClick={onOpenSettings}><Settings2 size={16} />全局设置</button><button className="secondary" onClick={chooseProject} disabled={busy}><FolderOpen size={16} />打开其他项目</button></div>
       </header>
 
       <section className="home-hero">
-        <p className="eyebrow">从故事到成片，全程本地管理</p>
         <h1>从故事构想到<br /><span>每一个镜头。</span></h1>
-        <p className="subtitle">在一个本地工作区里管理剧本、分镜、资产、关键帧与制作批次。创作事实只保存在你的电脑上。</p>
       </section>
 
       <section className="root-path-bar">
@@ -80,10 +75,7 @@ export function ProjectHome({
       </section>
 
       <section className="create-panel">
-        <div>
-          <p className="eyebrow">新建项目</p>
-          <h2>开始一个作品</h2>
-        </div>
+        <h2>新建项目</h2>
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
@@ -113,16 +105,12 @@ export function ProjectHome({
 
       <section className="project-section">
         <div className="section-heading">
-          <div>
-            <p className="eyebrow">最近项目</p>
-            <h2>本地项目</h2>
-          </div>
+          <h2>最近项目</h2>
           <span className="count-badge">{projects.length}</span>
         </div>
         {projects.length === 0 ? (
           <div className="empty-state">
             <strong>还没有项目</strong>
-            <span>创建第一个项目后，它会出现在这里。</span>
           </div>
         ) : (
           <div className="project-grid">

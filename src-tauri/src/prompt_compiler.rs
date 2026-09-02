@@ -582,6 +582,9 @@ fn compile_prompt_internal(
         .map_err(|e| e.to_string())?;
     let mut shot_segments = vec![];
     for (index, shot) in shots.iter().enumerate() {
+        let preferences = crate::creative_settings::for_object(&conn, &crate::context::ObjectRef {
+            project_id: project_id.clone(), object_type: "shot".into(), object_id: shot.id.clone(), field: None,
+        })?.map(|value| crate::creative_settings::output_preferences(&value.settings, false)).unwrap_or_default();
         if shot.keyframes.is_empty() {
             warnings.push(PromptWarning {
                 code: "MISSING_KEYFRAME".into(),
@@ -659,7 +662,7 @@ fn compile_prompt_internal(
             .join("、");
         shot_segments.push(Segment {
             text: format!(
-                "镜头 {}｜{}｜{:.1}s\n{}\n资产：{}\n关键帧：{}",
+                "镜头 {}｜{}｜{:.1}s\n{}\n资产：{}\n关键帧：{}{}",
                 index + 1,
                 shot.title,
                 shot.duration,
@@ -669,7 +672,8 @@ fn compile_prompt_internal(
                     &details
                 },
                 if assets.is_empty() { "无" } else { &assets },
-                if frames.is_empty() { "无" } else { &frames }
+                if frames.is_empty() { "无" } else { &frames },
+                if preferences.is_empty() { String::new() } else { format!("\n本镜头{preferences}") }
             ),
             source_type: "shot".into(),
             source_id: shot.id.clone(),
@@ -990,6 +994,31 @@ mod tests {
         let conn = open_database(project.path()).unwrap();
         conn.execute("INSERT INTO asset_media (id,asset_id,file_path,label,is_primary,created_at,updated_at) VALUES ('hero-media',?1,'assets/hero.png','主角标准设定',1,?2,?2)", params![asset,now()]).unwrap();
         (app, project, task)
+    }
+
+    #[test]
+    fn shared_settings_follow_each_shot_without_rewriting_facts_or_model_templates() {
+        let (app, project, task) = setup();
+        let conn = open_database(project.path()).unwrap();
+        let ink = json!({"contentType":"documentary","style":{"dimensions":{"visual":"东方水墨画风"}}}).to_string();
+        let pixel = json!({"style":{"dimensions":{"visual":"像素风"}}}).to_string();
+        conn.execute("UPDATE content_units SET creative_settings_json=?1", [&ink]).unwrap();
+        conn.execute("INSERT INTO content_units (id,project_id,type,name,creative_settings_json,created_at,updated_at) SELECT 'other',id,'short','另一集',?1,?2,?2 FROM projects", params![pixel,now()]).unwrap();
+        conn.execute("INSERT INTO scripts (id,content_unit_id,created_at,updated_at) VALUES ('other-script','other',?1,?1)", [now()]).unwrap();
+        conn.execute("INSERT INTO scenes (id,script_id,created_at,updated_at) VALUES ('other-scene','other-script',?1,?1)", [now()]).unwrap();
+        conn.execute("UPDATE shots SET scene_id='other-scene' WHERE title='镜头 B'", []).unwrap();
+        for (profile, template) in [("model-a", "template-a"), ("model-b", "template-b")] {
+            let result = compile_prompt(app.path(), project.path(), CompilePromptInput { request_id: format!("shared-{profile}"), generation_task_id: task.clone(), model_profile_key: profile.into(), template_id: template.into() }).unwrap();
+            let first_end = result.compiled_prompt.find("镜头 2｜").unwrap();
+            let (first, second) = result.compiled_prompt.split_at(first_end);
+            assert!(first.contains("东方水墨画风") && first.contains("纪录片"));
+            assert!(!first.contains("像素风"));
+            assert!(second.contains("像素风"));
+            assert!(!second.contains("东方水墨画风") && !second.contains("纪录片"));
+            assert_eq!(result.model_profile_key, profile);
+        }
+        assert_eq!(conn.query_row("SELECT prompt FROM generation_tasks WHERE id=?1", [&task], |row| row.get::<_,String>(0)).unwrap(), "人工原稿");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM shots WHERE action IN ('前进','停下')", [], |row| row.get::<_,i64>(0)).unwrap(), 2);
     }
 
     #[test]

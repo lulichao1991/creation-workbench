@@ -595,6 +595,7 @@ fn execute_inner(
     match tool_name {
         "get_selection" => Ok(json!({
             "selection": selection,
+            "creativePreferences": crate::creative_settings::selection_prompt(conn, selection)?,
             "writeScope": serde_json::from_str::<Value>(write_scope_json).map_err(|e| e.to_string())?,
         })),
         "read_object" => object_value(conn, &object_ref(project_id, arguments)?, false),

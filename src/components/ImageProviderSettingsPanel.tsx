@@ -82,7 +82,7 @@ export function ImageProviderSettingsPanel({ disabled, onError }: Props) {
   if (!enabled) return (
     <div className="settings-stack image-provider-settings">
       <section className="settings-block">
-        <div className="settings-heading"><div><h3>图片生成服务</h3><p>启用后，可在工作台内直接生成角色、场景、分镜和关键帧图片。</p></div></div>
+        <div className="settings-heading"><h3>图片生成</h3></div>
         <div className="settings-actions"><button className="primary" disabled={disabled || working} onClick={() => void run(async () => { await api.setFeatureFlag("image_generation", true); setDraft(newProvider()); })}><Image size={15} />启用图片生成</button></div>
       </section>
     </div>
@@ -92,7 +92,7 @@ export function ImageProviderSettingsPanel({ disabled, onError }: Props) {
     <div className="settings-stack image-provider-settings">
       <section className="settings-block">
         <div className="settings-heading">
-          <div><h3>已连接的服务</h3><p>{providers.length ? `共 ${providers.length} 个图片服务。` : "尚未添加图片服务。"}</p></div>
+          <h3>图片服务{providers.length ? ` · ${providers.length}` : ""}</h3>
           <button className="ghost" disabled={disabled || working} onClick={() => { setDraft(newProvider()); setTestResult(null); }}><Plus size={14} />添加服务</button>
         </div>
         {providers.length > 0 && <div className="provider-list">{providers.map((provider) => (
@@ -109,7 +109,7 @@ export function ImageProviderSettingsPanel({ disabled, onError }: Props) {
       </section>
 
       <section className="settings-block">
-        <div className="settings-heading"><div><h3>{providers.some((provider) => provider.id === draft.requestId) ? "编辑服务" : "添加图片服务"}</h3><p>密钥会由系统安全保护。</p></div></div>
+        <div className="settings-heading"><h3>{providers.some((provider) => provider.id === draft.requestId) ? "编辑服务" : "添加图片服务"}</h3></div>
         <div className="settings-provider-form">
           <label>服务类型<select value={draft.providerType} disabled={working} onChange={(event) => setDraft(newProvider(event.target.value as ProviderConfig["providerType"]))}><option value="openai_compatible">OpenAI 兼容接口</option><option value="mock">本地测试服务</option></select></label>
           <label>名称<input value={draft.displayName} disabled={working} onChange={(event) => setDraft({ ...draft, displayName: event.target.value })} /></label>

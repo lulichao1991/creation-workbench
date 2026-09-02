@@ -982,6 +982,9 @@ fn prepare_task_for_runtime(
             working_memory.as_ref(),
         )?
     };
+    if !is_change_analysis {
+        prompt.push_str(&crate::creative_settings::selection_prompt(&conn, &input.selection)?);
+    }
     if !attachments.is_empty() {
         let names = attachments
             .iter()
@@ -1984,6 +1987,7 @@ mod tests {
         conn.execute("INSERT INTO scripts (id, content_unit_id, title, created_at, updated_at) VALUES ('script', 'unit', '正片', ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO scenes (id, script_id, title, sort_order, created_at, updated_at) VALUES ('scene', 'script', '场01', 0, ?1, ?1)", [&timestamp]).unwrap();
         conn.execute("INSERT INTO shots (id, scene_id, sort_order, title, composition, created_at, updated_at) VALUES ('shot', 'scene', 0, '镜头04', '不应进入启动包的旧构图事实', ?1, ?1)", [&timestamp]).unwrap();
+        conn.execute("UPDATE content_units SET creative_settings_json=?1 WHERE id='unit'", [json!({"contentType":"documentary","style":{"dimensions":{"visual":"东方水墨画风"}}}).to_string()]).unwrap();
         drop(conn);
         let session = create_session(
             temp.path(),
@@ -2022,10 +2026,15 @@ mod tests {
         assert!(prompt.contains("call_expert"));
         assert!(prompt.contains("submit_agent_result"));
         assert!(!prompt.contains("不应进入启动包的旧构图事实"));
+        assert!(prompt.contains("东方水墨画风") && prompt.contains("documentary"));
+        assert!(runtime_input.system_prompt.is_none());
+        assert!(runtime_input.provider.is_none() && runtime_input.model.is_none());
         assert!(prompt.len() < 3_000);
         assert!(runtime_input.attachments.is_empty());
         assert_eq!(runtime_input.result_tool_kind.as_deref(), Some("agent"));
         let conn = open_database(temp.path()).unwrap();
+        let visible: String = conn.query_row("SELECT content FROM agent_messages WHERE role='user'", [], |row| row.get(0)).unwrap();
+        assert_eq!(visible, "这个镜头为什么不够有压迫感？");
         assert_eq!(
             conn.query_row(
                 "SELECT agent_type FROM agent_tasks WHERE id='tool-message:task'",

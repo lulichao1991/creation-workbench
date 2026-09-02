@@ -69,6 +69,7 @@ const CONTENT_UNIT_FIELDS: &[&str] = &[
     "type",
     "name",
     "summary",
+    "creative_settings_json",
     "sort_order",
     "maturity",
     "sync_status",
@@ -804,6 +805,9 @@ fn validate_fields(spec: &EntitySpec, values: &Map<String, Value>) -> AppResult<
         if !allowed.contains(field.as_str()) {
             return Err(format!("{} 不允许修改字段：{field}", spec.entity_type));
         }
+    }
+    if let Some(value) = values.get("creative_settings_json") {
+        crate::creative_settings::parse(value.as_str().ok_or("创作设定必须是 JSON 字符串")?)?;
     }
     Ok(())
 }

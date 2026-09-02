@@ -95,10 +95,10 @@ export function PromptCompilerPanel({ projectPath, projectId, taskId, revision, 
   };
 
   if (loading) return <section className="prompt-compiler-panel"><small>正在读取提示词编译器…</small></section>;
-  if (!enabled) return <section className="prompt-compiler-panel prompt-compiler-disabled"><div><strong>提示词编译器</strong><small>把任务、镜头、正式资产和关键帧编译为目标模型提示词；不会调用视频生成。</small></div><button className="secondary" disabled={busy} onClick={() => void enable()}>{busy ? "正在启用…" : "启用并创建通用档案"}</button></section>;
+  if (!enabled) return <section className="prompt-compiler-panel prompt-compiler-disabled"><strong>提示词编译器</strong><button className="secondary" disabled={busy} onClick={() => void enable()}>{busy ? "正在启用…" : "启用"}</button></section>;
 
   return <section className="prompt-compiler-panel">
-    <div className="prompt-compiler-heading"><div><strong>提示词编译器</strong><small>仅编译与留痕，不调用视频模型。</small></div><button className="primary" disabled={busy || !profileKey || !templateId} title={busy ? "正在处理" : !profileKey || !templateId ? "请先选择模型档案和模板" : "编译候选提示词，不调用模型"} onClick={() => void compile()}>{busy ? "处理中…" : "编译新版本"}</button></div>
+    <div className="prompt-compiler-heading"><strong>提示词编译器</strong><button className="primary" disabled={busy || !profileKey || !templateId} title={busy ? "正在处理" : !profileKey || !templateId ? "请先选择模型档案和模板" : "编译候选提示词，不调用模型"} onClick={() => void compile()}>{busy ? "处理中…" : "编译新版本"}</button></div>
     <div className="prompt-compiler-controls">
       <label>模型档案<select value={profileKey} onChange={(event) => setProfileKey(event.target.value)}>{profiles.map((item) => <option key={item.key} value={item.key}>{item.displayName} · v{item.version}</option>)}</select></label>
       <label>模板<select value={templateId} onChange={(event) => setTemplateId(event.target.value)}>{matchingTemplates.map((item) => <option key={item.id} value={item.id}>{item.name} · v{item.version}</option>)}</select></label>

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub type AppResult<T> = Result<T, String>;
-pub const CURRENT_SCHEMA_VERSION: i64 = 11;
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 pub const AGENT_TABLES: &[&str] = &[
     "agent_tool_calls",
@@ -132,6 +132,7 @@ pub fn init_database(
         .map_err(|e| format!("初始化专家团结构失败：{e}"))?;
     migrate_v10(&conn).map_err(|e| format!("初始化 V2 beta 修复结构失败：{e}"))?;
     migrate_v11(&conn).map_err(|e| format!("初始化 Pi Session 结构失败：{e}"))?;
+    migrate_v12(&conn)?;
     verify_database(&conn)?;
     conn.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("写入数据库版本失败：{e}"))?;
@@ -213,12 +214,22 @@ fn migrate_database(conn: &mut Connection, project_path: &Path) -> AppResult<()>
     if version < 11 {
         migrate_v11(&tx).map_err(|e| format!("迁移到数据库版本 11 失败：{e}"))?;
     }
+    if version < 12 {
+        migrate_v12(&tx)?;
+    }
     verify_database(&tx)?;
     tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
         .map_err(|e| format!("更新数据库版本失败：{e}"))?;
     tx.commit()
         .map_err(|e| format!("提交数据库迁移失败：{e}"))?;
     Ok(())
+}
+
+fn migrate_v12(conn: &Connection) -> AppResult<()> {
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('content_units') WHERE name='creative_settings_json')", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if exists { return Ok(()); }
+    conn.execute_batch("ALTER TABLE content_units ADD COLUMN creative_settings_json TEXT NOT NULL DEFAULT '';")
+        .map_err(|e| format!("初始化创作设定失败：{e}"))
 }
 
 fn verify_database(conn: &Connection) -> AppResult<()> {
@@ -1116,6 +1127,24 @@ ON expert_team_members(consultation_id, status);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrates_v11_creative_settings_with_backup_and_keeps_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = init_database(temp.path(), "旧项目", "short").unwrap();
+        {
+            let conn = open_database(temp.path()).unwrap();
+            conn.execute("INSERT INTO content_units (id,project_id,type,name,summary,created_at,updated_at) VALUES ('unit',?1,'short','正片','保留原稿',?2,?2)", params![project.id,now()]).unwrap();
+            conn.execute_batch("ALTER TABLE content_units DROP COLUMN creative_settings_json; PRAGMA user_version=11;").unwrap();
+        }
+        let conn = open_database(temp.path()).unwrap();
+        let row: (String,String) = conn.query_row("SELECT summary,creative_settings_json FROM content_units WHERE id='unit'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(row, ("保留原稿".into(), "".into()));
+        assert_eq!(fs::read_dir(temp.path().join("backups")).unwrap().count(), 1);
+        drop(conn);
+        open_database(temp.path()).unwrap();
+        assert_eq!(fs::read_dir(temp.path().join("backups")).unwrap().count(), 1);
+    }
 
     #[test]
     fn creates_complete_project_database() {

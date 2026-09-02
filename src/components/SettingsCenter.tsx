@@ -101,7 +101,7 @@ export function SettingsCenter({ rootPath, disabled, onRootChange, onClose, onEr
     <div className="settings-backdrop">
       <section className="settings-center" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header className="settings-header">
-          <div><Settings2 size={19} /><div><strong id="settings-title">全局设置</strong><small>服务、存储与软件状态</small></div></div>
+          <div><Settings2 size={19} /><strong id="settings-title">全局设置</strong></div>
           <button className="icon-button" aria-label="关闭设置" onClick={onClose}><X size={18} /></button>
         </header>
         <div className="settings-layout">
@@ -109,12 +109,12 @@ export function SettingsCenter({ rootPath, disabled, onRootChange, onClose, onEr
             {tabs.map(([value, label, Icon]) => <button className={tab === value ? "active" : ""} onClick={() => setTab(value)} key={value}><Icon size={16} />{label}</button>)}
           </nav>
           <main className="settings-content">
-            {tab === "agent" && <><div className="settings-intro"><span className="label">AI 服务</span><h2>AI 模型</h2><p>连接你使用的 AI 服务，并为新讨论选择默认模型。</p></div><AgentModelSettingsPanel disabled={disabled} onError={onError} /></>}
-            {tab === "images" && <><div className="settings-intro"><span className="label">图片服务</span><h2>图片生成</h2><p>连接图片服务后，可在角色、场景、分镜和关键帧中直接使用。</p></div><ImageProviderSettingsPanel disabled={disabled} onError={onError} /></>}
-            {tab === "data" && <><div className="settings-intro"><span className="label">本地优先</span><h2>数据与存储</h2><p>项目内容和素材保存在你选择的本地目录。</p></div><div className="settings-stack"><section className="settings-block"><div className="settings-heading"><div><h3>项目目录</h3><p>首页扫描和新建项目都会使用此目录。</p></div></div><label className="settings-field">当前目录<code className="settings-path">{rootPath}</code></label><div className="settings-actions"><button className="secondary" disabled={disabled} onClick={() => void chooseRoot()}>更改项目目录</button></div></section></div></>}
-            {tab === "about" && <><div className="settings-intro"><span className="label">软件信息</span><h2>关于与诊断</h2><p>日常只显示服务状态，需要排查时再展开技术信息。</p></div><div className="settings-stack">
+            {tab === "agent" && <AgentModelSettingsPanel disabled={disabled} onError={onError} />}
+            {tab === "images" && <ImageProviderSettingsPanel disabled={disabled} onError={onError} />}
+            {tab === "data" && <div className="settings-stack"><section className="settings-block"><div className="settings-heading"><h3>项目目录</h3></div><label className="settings-field">当前目录<code className="settings-path">{rootPath}</code></label><div className="settings-actions"><button className="secondary" disabled={disabled} onClick={() => void chooseRoot()}>更改项目目录</button></div></section></div>}
+            {tab === "about" && <div className="settings-stack">
               <section className="settings-block">
-                <div className="settings-heading"><div><h3>系统状态</h3><p>{diagnosing ? "正在检查工作台服务…" : diagnostics ? "工作台服务已检查。" : diagnosticError ? "检查未完成。" : "等待检查。"}</p></div><Activity size={18} /></div>
+                <div className="settings-heading"><h3>系统状态</h3><Activity size={18} /></div>
                 <div className="diagnostic-summary" aria-live="polite">
                   {diagnosticRows.map(([label, healthy]) => {
                     const state = diagnosticError ? "error" : healthy === null ? "idle" : healthy ? "success" : "error";
@@ -133,7 +133,7 @@ export function SettingsCenter({ rootPath, disabled, onRootChange, onClose, onEr
                 </div>}
               </section>
               <section className="settings-block about-grid"><div><span>应用</span><strong>创作工作台</strong></div><div><span>版本</span><strong>{version}</strong></div><div><span>数据策略</span><strong>项目内容本地保存</strong></div><div><span>凭据策略</span><strong>系统密钥保护</strong></div><div className="settings-actions"><button className="secondary" onClick={onRestartOnboarding}>重新运行首次使用引导</button></div></section>
-            </div></>}
+            </div>}
           </main>
         </div>
       </section>

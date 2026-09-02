@@ -40,6 +40,7 @@ export interface ContentUnitRow {
   type: "season" | "episode" | "short" | "act" | "custom";
   name: string;
   summary: string;
+  creative_settings_json?: string;
   sort_order: number;
   maturity: Maturity;
   sync_status: SyncStatus;

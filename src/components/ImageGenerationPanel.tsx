@@ -154,7 +154,7 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
         targetId,
         providerId: job.provider,
         model: job.model,
-        prompt: job.prompt,
+        prompt: job.sourcePrompt ?? job.prompt,
         referenceImages: job.referenceImages,
         options: job.options,
       });
@@ -164,13 +164,13 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
   };
 
   const copyPrompt = async () => {
-    try { await navigator.clipboard.writeText(prompt); } catch (error) { onError(error); }
+    try { await navigator.clipboard.writeText(await api.imagePreviewPrompt(projectPath, targetType, targetId, prompt)); } catch (error) { onError(error); }
   };
 
   if (loading) return <div className="image-generation-panel"><span className="label">静态生图加载中…</span></div>;
   if (!enabled) return (
     <div className="image-generation-panel image-generation-disabled">
-      <div><span className="label">静态生图 · 默认关闭</span><strong>启用后仍只在你点击并确认时生成</strong></div>
+      <strong>静态生图</strong>
       <button className="secondary" onClick={() => void enable()}>启用静态生图</button>
     </div>
   );
@@ -178,14 +178,14 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
   return (
     <div className="image-generation-panel">
       <div className="image-generation-heading">
-        <div><span className="label">STATIC IMAGE GENERATION</span><strong>候选区（非正式图片）</strong></div>
-        <div><small>候选必须手动选择后才进入正式目录</small><button className="ghost" disabled={!prompt.trim()} onClick={() => void copyPrompt()}>复制提示词</button></div>
+        <strong>候选图片</strong>
+        <button className="ghost" disabled={!prompt.trim()} onClick={() => void copyPrompt()}>复制提示词</button>
       </div>
 
-      {providers.length === 0 && <div className="image-provider-empty"><div><strong>尚未配置图片生成服务</strong><small>你仍可导入图片或复制提示词；配置后可在当前位置直接生成。</small></div>{onConfigure && <button className="secondary" onClick={onConfigure}>前往全局设置</button>}</div>}
+      {providers.length === 0 && <div className="image-provider-empty"><strong>尚未配置图片服务</strong>{onConfigure && <button className="secondary" onClick={onConfigure}>打开设置</button>}</div>}
 
       {providers.length > 0 && <div className="generation-controls">
-        <label>Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.displayName} · {provider.defaultModel}</option>)}</select></label>
+        <label>服务<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.displayName} · {provider.defaultModel}</option>)}</select></label>
         <label>尺寸<select value={options.size} onChange={(event) => setOptions({ ...options, size: event.target.value as ImageOptions["size"] })}><option value="1024x1024">方形 1024</option><option value="1024x1536">竖版 2:3</option><option value="1536x1024">横版 3:2</option></select></label>
         <label>质量<select value={options.quality} onChange={(event) => setOptions({ ...options, quality: event.target.value })}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
         <label>数量<select value={options.count} onChange={(event) => setOptions({ ...options, count: Number(event.target.value) })}>{[1, 2, 3, 4].map((count) => <option value={count} key={count}>{count} 张</option>)}</select></label>
@@ -196,8 +196,8 @@ export function ImageGenerationPanel({ projectPath, targetType, targetId, prompt
 
       {jobs.length > 0 && <div className="image-job-list">{jobs.slice(0, 4).map((job) => <div className={`image-job ${job.status}`} key={job.id}><span>{statusLabels[job.status]}</span><small>{job.model || providers.find((item) => item.id === job.provider)?.defaultModel}</small>{job.error?.message && <em>{job.error.message}</em>}{!terminalImageStatuses.has(job.status) && <button className="danger-text" onClick={() => void api.imageCancel(projectPath, job.id).then(async () => { window.dispatchEvent(new Event("workbench:image-jobs-updated")); await refresh(); }).catch(onError)}>取消</button>}{["failed", "interrupted", "cancelled"].includes(job.status) && <button className="ghost" disabled={hasActiveJob} onClick={() => void retry(job)}>重试</button>}</div>)}</div>}
 
-      {candidates.length > 0 && <div className="candidate-grid">{candidates.map(({ result }) => <article className={`candidate-card ${result.selectionState}`} key={result.id}><CandidateImage projectPath={projectPath} result={result} /><div><strong>{result.selectionState === "selected" ? "已选为正式图片" : result.selectionState === "available" ? "候选图片" : result.selectionState === "rejected" ? "已拒绝" : "已归档"}</strong><small>候选文件 · 不会自动使用</small></div><div className="card-actions">{result.selectionState === "available" && <><button className="primary" onClick={() => void select(result)}>{confirmingSelectionId === result.id ? "再次点击，写入正式目录" : "选为正式"}</button><button className="ghost" onClick={() => void updateState(result, "rejected")}>拒绝</button></>}{result.selectionState === "rejected" && <button className="ghost" onClick={() => void updateState(result, "archived")}>归档</button>}{result.selectionState !== "selected" && <button className="danger-text" onClick={() => void updateState(result, "deleted")}>删除</button>}</div></article>)}</div>}
-      {providers.length > 0 && jobs.length === 0 && <p className="candidate-empty">尚无候选。填写上方提示词后，由你确认参数并发起一次生成。</p>}
+      {candidates.length > 0 && <div className="candidate-grid">{candidates.map(({ result }) => <article className={`candidate-card ${result.selectionState}`} key={result.id}><CandidateImage projectPath={projectPath} result={result} /><div><strong>{result.selectionState === "selected" ? "已选为正式图片" : result.selectionState === "available" ? "候选图片" : result.selectionState === "rejected" ? "已拒绝" : "已归档"}</strong></div><div className="card-actions">{result.selectionState === "available" && <><button className="primary" onClick={() => void select(result)}>{confirmingSelectionId === result.id ? "再次点击，写入正式目录" : "选为正式"}</button><button className="ghost" onClick={() => void updateState(result, "rejected")}>拒绝</button></>}{result.selectionState === "rejected" && <button className="ghost" onClick={() => void updateState(result, "archived")}>归档</button>}{result.selectionState !== "selected" && <button className="danger-text" onClick={() => void updateState(result, "deleted")}>删除</button>}</div></article>)}</div>}
+      {providers.length > 0 && jobs.length === 0 && <p className="candidate-empty">暂无候选</p>}
     </div>
   );
 }

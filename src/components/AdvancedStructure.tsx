@@ -134,8 +134,8 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
     return (
       <section className="advanced-structure-gate">
         <GitBranch size={22} />
-        <div><strong>高级作品结构</strong><p>按季或项目查看故事线、伏笔、人物弧光及计划与事实层偏差。</p></div>
-        <button className="secondary" onClick={() => void enable()}>启用高级结构</button>
+        <strong>故事结构</strong>
+        <button className="secondary" onClick={() => void enable()}>启用故事结构</button>
       </section>
     );
   }
@@ -143,7 +143,18 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
   return (
     <section className="advanced-structure">
       <div className="section-heading inline structure-toolbar">
-        <div><span className="label">高级作品结构</span><h3>{graph.units.length} 个内容节点 · {graph.elements.length} 条故事线</h3></div>
+        <div><h3>故事结构</h3><small>{graph.units.length} 个内容节点 · {graph.elements.length} 个故事元素</small></div>
+        {graph.elements.length > 0 && <button className="secondary" onClick={() => void createElement()}><Plus size={14} />添加故事元素</button>}
+      </div>
+
+      <div className="structure-view-tabs">
+        <button className={view === "timeline" ? "active" : ""} onClick={() => setView("timeline")}><ListTree size={14} />时间轴</button>
+        <button className={view === "graph" ? "active" : ""} onClick={() => setView("graph")}><GitBranch size={14} />关系图</button>
+        <button className={view === "episodes" ? "active" : ""} onClick={() => setView("episodes")}><Table2 size={14} />结构表</button>
+      </div>
+
+      <details className="structure-options">
+        <summary>筛选与视图</summary>
         <div className="structure-actions">
           <select value={focus} aria-label="聚焦模式" onChange={(event) => setFocus(event.target.value as FocusMode)}>
             <option value="all">全部</option><option value="character">人物线</option><option value="foreshadow">伏笔</option><option value="unreturned">未回收伏笔</option><option value="affected">受影响内容</option><option value="inconsistent">计划 / 事实不一致</option>
@@ -153,15 +164,8 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
           </select>
           <button className="ghost" title="保存当前筛选" onClick={() => void saveLayout()}><Save size={13} />保存视图</button>
           <button className="ghost" title="重置当前视图" onClick={() => void resetLayout()}><RotateCcw size={13} />重置</button>
-          <button className="secondary" onClick={() => void createElement()}><Plus size={14} />故事元素</button>
         </div>
-      </div>
-
-      <div className="structure-view-tabs">
-        <button className={view === "timeline" ? "active" : ""} onClick={() => setView("timeline")}><ListTree size={14} />时间轴</button>
-        <button className={view === "graph" ? "active" : ""} onClick={() => setView("graph")}><GitBranch size={14} />关系图</button>
-        <button className={view === "episodes" ? "active" : ""} onClick={() => setView("episodes")}><Table2 size={14} />剧集表</button>
-      </div>
+      </details>
 
       {issues.length > 0 && (
         <div className="structure-issues">
@@ -169,14 +173,14 @@ export function AdvancedStructure({ project, state, currentUnit, onMutate, onMut
         </div>
       )}
 
-      {view === "timeline" && <StructureTimeline elements={visibleElements} units={visibleUnits} state={state} onMutate={onMutate} onChoose={chooseElement} />}
+      {view === "timeline" && <StructureTimeline elements={visibleElements} units={visibleUnits} state={state} onMutate={onMutate} onChoose={chooseElement} onCreate={createElement} />}
       {view === "graph" && <StructureGraphView elements={visibleElements} units={visibleUnits} state={state} relations={graph.relations} truncated={graph.truncated} onChoose={chooseElement} />}
       {view === "episodes" && <EpisodeStructureTable units={visibleUnits} elements={visibleElements} state={state} onMutate={onMutate} />}
     </section>
   );
 }
 
-function StructureTimeline({ elements, units, state, onMutate, onChoose }: { elements: StoryElementRow[]; units: ContentUnitRow[]; state: ProjectState; onMutate: Props["onMutate"]; onChoose: (element: StoryElementRow) => void }) {
+function StructureTimeline({ elements, units, state, onMutate, onChoose, onCreate }: { elements: StoryElementRow[]; units: ContentUnitRow[]; state: ProjectState; onMutate: Props["onMutate"]; onChoose: (element: StoryElementRow) => void; onCreate: () => Promise<void> }) {
   const dialog = useAppDialog();
   const addOccurrence = async (element: StoryElementRow, unit: ContentUnitRow) => {
     const options = occurrenceOptions[element.type];
@@ -194,7 +198,7 @@ function StructureTimeline({ elements, units, state, onMutate, onChoose }: { ele
           return <td key={unit.id}>{items.map((item) => <span className="occurrence-chip" title={item.description} key={item.id}>{item.occurrence_type}</span>)}<button className="matrix-add" title="添加节点" onClick={() => void addOccurrence(element, unit)}>＋</button></td>;
         })}</tr>)}
       </tbody></table>
-      {elements.length === 0 && <div className="panel-empty">当前筛选下没有故事元素。</div>}
+      {elements.length === 0 && <div className="panel-empty structure-empty"><span>还没有故事元素。</span><button className="primary" onClick={() => void onCreate()}>添加第一个故事元素</button></div>}
     </div>
   );
 }

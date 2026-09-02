@@ -84,6 +84,7 @@ export interface ImageJob {
   provider: string;
   model: string;
   prompt: string;
+  sourcePrompt?: string;
   promptRevision: number;
   referenceImages: string[];
   options: ImageOptions;
